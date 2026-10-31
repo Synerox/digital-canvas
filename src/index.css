@@ -1,0 +1,89 @@
+:root {
+  --bg: #f4f4f2;
+  --panel: #ffffff;
+  --line: #dddcd6;
+  --ink: #1d1d1b;
+  --muted: #6d6b64;
+  --accent: #d9480f;
+  font-family: 'Helvetica Neue', Helvetica, Arial, 'Noto Sans TC', sans-serif;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--bg);
+}
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; height: 100%; }
+button, select { font: inherit; }
+button {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 5px;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--ink);
+}
+button:hover:not(:disabled) { border-color: #b9b7ae; background: #fafaf7; }
+button:disabled { opacity: 0.5; cursor: default; }
+button.icon { border: none; background: none; padding: 0 6px; font-size: 16px; color: var(--muted); }
+select { border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; background: var(--panel); margin-left: 6px; }
+h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.error-text { color: #c92a2a; }
+
+.app { display: flex; flex-direction: column; height: 100%; }
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.brand { font-weight: 700; font-size: 15px; margin-right: 8px; }
+.spacer { flex: 1; }
+.status { font-size: 12px; }
+.top-select, .theme-select { font-size: 12px; color: var(--muted); }
+
+.main { flex: 1; display: grid; grid-template-columns: 220px 1fr 340px; min-height: 0; }
+.sidebar { border-right: 1px solid var(--line); background: var(--panel); padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
+.sidebar ul { list-style: none; margin: 0; padding: 0; }
+.tree ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 6px; }
+.tree-item { border: none; background: none; padding: 3px 6px; text-align: left; width: 100%; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-item.active { background: #fbe9e1; color: var(--accent); }
+.files li { display: flex; align-items: center; border-radius: 4px; }
+.files li.active { background: #f1f0eb; }
+.file-name { flex: 1; border: none; background: none; text-align: left; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.help p { margin: 0 0 8px; line-height: 1.45; }
+
+.center { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.center-head { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); min-height: 34px; }
+.breadcrumb button { border: none; background: none; padding: 2px 4px; color: var(--accent); }
+.breadcrumb button.current { color: var(--ink); font-weight: 600; cursor: default; }
+.breadcrumb .sep { color: var(--muted); margin: 0 2px; }
+.selection { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.canvas { position: relative; flex: 1; overflow: hidden; touch-action: none; user-select: none; }
+.canvas.empty { display: flex; align-items: center; justify-content: center; background: #fff; }
+.canvas svg { display: block; }
+.zoom-controls { position: absolute; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.zoom-controls button { width: 30px; height: 30px; padding: 0; font-size: 15px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.error-box { max-width: 520px; padding: 16px; border: 1px solid #f1c0c0; background: #fff5f5; border-radius: 6px; }
+.error-box p { white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+
+.log { position: absolute; left: 0; right: 0; bottom: 0; height: 40%; background: var(--panel); border-top: 1px solid var(--line); display: flex; flex-direction: column; box-shadow: 0 -2px 8px rgba(0,0,0,.05); }
+.log-head { display: flex; justify-content: space-between; align-items: center; padding: 4px 10px; border-bottom: 1px solid var(--line); }
+.log pre { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; font-size: 11px; }
+.log .error { padding: 6px 10px; color: #c92a2a; font-weight: 600; }
+
+.code-pane { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.code-pane h3 { padding: 10px 10px 4px; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.code { flex: 1; overflow: auto; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; line-height: 1.55; padding-bottom: 20px; }
+.code.empty { padding: 10px; font-family: inherit; }
+.code-line { display: flex; cursor: pointer; white-space: pre; }
+.code-line:hover { background: #f6f5f1; }
+.code-line.marked { background: #fde3d6; }
+.code-line .ln { width: 38px; flex: none; text-align: right; padding-right: 10px; color: #aaa69b; }
+
+.drop-overlay { position: fixed; inset: 0; background: rgba(217,72,15,.08); border: 3px dashed var(--accent); display: flex; align-items: center; justify-content: center; font-size: 18px; color: var(--accent); pointer-events: none; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; z-index: 10; }
+.modal { background: var(--panel); border-radius: 8px; padding: 14px 16px; width: min(760px, 92vw); max-height: 90vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.modal-head { display: flex; justify-content: space-between; align-items: center; }
+.modal .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.modal .radio { display: flex; gap: 4px; align-items: center; margin-right: 12px; }
+.preview { border: 1px solid var(--line); border-radius: 6px; min-height: 160px; max-height: 50vh; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 8px; }
+.preview img { max-width: 100%; height: auto; }
+.modal textarea { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.modal p { margin: 0; }

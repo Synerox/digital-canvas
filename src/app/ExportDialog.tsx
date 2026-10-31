@@ -1,0 +1,96 @@
+import { useEffect, useState } from 'react';
+import type { LayoutResult } from '../layout/elk-layout';
+import { downloadBlob, exportSvg, svgToPng } from '../render/export';
+import { THEMES, type ThemeName } from '../render/theme';
+
+interface Props {
+  layout: LayoutResult;
+  initialTheme: ThemeName;
+  name: string;
+  onClose(): void;
+}
+
+export function ExportDialog({ layout, initialTheme, name, onClose }: Props) {
+  const [themeName, setThemeName] = useState<ThemeName>(initialTheme);
+  const [pngUrl, setPngUrl] = useState<string>();
+  const [message, setMessage] = useState<string>();
+  const theme = THEMES[themeName];
+  const svg = exportSvg(layout, theme);
+
+  useEffect(() => {
+    let url: string | undefined;
+    let cancelled = false;
+    svgToPng(svg, layout.width, layout.height, 2)
+      .then((b) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(b);
+        setPngUrl(url);
+      })
+      .catch((e) => setMessage(String(e)));
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [svg, layout.width, layout.height]);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(svg);
+      setMessage('SVG markup copied to the clipboard.');
+    } catch {
+      setMessage('The browser blocked clipboard access. Select the code below and copy it manually.');
+    }
+  };
+
+  const copyPng = async () => {
+    try {
+      const blob = await svgToPng(svg, layout.width, layout.height, 2);
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      setMessage('PNG image copied. Paste it into Word, PowerPoint or Google Slides.');
+    } catch {
+      setMessage('The browser blocked copying images. Right-click the preview and choose "Copy image" or "Save image as".');
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>Export {name}</b>
+          <button className="icon" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <div className="row">
+          {(Object.keys(THEMES) as ThemeName[]).map((t) => (
+            <label key={t} className="radio">
+              <input type="radio" checked={themeName === t} onChange={() => setThemeName(t)} /> {THEMES[t].label}
+            </label>
+          ))}
+        </div>
+        <div className="preview" style={{ background: theme.background }}>
+          {pngUrl ? <img src={pngUrl} alt={`${name} diagram`} /> : <span className="muted">Rendering…</span>}
+        </div>
+        <div className="row">
+          <button onClick={copyPng}>Copy PNG</button>
+          <button onClick={copy}>Copy SVG</button>
+          <button onClick={() => downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), `${name}.svg`)}>Download SVG</button>
+          <button
+            onClick={async () => downloadBlob(await svgToPng(svg, layout.width, layout.height, 3), `${name}.png`)}
+          >
+            Download PNG
+          </button>
+        </div>
+        <p className="muted small">
+          Inside the claude.ai preview, downloads may be blocked; use Copy, or right-click the preview image to save it.
+          PDF export comes in a later phase.
+        </p>
+        {message && <p className="small">{message}</p>}
+        <details>
+          <summary className="small">SVG code</summary>
+          <textarea readOnly value={svg} rows={6} />
+        </details>
+      </div>
+    </div>
+  );
+}
