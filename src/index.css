@@ -87,3 +87,5 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .preview img { max-width: 100%; height: auto; }
 .modal textarea { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .modal p { margin: 0; }
+.rules li { margin: 2px 0; }
+.rules label { display: flex; gap: 6px; align-items: center; cursor: pointer; }

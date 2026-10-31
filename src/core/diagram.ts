@@ -16,6 +16,7 @@ import {
   formatConst,
   sliceLabel,
 } from './ir';
+import { ARITHMETIC, DEFAULT_RULES, type RuleId, applyRules } from './rules';
 
 export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'const' | 'join';
 export type Side = 'WEST' | 'EAST' | 'NORTH' | 'SOUTH';
@@ -45,6 +46,10 @@ export interface DNode {
   instanceName?: string;
   ports: DPort[];
   src: SrcRange[];
+  /** Semantic transform that produced this node, if any. */
+  rule?: string;
+  /** Drawing hints from semantic transforms (e.g. inverted inputs). */
+  attrs?: Record<string, string | number | boolean>;
 }
 
 export interface DEndpoint {
@@ -122,6 +127,8 @@ const CELL_SYMBOL: Record<string, string> = {
   $dlatch: 'LATCH',
   $mem: 'MEM',
   $mem_v2: 'MEM',
+  'dc:decoder': 'DEC',
+  'dc:and': '&',
 };
 
 export function cellSymbol(type: string): string {
@@ -132,7 +139,7 @@ export function cellSymbol(type: string): string {
 const PORT_ORDER = ['A', 'B', 'C', 'D', 'S', 'EN', 'CLK', 'ARST', 'SRST', 'Y', 'Q'];
 
 function sortPorts(type: string, names: string[]): string[] {
-  if (!type.startsWith('$')) return names;
+  if (!type.startsWith('$') && !type.startsWith('dc:')) return names;
   return [...names].sort((a, b) => {
     const ia = PORT_ORDER.indexOf(a);
     const ib = PORT_ORDER.indexOf(b);
@@ -175,14 +182,19 @@ function nameBits(nets: IRNet[], bits: Bit[]): { name: string; full: boolean } |
   return undefined;
 }
 
-export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
-  const m: IRModule | undefined = design.modules[moduleName];
-  if (!m) return { module: moduleName, nodes: [], edges: [] };
+export function buildDiagram(
+  design: IRDesign,
+  moduleName: string,
+  rules: ReadonlySet<RuleId> = DEFAULT_RULES,
+): Diagram {
+  const raw: IRModule | undefined = design.modules[moduleName];
+  if (!raw) return { module: moduleName, nodes: [], edges: [] };
+  const m = applyRules(raw, rules);
 
   const nodes: DNode[] = [];
   const edges: DEdge[] = [];
   const drivers = new Map<number, Driver>();
-  const sinks: { node: string; port: string; bits: Bit[] }[] = [];
+  const sinks: { node: string; port: string; bits: Bit[]; cellType?: string }[] = [];
 
   // Module ports become I/O pins. Inputs drive, outputs sink.
   for (const p of m.ports) {
@@ -230,7 +242,7 @@ export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
           if (typeof b === 'number' && !drivers.has(b)) drivers.set(b, { node: id, port: port.id, index: i, width: bits.length });
         });
       } else {
-        sinks.push({ node: id, port: port.id, bits });
+        sinks.push({ node: id, port: port.id, bits, cellType: c.type });
       }
     }
     nodes.push(
@@ -253,6 +265,8 @@ export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
             cellType: c.type,
             ports,
             src: c.src,
+            rule: c.rule,
+            attrs: c.attrs,
           },
     );
   }
@@ -285,7 +299,7 @@ export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
     return runs;
   };
 
-  const connectRun = (r: Run, target: DEndpoint, fullSink: boolean) => {
+  const connectRun = (r: Run, target: DEndpoint, fullSink: boolean, note?: string) => {
     if (r.kind === 'const') {
       const cid = `const:${target.port}[${r.lo}]`;
       const cport: DPort = { id: `${cid}.out`, name: 'out', dir: 'out', side: 'EAST', width: r.bits.length };
@@ -309,15 +323,35 @@ export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
       target,
       width: len,
       fullSource,
-      label: fullSource && fullSink ? undefined : named?.name,
+      label: note ? [fullSource ? undefined : named?.name, note].filter(Boolean).join(' ') : fullSource && fullSink ? undefined : named?.name,
       netName: named?.name,
     });
   };
 
   for (const s of sinks) {
-    const runs = runsOf(s.bits);
+    let runs = runsOf(s.bits);
+    let zeroExtended = false;
+    const arithmetic = s.cellType !== undefined && ARITHMETIC.has(s.cellType);
+    if (arithmetic && runs.length > 1 && rules.has('zero-extend')) {
+      // {2'b00, x}: high-order zero padding is just how Verilog widens operands.
+      const last = runs[runs.length - 1];
+      if (last.kind === 'const' && last.bits.every((b) => b === '0') && runs.some((r) => r.kind === 'net')) {
+        runs = runs.slice(0, -1);
+        zeroExtended = true;
+      }
+    }
+    if (arithmetic && rules.has('scale') && runs.length === 2 && runs[0].kind === 'const' && runs[1].kind === 'net') {
+      // {x, 2'b00}: low-order zeros multiply by a power of two.
+      const k = runs[0].bits.length;
+      if (runs[0].bits.every((b) => b === '0') && k < 31) {
+        connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`);
+        continue;
+      }
+    }
     if (runs.length <= 1) {
-      for (const r of runs) connectRun(r, { node: s.node, port: s.port }, r.lo === 0 && r.bits.length === s.bits.length);
+      for (const r of runs) {
+        connectRun(r, { node: s.node, port: s.port }, r.lo === 0 && (zeroExtended || r.bits.length === s.bits.length));
+      }
       continue;
     }
     // Several pieces feed one port: draw a concatenation bar, MSB on top.

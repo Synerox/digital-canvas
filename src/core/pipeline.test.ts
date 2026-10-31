@@ -49,7 +49,7 @@ describe('auction demo pipeline', () => {
     expect(budgetEdges.every((e) => e.width === 4 && e.fullSource && !e.label)).toBe(true);
 
     // Stable IDs for anonymous cells come from the source expression.
-    const sb = buildDiagram(design, 'score_calc');
+    const sb = buildDiagram(design, 'score_calc', new Set());
     const add = sb.nodes.find((n) => n.cellType === '$add');
     expect(add?.id).toBe('cell:$add{{2\'b00, max_bid} + {bonus, 2\'b00}}');
     // Constant padding shows up as constant nodes.
@@ -61,5 +61,40 @@ describe('auction demo pipeline', () => {
     const inputs = layout.nodes.filter((n) => n.kind === 'input');
     const outputs = layout.nodes.filter((n) => n.kind === 'output');
     expect(Math.max(...inputs.map((n) => n.x))).toBeLessThan(Math.min(...outputs.map((n) => n.x)));
+  }, 60_000);
+});
+
+describe('semantic transforms', () => {
+  it('rewrites decoders, zero MUXes and zero padding', async () => {
+    const json = await elaborate({ [AUCTION_FILE]: AUCTION_SOURCE });
+    const design = buildDesign(json, { [AUCTION_FILE]: AUCTION_SOURCE });
+
+    // 2'd1 << winner -> decoder; any_valid ? dec : 0 -> AND
+    const rd = buildDiagram(design, 'result_decode');
+    const dec = rd.nodes.find((n) => n.cellType === 'dc:decoder');
+    expect(dec?.attrs).toEqual({ inputs: 1, outputs: 2 });
+    expect(rd.nodes.some((n) => n.cellType === '$shl')).toBe(false);
+    const and = rd.nodes.find((n) => n.cellType === 'dc:and');
+    expect(and?.attrs?.invertB).toBe(false);
+    expect(rd.nodes.some((n) => n.cellType === '$mux')).toBe(false);
+    // The rewritten cell keeps the stable ID of the cell it replaced.
+    const plain = buildDiagram(design, 'result_decode', new Set());
+    expect(plain.nodes.map((n) => n.id)).toContain(dec!.id);
+
+    // {2'b00, max_bid} + {bonus, 2'b00}: no concatenation bars, a x4 label instead.
+    const sc = buildDiagram(design, 'score_calc');
+    expect(sc.nodes.some((n) => n.kind === 'join' || n.kind === 'const')).toBe(false);
+    expect(sc.edges.find((e) => e.source.node === 'in:bonus')?.label).toBe('×4');
+    expect(sc.edges.find((e) => e.source.node === 'in:max_bid')?.label).toBeUndefined();
+    const raw = buildDiagram(design, 'score_calc', new Set());
+    expect(raw.nodes.filter((n) => n.kind === 'join')).toHaveLength(2);
+  }, 60_000);
+
+  it('draws an inverted enable when the MUX passes data on select = 0', async () => {
+    const src = 'module m(input [3:0] a, input s, output [3:0] y); assign y = s ? 4\'d0 : a; endmodule';
+    const json = await elaborate({ 'm.v': src });
+    const d = buildDiagram(buildDesign(json, { 'm.v': src }), 'm');
+    const and = d.nodes.find((n) => n.cellType === 'dc:and');
+    expect(and?.attrs?.invertB).toBe(true);
   }, 60_000);
 });

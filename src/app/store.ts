@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { buildDiagram } from '../core/diagram';
+import { DEFAULT_RULES, type RuleId } from '../core/rules';
 import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy } from '../core/ir';
 import type { YosysDesign } from '../core/yosys-json';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
@@ -33,6 +34,7 @@ interface State {
   codeRanges: SrcRange[];
   codeFile?: string;
   theme: ThemeName;
+  rules: ReadonlySet<RuleId>;
   elapsedMs?: number;
 
   setFiles(files: Record<string, string>, replace: boolean): Promise<void>;
@@ -45,6 +47,7 @@ interface State {
   selectLine(file: string, line: number): void;
   setCodeFile(file: string): void;
   setTheme(t: ThemeName): void;
+  toggleRule(id: RuleId): Promise<void>;
   setTop(top: string | undefined): Promise<void>;
 }
 
@@ -63,6 +66,7 @@ export const useStore = create<State>((set, get) => ({
   highlighted: new Set(),
   codeRanges: [],
   theme: 'report',
+  rules: DEFAULT_RULES,
 
   async setFiles(files, replace) {
     set({ files: replace ? files : { ...get().files, ...files } });
@@ -122,13 +126,13 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async openPath(path) {
-    const { design, theme } = get();
+    const { design, theme, rules } = get();
     if (!design || path.length === 0) return;
     const module = path[path.length - 1].module;
     set({ status: 'layout', path, selected: undefined, highlighted: new Set(), codeRanges: [] });
     let layout = layoutCache.get(module);
     if (!layout) {
-      const diagram = buildDiagram(design, module);
+      const diagram = buildDiagram(design, module, rules);
       layout = await layoutDiagram(diagram, canvasMeasure(THEMES[theme].font));
       layoutCache.set(module, layout);
     }
@@ -167,5 +171,14 @@ export const useStore = create<State>((set, get) => ({
 
   setTheme(t) {
     set({ theme: t });
+  },
+
+  async toggleRule(id) {
+    const rules = new Set(get().rules);
+    if (rules.has(id)) rules.delete(id);
+    else rules.add(id);
+    set({ rules });
+    layoutCache.clear();
+    await get().openPath(get().path);
   },
 }));

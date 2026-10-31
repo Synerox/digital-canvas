@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { HierarchyNode } from '../core/ir';
+import { RULES } from '../core/rules';
 import { type PathEntry, useStore } from './store';
 
 export function HierarchyTree() {
@@ -152,5 +153,21 @@ export function TopSelector() {
         ))}
       </select>
     </label>
+  );
+}
+
+export function RulePanel() {
+  const rules = useStore((s) => s.rules);
+  const toggleRule = useStore((s) => s.toggleRule);
+  return (
+    <ul className="rules">
+      {RULES.map((r) => (
+        <li key={r.id}>
+          <label title={r.description}>
+            <input type="checkbox" checked={rules.has(r.id)} onChange={() => toggleRule(r.id)} /> {r.title}
+          </label>
+        </li>
+      ))}
+    </ul>
   );
 }

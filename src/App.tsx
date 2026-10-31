@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Canvas } from './app/Canvas';
 import { ExportDialog } from './app/ExportDialog';
-import { Breadcrumb, CodePanel, FileList, HierarchyTree, LogPanel, TopSelector } from './app/Panels';
+import { Breadcrumb, CodePanel, FileList, HierarchyTree, LogPanel, RulePanel, TopSelector } from './app/Panels';
 import { useStore } from './app/store';
 import { THEMES, type ThemeName } from './render/theme';
 
@@ -127,6 +127,10 @@ export default function App() {
           <section>
             <h3>Hierarchy</h3>
             <HierarchyTree />
+          </section>
+          <section>
+            <h3>Drawing rules</h3>
+            <RulePanel />
           </section>
           <section className="help small muted">
             <p>Double-click a block to open the sub-module. Click a symbol to find its Verilog line; click a code line to find its symbols.</p>

@@ -44,6 +44,10 @@ export interface IRCell {
   directions: Record<string, YosysDirection>;
   connections: Record<string, Bit[]>;
   src: SrcRange[];
+  /** Set by semantic transforms: the rule that produced this cell. */
+  rule?: string;
+  /** Extra drawing hints set by semantic transforms. */
+  attrs?: Record<string, string | number | boolean>;
 }
 
 export interface IRNet {

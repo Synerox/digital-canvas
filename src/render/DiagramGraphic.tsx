@@ -143,12 +143,30 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     );
   }
 
-  const isAnd = t === '$and' || t === '$logic_and' || t === '$reduce_and';
+  if (t === 'dc:decoder') {
+    return (
+      <g>
+        <rect x={x} y={y} width={w} height={h} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />
+        {text('DEC', x + w / 2, y + h / 2 - 5, 11)}
+        <text x={x + w / 2} y={y + h / 2 + 10} fontSize={9} textAnchor="middle" fill={theme.muted} fontFamily={theme.font}>
+          {`${n.attrs?.inputs ?? '?'}→${n.attrs?.outputs ?? '?'}`}
+        </text>
+      </g>
+    );
+  }
+
+  const isAnd = t === '$and' || t === '$logic_and' || t === '$reduce_and' || t === 'dc:and';
   const isOr = t === '$or' || t === '$logic_or' || t === '$reduce_or' || t === '$reduce_bool';
   const isXor = t === '$xor' || t === '$xnor' || t === '$reduce_xor' || t === '$reduce_xnor';
   if (isAnd) {
     const d = `M${x},${y} H${x + w / 2} A${w / 2},${h / 2} 0 0 1 ${x + w / 2},${y + h} H${x} Z`;
-    return <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />;
+    const inverted = n.attrs?.invertB ? n.ports.find((q) => q.name === 'B') : undefined;
+    return (
+      <g>
+        <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
+        {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
+      </g>
+    );
   }
   if (isOr || isXor) {
     const curve = (dx: number) => `M${x + dx},${y} Q${x + dx + w * 0.25},${y + h / 2} ${x + dx},${y + h}`;
