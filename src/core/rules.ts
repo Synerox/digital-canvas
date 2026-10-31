@@ -67,6 +67,8 @@ function rewriteDecoder(c: IRCell, used: Set<number>): IRCell | undefined {
   const b = c.connections.B;
   const y = c.connections.Y;
   if (!a || !b || !y || !allConst(a) || constValue(a) !== 1n || allConst(b)) return undefined;
+  // A signed constant whose MSB is 1 sign-extends to all ones: that is a mask, not a decoder.
+  if (/1/.test(c.parameters.A_SIGNED ?? '') && a[a.length - 1] === '1') return undefined;
   // Only the outputs somebody reads (or the natural 2^n width) are drawn.
   let last = -1;
   y.forEach((bit, i) => {

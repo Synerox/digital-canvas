@@ -9,6 +9,8 @@ import type { Theme } from './theme';
 
 export interface GraphicProps {
   layout: LayoutResult;
+  /** Ports whose incoming wire already carries a label (filled in by DiagramGraphic). */
+  labeledPorts?: ReadonlySet<string>;
   theme: Theme;
   selected?: string;
   highlighted?: ReadonlySet<string>;
@@ -170,7 +172,9 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   }
   if (isOr || isXor) {
     const curve = (dx: number) => `M${x + dx},${y} Q${x + dx + w * 0.25},${y + h / 2} ${x + dx},${y + h}`;
-    const body = `M${x},${y} Q${x + w * 0.6},${y} ${x + w},${y + h / 2} Q${x + w * 0.6},${y + h} ${x},${y + h} Q${x + w * 0.25},${y + h / 2} ${x},${y} Z`;
+    const inverted = t === '$xnor' || t === '$reduce_xnor';
+    const bw = inverted ? w - 8 : w;
+    const body = `M${x},${y} Q${x + bw * 0.6},${y} ${x + bw},${y + h / 2} Q${x + bw * 0.6},${y + h} ${x},${y + h} Q${x + w * 0.25},${y + h / 2} ${x},${y} Z`;
     const edgeX = (py: number) => {
       const tt = py / h;
       return 2 * (1 - tt) * tt * (w * 0.25);
@@ -180,6 +184,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
         {stubs(n, edgeX, theme)}
         <path d={body} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
         {isXor && <path d={curve(-6)} fill="none" stroke={s.stroke} strokeWidth={s.width} />}
+        {inverted && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />}
       </g>
     );
   }
@@ -198,12 +203,12 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       </g>
     );
   }
-  if (/^\$(a|s)?dffe?$/.test(t) || t === '$dlatch') {
+  if (/dff|dlatch/.test(t)) {
     const clk = n.ports.find((q) => q.name === 'CLK');
     return (
       <g>
         <rect x={x} y={y} width={w} height={h} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />
-        {text(t === '$dlatch' ? 'L' : 'D  Q', x + w / 2, y + h / 2 - 3, 10)}
+        {text(t.includes('dlatch') ? 'L' : 'D  Q', x + w / 2, y + h / 2 - 3, 10)}
         {clk && (
           <polyline
             points={`${clk.x - 5},${y + h} ${clk.x},${y + h - 7} ${clk.x + 5},${y + h}`}
@@ -233,18 +238,20 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
   let body: JSX.Element;
   switch (n.kind) {
     case 'input':
-    case 'output': {
+    case 'output':
+    case 'inout': {
       const tip = 8;
+      const left = n.kind === 'inout' ? tip : 0;
       body = (
         <g>
           <polygon
-            points={`${x},${y} ${x + w - tip},${y} ${x + w},${y + h / 2} ${x + w - tip},${y + h} ${x},${y + h}`}
+            points={`${x + left},${y} ${x + w - tip},${y} ${x + w},${y + h / 2} ${x + w - tip},${y + h} ${x + left},${y + h} ${x},${y + h / 2}`}
             fill={s.fill}
             stroke={s.stroke}
             strokeWidth={s.width}
             strokeLinejoin="round"
           />
-          <text x={x + 6} y={y + h / 2 + 4} fontSize={FONT.pin} fill={theme.ink} fontFamily={theme.font}>
+          <text x={x + 6 + left} y={y + h / 2 + 4} fontSize={FONT.pin} fill={theme.ink} fontFamily={theme.font}>
             {n.label}
           </text>
         </g>
@@ -273,7 +280,7 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
         <g>
           <rect x={x} y={y} width={w} height={h} fill={s.stroke} stroke={s.stroke} strokeWidth={1} />
           {n.ports
-            .filter((q) => q.side === 'WEST')
+            .filter((q) => q.side === 'WEST' && !p.labeledPorts?.has(q.id))
             .map((q) => (
               <text
                 key={q.id}
@@ -401,7 +408,8 @@ function Edges({ edges, theme }: { edges: LEdge[]; theme: Theme }) {
   );
 }
 
-export function DiagramGraphic(p: GraphicProps) {
+export function DiagramGraphic(props: GraphicProps) {
+  const p = { ...props, labeledPorts: new Set(props.layout.edges.filter((e) => e.label).map((e) => e.target.port)) };
   return (
     <g>
       <Edges edges={p.layout.edges} theme={p.theme} />

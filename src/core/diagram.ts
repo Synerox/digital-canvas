@@ -18,7 +18,7 @@ import {
 } from './ir';
 import { ARITHMETIC, DEFAULT_RULES, type RuleId, applyRules } from './rules';
 
-export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'const' | 'join';
+export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'inout' | 'const' | 'join';
 export type Side = 'WEST' | 'EAST' | 'NORTH' | 'SOUTH';
 
 export interface DPort {
@@ -149,8 +149,10 @@ function sortPorts(type: string, names: string[]): string[] {
 
 function portSide(cell: IRCell, port: string, dir: 'in' | 'out'): Side {
   if (dir === 'out') return 'EAST';
+  // Module instances (including $paramod ones, whose type also starts with '$') keep all inputs on the left.
+  if (cell.isInstance) return 'WEST';
   if ((cell.type === '$mux' || cell.type === '$pmux' || cell.type === '$bmux') && port === 'S') return 'SOUTH';
-  if (cell.type.startsWith('$') && (port === 'CLK' || port === 'EN' || port === 'ARST' || port === 'SRST')) return 'SOUTH';
+  if (/dff|dlatch/.test(cell.type) && ['CLK', 'EN', 'ARST', 'SRST'].includes(port)) return 'SOUTH';
   return 'WEST';
 }
 
@@ -159,6 +161,15 @@ interface Driver {
   port: string;
   index: number;
   width: number;
+  /** The driver port's full bit vector, used to name slices of it. */
+  bits: Bit[];
+}
+
+/** Name of the signal a driver port carries: a public net with exactly the same bits. */
+function driverNet(nets: IRNet[], bits: Bit[]): IRNet | undefined {
+  return nets.find(
+    (n) => !n.hidden && n.bits.length === bits.length && n.bits.every((b, i) => b === bits[i]),
+  );
 }
 
 /** Find a readable name for a run of bits: prefer a public net that contains them in order. */
@@ -193,56 +204,80 @@ export function buildDiagram(
 
   const nodes: DNode[] = [];
   const edges: DEdge[] = [];
+  /** First driver of each bit (cell outputs win over pins that can also drive, such as inouts). */
   const drivers = new Map<number, Driver>();
-  const sinks: { node: string; port: string; bits: Bit[]; cellType?: string }[] = [];
+  /** Further drivers of an already-driven bit (tristate buses, double assignments). */
+  const extraDrivers = new Map<number, Driver[]>();
+  /** Inout ports drive only bits nobody else drives. */
+  const fallbackDrivers: Driver[] = [];
+  interface Sink {
+    node: string;
+    port: string;
+    bits: Bit[];
+    cellType?: string;
+    /** For module output pins: declared range, so bar labels use the real indices. */
+    range?: { offset: number; upto: boolean };
+  }
+  const sinks: Sink[] = [];
 
-  // Module ports become I/O pins. Inputs drive, outputs sink.
+  const addDriver = (d: Driver, bit: number) => {
+    const first = drivers.get(bit);
+    if (!first) drivers.set(bit, d);
+    else if (first.port !== d.port) extraDrivers.set(bit, [...(extraDrivers.get(bit) ?? []), d]);
+  };
+
+  // Module ports become I/O pins. Inputs drive, outputs sink, inouts do both.
+  const pinNodes: DNode[] = [];
   for (const p of m.ports) {
-    const isIn = p.direction !== 'output';
-    const id = `${isIn ? 'in' : 'out'}:${p.name}`;
-    const portName = isIn ? 'out' : 'in';
-    const port: DPort = {
-      id: `${id}.${portName}`,
-      name: portName,
-      dir: isIn ? 'out' : 'in',
-      side: isIn ? 'EAST' : 'WEST',
-      width: p.bits.length,
-    };
-    nodes.push({ id, kind: isIn ? 'input' : 'output', label: p.name, ports: [port], src: [] });
-    if (isIn) {
+    const kind: NodeKind = p.direction === 'input' ? 'input' : p.direction === 'output' ? 'output' : 'inout';
+    const id = `${kind === 'input' ? 'in' : kind === 'output' ? 'out' : 'io'}:${p.name}`;
+    const ports: DPort[] = [];
+    if (kind !== 'output') {
+      const out: DPort = { id: `${id}.out`, name: 'out', dir: 'out', side: 'EAST', width: p.bits.length };
+      ports.push(out);
       p.bits.forEach((b, i) => {
-        if (typeof b === 'number') drivers.set(b, { node: id, port: port.id, index: i, width: p.bits.length });
+        if (typeof b !== 'number') return;
+        const d: Driver = { node: id, port: out.id, index: i, width: p.bits.length, bits: p.bits };
+        if (kind === 'input') addDriver(d, b);
+        else fallbackDrivers.push(d);
       });
-    } else {
-      sinks.push({ node: id, port: port.id, bits: p.bits });
     }
+    if (kind !== 'input') {
+      const inp: DPort = { id: `${id}.in`, name: 'in', dir: 'in', side: 'WEST', width: p.bits.length };
+      ports.push(inp);
+      sinks.push({ node: id, port: inp.id, bits: p.bits, range: { offset: p.offset, upto: p.upto } });
+    }
+    const net = m.nets.find((x) => x.name === p.name && !x.hidden);
+    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [] });
   }
-  // Port src comes from the matching net.
-  for (const n of nodes) {
-    const net = m.nets.find((x) => x.name === n.label && !x.hidden);
-    if (net) n.src = net.src;
-  }
+  nodes.push(...pinNodes);
 
   for (const c of m.cells) {
     const id = `cell:${c.id}`;
     const ports: DPort[] = [];
     for (const pname of sortPorts(c.type, Object.keys(c.connections))) {
-      const dir = c.directions[pname] === 'output' ? 'out' : 'in';
+      const direction = c.directions[pname];
+      const dir = direction === 'output' ? 'out' : 'in';
+      const bits = c.connections[pname];
       const port: DPort = {
         id: `${id}.${pname}`,
         name: pname,
         dir,
         side: portSide(c, pname, dir),
-        width: c.connections[pname].length,
+        width: bits.length,
       };
       ports.push(port);
-      const bits = c.connections[pname];
       if (dir === 'out') {
         bits.forEach((b, i) => {
-          if (typeof b === 'number' && !drivers.has(b)) drivers.set(b, { node: id, port: port.id, index: i, width: bits.length });
+          if (typeof b === 'number') addDriver({ node: id, port: port.id, index: i, width: bits.length, bits }, b);
         });
       } else {
         sinks.push({ node: id, port: port.id, bits, cellType: c.type });
+        if (direction === 'inout') {
+          bits.forEach((b, i) => {
+            if (typeof b === 'number') fallbackDrivers.push({ node: id, port: port.id, index: i, width: bits.length, bits });
+          });
+        }
       }
     }
     nodes.push(
@@ -271,24 +306,37 @@ export function buildDiagram(
     );
   }
 
+  // Inout pins and inout instance ports drive the bits that nothing else drives.
+  for (const d of fallbackDrivers) {
+    const b = d.bits[d.index];
+    if (typeof b === 'number' && !drivers.has(b)) drivers.set(b, d);
+  }
+
   // Regroup each sink's bits into runs: same driver port with consecutive indices, or constants.
   type Run =
     | { kind: 'const'; lo: number; bits: Bit[] }
     | { kind: 'net'; lo: number; bits: Bit[]; driver: Driver };
-  const runsOf = (bits: Bit[]): Run[] => {
+  const runsOf = (bits: Bit[], selfPort: string): Run[] => {
     const runs: Run[] = [];
+    const driverOf = (b: Bit) => {
+      if (typeof b !== 'number') return undefined;
+      const d = drivers.get(b);
+      return d && d.port !== selfPort ? d : undefined;
+    };
     let i = 0;
     while (i < bits.length) {
-      const b = bits[i];
-      const d = typeof b === 'number' ? drivers.get(b) : undefined;
+      const d = driverOf(bits[i]);
       let j = i + 1;
       if (!d) {
-        while (j < bits.length && (typeof bits[j] !== 'number' || !drivers.has(bits[j] as number))) j++;
-        runs.push({ kind: 'const', lo: i, bits: bits.slice(i, j).map((x) => (typeof x === 'number' ? 'x' : x)) as Bit[] });
+        while (j < bits.length && !driverOf(bits[j])) j++;
+        const piece = bits.slice(i, j);
+        // A pin that only drives itself (an unused inout) is not a constant.
+        if (!piece.every((b) => typeof b === 'number' && drivers.get(b)?.port === selfPort)) {
+          runs.push({ kind: 'const', lo: i, bits: piece.map((x) => (typeof x === 'number' ? 'x' : x)) as Bit[] });
+        }
       } else {
         while (j < bits.length) {
-          const nb = bits[j];
-          const nd = typeof nb === 'number' ? drivers.get(nb) : undefined;
+          const nd = driverOf(bits[j]);
           if (!nd || nd.port !== d.port || nd.index !== d.index + (j - i)) break;
           j++;
         }
@@ -297,6 +345,12 @@ export function buildDiagram(
       i = j;
     }
     return runs;
+  };
+
+  const runLabel = (d: Driver, len: number, bits: Bit[]): string | undefined => {
+    const net = driverNet(m.nets, d.bits);
+    if (net) return sliceLabel(net, d.index, d.index + len - 1);
+    return nameBits(m.nets, bits)?.name;
   };
 
   const connectRun = (r: Run, target: DEndpoint, fullSink: boolean, note?: string) => {
@@ -316,20 +370,31 @@ export function buildDiagram(
     const d = r.driver;
     const len = r.bits.length;
     const fullSource = d.index === 0 && len === d.width;
-    const named = nameBits(m.nets, r.bits);
+    const name = runLabel(d, len, r.bits);
     edges.push({
       id: `e${edges.length}`,
       source: { node: d.node, port: d.port },
       target,
       width: len,
       fullSource,
-      label: note ? [fullSource ? undefined : named?.name, note].filter(Boolean).join(' ') : fullSource && fullSink ? undefined : named?.name,
-      netName: named?.name,
+      label: note ? [fullSource ? undefined : name, note].filter(Boolean).join(' ') : fullSource && fullSink ? undefined : name,
+      netName: name,
     });
   };
 
+  const rangeName = (s: Sink, lo: number, hi: number): string => {
+    let a = hi;
+    let b = lo;
+    if (s.range) {
+      const n = s.bits.length;
+      a = s.range.upto ? s.range.offset + (n - 1 - hi) : s.range.offset + hi;
+      b = s.range.upto ? s.range.offset + (n - 1 - lo) : s.range.offset + lo;
+    }
+    return a === b ? `[${a}]` : `[${a}:${b}]`;
+  };
+
   for (const s of sinks) {
-    let runs = runsOf(s.bits);
+    let runs = runsOf(s.bits, s.port);
     let zeroExtended = false;
     const arithmetic = s.cellType !== undefined && ARITHMETIC.has(s.cellType);
     if (arithmetic && runs.length > 1 && rules.has('zero-extend')) {
@@ -345,33 +410,54 @@ export function buildDiagram(
       const k = runs[0].bits.length;
       if (runs[0].bits.every((b) => b === '0') && k < 31) {
         connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`);
-        continue;
+        runs = [];
       }
-    }
-    if (runs.length <= 1) {
+    } else if (runs.length <= 1) {
       for (const r of runs) {
         connectRun(r, { node: s.node, port: s.port }, r.lo === 0 && (zeroExtended || r.bits.length === s.bits.length));
       }
-      continue;
+    } else {
+      // Several pieces feed one port: draw a concatenation bar, MSB on top.
+      const jid = `join:${s.port}`;
+      const ordered = [...runs].reverse();
+      const ports: DPort[] = ordered.map((r) => {
+        const name = rangeName(s, r.lo, r.lo + r.bits.length - 1);
+        return { id: `${jid}.${name}`, name, dir: 'in', side: 'WEST', width: r.bits.length };
+      });
+      const out: DPort = { id: `${jid}.out`, name: 'out', dir: 'out', side: 'EAST', width: s.bits.length };
+      nodes.push({ id: jid, kind: 'join', label: '{ }', ports: [...ports, out], src: [] });
+      ordered.forEach((r, k) => connectRun(r, { node: jid, port: ports[k].id }, true));
+      edges.push({
+        id: `e${edges.length}`,
+        source: { node: jid, port: out.id },
+        target: { node: s.node, port: s.port },
+        width: s.bits.length,
+        fullSource: true,
+      });
     }
-    // Several pieces feed one port: draw a concatenation bar, MSB on top.
-    const jid = `join:${s.port}`;
-    const ordered = [...runs].reverse();
-    const ports: DPort[] = ordered.map((r) => {
-      const hi = r.lo + r.bits.length - 1;
-      const name = hi === r.lo ? `[${hi}]` : `[${hi}:${r.lo}]`;
-      return { id: `${jid}.${name}`, name, dir: 'in', side: 'WEST', width: r.bits.length };
-    });
-    const out: DPort = { id: `${jid}.out`, name: 'out', dir: 'out', side: 'EAST', width: s.bits.length };
-    nodes.push({ id: jid, kind: 'join', label: '{ }', ports: [...ports, out], src: [] });
-    ordered.forEach((r, k) => connectRun(r, { node: jid, port: ports[k].id }, true));
-    edges.push({
-      id: `e${edges.length}`,
-      source: { node: jid, port: out.id },
-      target: { node: s.node, port: s.port },
-      width: s.bits.length,
-      fullSource: true,
-    });
+
+    // Extra drivers of the same bits (tristate buses): one more edge per driver piece.
+    const extra = new Map<string, { d: Driver; count: number }>();
+    for (const b of s.bits) {
+      if (typeof b !== 'number') continue;
+      for (const d of extraDrivers.get(b) ?? []) {
+        if (d.port === s.port) continue;
+        const e = extra.get(d.port);
+        if (e) e.count++;
+        else extra.set(d.port, { d, count: 1 });
+      }
+    }
+    for (const { d, count } of extra.values()) {
+      edges.push({
+        id: `e${edges.length}`,
+        source: { node: d.node, port: d.port },
+        target: { node: s.node, port: s.port },
+        width: count,
+        fullSource: count === d.width,
+        label: count === d.width ? undefined : runLabel(d, count, d.bits),
+      });
+    }
   }
+
   return { module: moduleName, nodes, edges };
 }

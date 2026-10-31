@@ -43,6 +43,7 @@ export default function App() {
   const s = useStore();
   const fileInput = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
   // undefined = automatic: open when Yosys reports an error.
   const [showLog, setShowLog] = useState<boolean>();
   const [showExport, setShowExport] = useState(false);
@@ -69,15 +70,20 @@ export default function App() {
   return (
     <div
       className="app"
-      onDragOver={(e) => {
-        e.preventDefault();
+      onDragEnter={(e) => {
+        if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+        dragDepth.current++;
         setDragging(true);
       }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragging(false);
+      onDragOver={(e) => e.preventDefault()}
+      onDragLeave={() => {
+        // dragenter/dragleave fire for every child element; count them to know when the pointer left the window.
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragging(false);
       }}
       onDrop={async (e) => {
         e.preventDefault();
+        dragDepth.current = 0;
         setDragging(false);
         const files = await readFiles(e.dataTransfer.files);
         if (Object.keys(files).length) await s.setFiles(files, false);
@@ -149,6 +155,11 @@ export default function App() {
               </span>
             )}
           </div>
+          {s.layout && s.status === 'error' && (
+            <div className="error-banner">
+              <b>Yosys could not elaborate the current files.</b> {s.error} <span className="muted">The diagram below is from the last successful run.</span>
+            </div>
+          )}
           {s.layout ? (
             <Canvas
               layout={s.layout}

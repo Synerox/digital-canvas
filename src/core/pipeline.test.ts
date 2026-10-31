@@ -5,15 +5,15 @@ import { JSON_OUT, yosysArgs } from '../yosys/script';
 import { buildDesign, buildHierarchy, formatConst, parseSrc } from './ir';
 import { buildDiagram } from './diagram';
 import { layoutDiagram } from '../layout/elk-layout';
-import type { YosysDesign } from './yosys-json';
+import { type YosysDesign, parseYosysJson } from './yosys-json';
 
 async function elaborate(files: Record<string, string>): Promise<YosysDesign> {
-  const out = (await runYosys(yosysArgs(Object.keys(files)), files, {
+  const out = (await runYosys(yosysArgs(files), files, {
     stdout: () => {},
     stderr: () => {},
   })) as Record<string, string | Uint8Array>;
   const raw = out[JSON_OUT];
-  return JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
+  return parseYosysJson(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
 }
 
 describe('helpers', () => {

@@ -46,3 +46,16 @@ export interface YosysDesign {
   creator?: string;
   modules: Record<string, YosysModule>;
 }
+
+/**
+ * Parse `write_json` output. Yosys escapes each byte of a non-ASCII string
+ * (such as the file name 加法器.v) as a sign-extended escape (backslash, u, FFFFFF, byte),
+ * which JSON.parse would read as U+FFFF followed by text. Decode those bytes as UTF-8 first.
+ */
+export function parseYosysJson(text: string): YosysDesign {
+  const fixed = text.replace(/(?:\\uFFFFFF[0-9A-Fa-f]{2})+/g, (seq) => {
+    const bytes = [...seq.matchAll(/\\uFFFFFF([0-9A-Fa-f]{2})/g)].map((m) => parseInt(m[1], 16));
+    return JSON.stringify(new TextDecoder().decode(new Uint8Array(bytes))).slice(1, -1);
+  });
+  return JSON.parse(fixed) as YosysDesign;
+}

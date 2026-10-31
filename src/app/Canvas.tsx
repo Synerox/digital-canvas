@@ -45,6 +45,18 @@ export function Canvas({ layout, theme, selected, highlighted, onSelect, onOpen 
     fit();
   }, [fit]);
 
+  /** Zoom around the centre of the view, within the same limits as the wheel. */
+  const zoomBy = (f: number) => {
+    const el = wrap.current;
+    if (!el) return;
+    const mx = el.clientWidth / 2;
+    const my = el.clientHeight / 2;
+    setView((v) => {
+      const k = Math.min(8, Math.max(0.05, v.k * f));
+      return { k, x: mx - ((mx - v.x) * k) / v.k, y: my - ((my - v.y) * k) / v.k };
+    });
+  };
+
   useEffect(() => {
     const el = wrap.current;
     if (!el) return;
@@ -102,10 +114,10 @@ export function Canvas({ layout, theme, selected, highlighted, onSelect, onOpen 
         </g>
       </svg>
       <div className="zoom-controls" onPointerDown={(ev) => ev.stopPropagation()} onDoubleClick={(ev) => ev.stopPropagation()}>
-        <button onClick={() => setView((v) => ({ ...v, k: v.k * 1.25 }))} title="Zoom in">
+        <button onClick={() => zoomBy(1.25)} title="Zoom in">
           +
         </button>
-        <button onClick={() => setView((v) => ({ ...v, k: v.k / 1.25 }))} title="Zoom out">
+        <button onClick={() => zoomBy(1 / 1.25)} title="Zoom out">
           −
         </button>
         <button onClick={fit} title="Fit to view">

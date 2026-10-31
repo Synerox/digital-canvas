@@ -83,10 +83,10 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
   const south = n.ports.filter((p) => p.side === 'SOUTH');
   const ports: Record<string, Point> = {};
 
-  if (n.kind === 'input' || n.kind === 'output') {
-    const width = Math.ceil(measure(n.label, FONT.pin) + 22);
+  if (n.kind === 'input' || n.kind === 'output' || n.kind === 'inout') {
+    const width = Math.ceil(measure(n.label, FONT.pin) + (n.kind === 'inout' ? 30 : 22));
     const height = 20;
-    for (const p of n.ports) ports[p.id] = { x: n.kind === 'input' ? width : 0, y: height / 2 };
+    for (const p of n.ports) ports[p.id] = { x: p.side === 'EAST' ? width : 0, y: height / 2 };
     return { width, height, ports };
   }
 
@@ -120,9 +120,14 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
         wl + el + 40,
       ),
     );
+    const w2 = Math.ceil(width / 2) * 2;
     west.forEach((p, k) => (ports[p.id] = { x: 0, y: header + ROW / 2 + k * ROW }));
-    east.forEach((p, k) => (ports[p.id] = { x: width, y: header + ROW / 2 + k * ROW }));
-    return { width: Math.ceil(width / 2) * 2, height, ports };
+    east.forEach((p, k) => (ports[p.id] = { x: w2, y: header + ROW / 2 + k * ROW }));
+    // Instances normally use only WEST/EAST, but never leave a port without a position.
+    const north = n.ports.filter((p) => p.side === 'NORTH');
+    south.forEach((p, k) => (ports[p.id] = { x: (w2 * (k + 1)) / (south.length + 1), y: height }));
+    north.forEach((p, k) => (ports[p.id] = { x: (w2 * (k + 1)) / (north.length + 1), y: 0 }));
+    return { width: w2, height, ports };
   }
 
   // Primitive cell: compact operator box; ports on a 20px pitch centred vertically.
@@ -136,7 +141,12 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
   };
   place(west, 0);
   place(east, width);
-  south.forEach((p, k) => (ports[p.id] = { x: (width * (k + 1)) / (south.length + 1), y: height }));
+  south.forEach((p, k) => {
+    const x = (width * (k + 1)) / (south.length + 1);
+    // A MUX's bottom edge slopes up towards the output: put the select pin on the outline.
+    const inset = isMux ? (Math.min(10, height / 4) * x) / width : 0;
+    ports[p.id] = { x, y: height - inset };
+  });
   return { width, height, ports };
 }
 
@@ -147,26 +157,36 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
   const sized = new Map<string, Sized>();
   for (const n of d.nodes) sized.set(n.id, sizeNode(n, measure));
 
+  // ELK resolves node and port IDs in one namespace; give it opaque IDs so names like `a.out` cannot collide.
+  const elkNode = new Map<string, string>();
+  const elkPort = new Map<string, string>();
+  const nodeOfElk = new Map<string, string>();
+  d.nodes.forEach((n, i) => {
+    elkNode.set(n.id, `n${i}`);
+    nodeOfElk.set(`n${i}`, n.id);
+    n.ports.forEach((p) => elkPort.set(p.id, `p${elkPort.size}`));
+  });
+
   const children: ElkNode[] = d.nodes.map((n) => {
     const s = sized.get(n.id)!;
     const layoutOptions: Record<string, string> = { 'elk.portConstraints': 'FIXED_POS' };
     if (n.kind === 'input') layoutOptions['elk.layered.layering.layerConstraint'] = 'FIRST';
     if (n.kind === 'output') layoutOptions['elk.layered.layering.layerConstraint'] = 'LAST';
     const ports: ElkPort[] = n.ports.map((p) => ({
-      id: p.id,
+      id: elkPort.get(p.id)!,
       x: s.ports[p.id].x,
       y: s.ports[p.id].y,
       width: 0,
       height: 0,
       layoutOptions: { 'elk.port.side': p.side },
     }));
-    return { id: n.id, width: s.width, height: s.height, ports, layoutOptions };
+    return { id: elkNode.get(n.id)!, width: s.width, height: s.height, ports, layoutOptions };
   });
 
   const edges: ElkExtendedEdge[] = d.edges.map((e) => ({
     id: e.id,
-    sources: [e.source.port],
-    targets: [e.target.port],
+    sources: [elkPort.get(e.source.port)!],
+    targets: [elkPort.get(e.target.port)!],
     labels: e.label
       ? [
           {
@@ -194,7 +214,10 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
       'elk.layered.spacing.nodeNodeBetweenLayers': '48',
       'elk.layered.spacing.edgeNodeBetweenLayers': '20',
       'elk.layered.spacing.edgeEdgeBetweenLayers': '10',
-      'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+      // Network simplex gives straighter wires but is slow on large graphs (layout runs on the main thread).
+      'elk.layered.nodePlacement.strategy': d.nodes.length + d.edges.length <= 150 ? 'NETWORK_SIMPLEX' : 'BRANDES_KOEPF',
+      // Keep inputs in the first layer and outputs in the last even when the module has independent parts.
+      'elk.separateConnectedComponents': 'false',
       'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
       'elk.layered.edgeLabels.sideSelection': 'ALWAYS_UP',
     },
@@ -206,8 +229,9 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
 
   const byId = new Map(d.nodes.map((n) => [n.id, n]));
   const nodes: LNode[] = (out.children ?? []).map((c) => {
-    const n = byId.get(c.id)!;
-    const s = sized.get(c.id)!;
+    const id = nodeOfElk.get(c.id)!;
+    const n = byId.get(id)!;
+    const s = sized.get(id)!;
     const x = c.x ?? 0;
     const y = c.y ?? 0;
     return {
@@ -247,5 +271,6 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
     };
   });
 
-  return { module: d.module, width: out.width ?? 0, height: out.height ?? 0, nodes, edges: lEdges };
+  // An empty module still gets a small canvas, so export never produces a 0x0 image.
+  return { module: d.module, width: Math.max(out.width ?? 0, 48), height: Math.max(out.height ?? 0, 48), nodes, edges: lEdges };
 }

@@ -29,8 +29,8 @@ export async function svgToPng(svg: string, width: number, height: number, scale
       img.src = url;
     });
     const canvas = document.createElement('canvas');
-    canvas.width = Math.ceil(width * scale);
-    canvas.height = Math.ceil(height * scale);
+    canvas.width = Math.max(1, Math.ceil(width * scale));
+    canvas.height = Math.max(1, Math.ceil(height * scale));
     const ctx = canvas.getContext('2d')!;
     ctx.scale(scale, scale);
     ctx.drawImage(img, 0, 0, width, height);

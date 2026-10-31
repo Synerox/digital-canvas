@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { HierarchyNode } from '../core/ir';
 import { RULES } from '../core/rules';
-import { type PathEntry, useStore } from './store';
+import { type PathEntry, sameFile, useStore } from './store';
 
 export function HierarchyTree() {
   const hierarchy = useStore((s) => s.hierarchy);
@@ -85,8 +85,7 @@ export function CodePanel() {
     const set = new Set<number>();
     for (const r of ranges) {
       if (!codeFile) continue;
-      const same = r.file === codeFile || r.file.endsWith('/' + codeFile);
-      if (!same) continue;
+      if (!sameFile(r.file, codeFile)) continue;
       for (let l = r.startLine; l <= r.endLine; l++) set.add(l);
     }
     return set;
@@ -135,18 +134,17 @@ export function LogPanel({ onClose }: { onClose(): void }) {
 }
 
 export function TopSelector() {
+  const moduleNames = useStore((s) => s.moduleNames);
+  const topOverride = useStore((s) => s.topOverride);
   const design = useStore((s) => s.design);
   const setTop = useStore((s) => s.setTop);
-  if (!design) return null;
-  const names = Object.keys(design.modules).sort();
+  if (moduleNames.length === 0) return null;
   return (
     <label className="top-select">
       Top:
-      <select
-        value={design.top}
-        onChange={(e) => setTop(e.target.value)}
-      >
-        {names.map((n) => (
+      <select value={topOverride ?? ''} onChange={(e) => setTop(e.target.value || undefined)}>
+        <option value="">{`(automatic${!topOverride && design ? `: ${design.top}` : ''})`}</option>
+        {moduleNames.map((n) => (
           <option key={n} value={n}>
             {n}
           </option>
