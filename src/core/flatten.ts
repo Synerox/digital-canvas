@@ -1,7 +1,11 @@
 /**
  * Flatten a module: inline every sub-module instance (recursively) so the
  * whole circuit can be drawn on one sheet. Cells inside instance `u` get the
- * stable ID `u/<id>` and the name `u.<name>`; nets are renamed the same way.
+ * stable ID `u/<id>` and the name `u.<name>`; nets are renamed `u.<name>`.
+ *
+ * Yosys can give two ports of a child the same bits (`assign y = a;`) or
+ * constant bits (`assign y = 4'd5;`). The parent nets on such ports are then
+ * the same signal, so they are merged (aliased) after inlining.
  */
 import type { Bit, IRCell, IRDesign, IRModule, IRNet } from './ir';
 
@@ -18,12 +22,48 @@ function maxBit(m: IRModule): number {
   return max;
 }
 
+/** Count the cells a flattened module would have, without building it. */
+export function flatCellCount(design: IRDesign, name: string, depth = 0): number {
+  const m = design.modules[name];
+  if (!m) return 0;
+  let n = 0;
+  for (const c of m.cells) {
+    n += c.isInstance && design.modules[c.type] && depth < MAX_DEPTH ? flatCellCount(design, c.type, depth + 1) : 1;
+  }
+  return n;
+}
+
 export function flattenModule(design: IRDesign, name: string): IRModule {
   const top = design.modules[name];
   if (!top || !top.cells.some((c) => c.isInstance && design.modules[c.type])) return top;
   let next = maxBit(top) + 1;
   const cells: IRCell[] = [];
   const nets: IRNet[] = [...top.nets];
+
+  // Union-find over parent bits. Constants win as representatives, then top-level
+  // input bits, so a pin stays connected to the name the user sees.
+  const topInputs = new Set<number>();
+  for (const p of top.ports) if (p.direction !== 'output') for (const b of p.bits) if (typeof b === 'number') topInputs.add(b);
+  const alias = new Map<number, Bit>();
+  const resolve = (b: Bit): Bit => {
+    let x = b;
+    const seen: number[] = [];
+    while (typeof x === 'number' && alias.has(x)) {
+      seen.push(x);
+      x = alias.get(x)!;
+    }
+    for (const s of seen) alias.set(s, x);
+    return x;
+  };
+  const rank = (b: Bit) => (typeof b !== 'number' ? 2 : topInputs.has(b) ? 1 : 0);
+  const join = (a: Bit, b: Bit) => {
+    const ra = resolve(a);
+    const rb = resolve(b);
+    if (ra === rb) return;
+    if (typeof ra !== 'number' && typeof rb !== 'number') return; // two different constants: leave as is
+    const [keep, drop] = rank(ra) >= rank(rb) ? [ra, rb] : [rb, ra];
+    if (typeof drop === 'number') alias.set(drop, keep);
+  };
 
   const inline = (m: IRModule, map: (b: Bit) => Bit, prefix: string, depth: number) => {
     for (const c of m.cells) {
@@ -43,8 +83,18 @@ export function flattenModule(design: IRDesign, name: string): IRModule {
       for (const p of child.ports) {
         const outer = conn[p.name] ?? [];
         p.bits.forEach((b, i) => {
-          if (typeof b !== 'number' || local.has(b)) return;
           const o = outer[i];
+          if (typeof b !== 'number') {
+            // A constant on an output port drives the parent net with that constant.
+            if (typeof o === 'number' && p.direction !== 'input') join(o, b);
+            return;
+          }
+          const known = local.get(b);
+          if (known !== undefined) {
+            // The same child bit on two ports: the parent nets on both are one signal.
+            if (o !== undefined && (typeof o === 'number' || p.direction === 'input')) join(o, known);
+            return;
+          }
           // A constant tied to an output port cannot carry the signal; keep it internal.
           if (o !== undefined && (typeof o === 'number' || p.direction === 'input')) local.set(b, o);
         });
@@ -58,13 +108,26 @@ export function flattenModule(design: IRDesign, name: string): IRModule {
       const childPrefix = prefix ? `${prefix}/${c.name}` : c.name;
       const dotted = childPrefix.replace(/\//g, '.');
       for (const n of child.nets) {
-        nets.push({ ...n, name: `${dotted}.${n.name}`, hidden: true, bits: n.bits.map(childMap) });
+        nets.push({ ...n, name: `${dotted}.${n.name}`, bits: n.bits.map(childMap) });
       }
       inline(child, childMap, childPrefix, depth + 1);
     }
   };
   inline(top, (b) => b, '', 0);
-  return { ...top, cells, nets };
+
+  if (alias.size === 0) return { ...top, cells, nets };
+  const fix = (bits: Bit[]) => bits.map(resolve);
+  return {
+    ...top,
+    // Output pins follow the merge; input pins are representatives already.
+    ports: top.ports.map((p) => ({ ...p, bits: fix(p.bits) })),
+    cells: cells.map((c) => {
+      const connections: Record<string, Bit[]> = {};
+      for (const [p, bits] of Object.entries(c.connections)) connections[p] = fix(bits);
+      return { ...c, connections };
+    }),
+    nets: nets.map((n) => ({ ...n, bits: fix(n.bits) })),
+  };
 }
 
 /** The design with `name` flattened (other modules unchanged). */

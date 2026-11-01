@@ -2,7 +2,6 @@
  * Layout: Diagram -> ELK layered graph -> absolute positions.
  * Signals flow left to right; inputs sit in the first layer, outputs in the last.
  */
-import ELK from 'elkjs/lib/elk.bundled.js';
 import type { ElkExtendedEdge, ElkNode, ElkPort } from 'elkjs/lib/elk-api';
 import type { DEdge, DNode, Diagram, Side } from '../core/diagram';
 
@@ -150,10 +149,50 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
   return { width, height, ports };
 }
 
-let elkInstance: InstanceType<typeof ELK> | undefined;
+interface ElkLike {
+  layout(graph: ElkNode): Promise<ElkNode>;
+  terminateWorker?(): void;
+}
+
+let elkInstance: ElkLike | undefined;
+let elkFactory: (() => ElkLike) | undefined;
+/** Reject functions of layouts still running, so cancelLayouts() can end them. */
+const running = new Set<(e: Error) => void>();
+
+/** Thrown by layoutDiagram when cancelLayouts() stopped it. */
+export class LayoutCancelled extends Error {
+  constructor() {
+    super('Layout cancelled');
+  }
+}
+
+/**
+ * Use another ELK. The app passes a factory for an ELK that runs in a Web
+ * Worker, so a long layout does not freeze the page and can be stopped; tests
+ * keep the in-process default.
+ */
+export function setElkFactory(factory: () => ElkLike): void {
+  const elk = factory();
+  elkFactory = factory;
+  elkInstance = elk;
+}
+
+/**
+ * Stop every running layout (they reject with LayoutCancelled). Only a worker
+ * ELK can be stopped; with the in-process ELK this does nothing.
+ */
+export function cancelLayouts(): void {
+  if (running.size === 0 || !elkFactory || !elkInstance?.terminateWorker) return;
+  elkInstance.terminateWorker();
+  elkInstance = elkFactory();
+  const rejects = [...running];
+  running.clear();
+  for (const reject of rejects) reject(new LayoutCancelled());
+}
 
 export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMeasure): Promise<LayoutResult> {
-  const elk = (elkInstance ??= new ELK());
+  // The in-process ELK is loaded only when no other instance was set (tests, no workers).
+  const elk = (elkInstance ??= new (await import('elkjs/lib/elk.bundled.js')).default());
   const sized = new Map<string, Sized>();
   for (const n of d.nodes) sized.set(n.id, sizeNode(n, measure));
 
@@ -225,7 +264,19 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
     edges,
   };
 
-  const out = await elk.layout(graph);
+  const out = await new Promise<ElkNode>((resolve, reject) => {
+    running.add(reject);
+    elk.layout(graph).then(
+      (r) => {
+        running.delete(reject);
+        resolve(r);
+      },
+      (e: unknown) => {
+        running.delete(reject);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+  });
 
   const byId = new Map(d.nodes.map((n) => [n.id, n]));
   const nodes: LNode[] = (out.children ?? []).map((c) => {

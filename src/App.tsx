@@ -188,7 +188,18 @@ export default function App() {
             />
           ) : (
             <div className="canvas empty">
-              {s.status === 'error' ? (
+              {s.bigFlat ? (
+                <div className="notice-box">
+                  <b>The full circuit has {s.bigFlat.cells.toLocaleString()} cells.</b>
+                  <p className="muted">Drawing it can take a while. The block diagram shows the same circuit in smaller pieces.</p>
+                  <div className="notice-actions">
+                    <button className="primary" onClick={() => s.setViewMode('blocks')}>
+                      Back to Block diagram
+                    </button>
+                    <button onClick={() => s.drawBigFlat()}>Draw anyway</button>
+                  </div>
+                </div>
+              ) : s.status === 'error' ? (
                 <div className="error-box">
                   <b>Could not elaborate the design.</b>
                   <p>{s.error}</p>

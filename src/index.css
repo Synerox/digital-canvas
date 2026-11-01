@@ -24,6 +24,8 @@ button {
 button:hover:not(:disabled) { border-color: #b9b7ae; background: #fafaf7; }
 button:disabled { opacity: 0.5; cursor: default; }
 button.icon { border: none; background: none; padding: 0 6px; font-size: 16px; color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { background: #c2410c; border-color: #c2410c; }
 select { border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; background: var(--panel); margin-left: 6px; }
 h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
 .muted { color: var(--muted); }
@@ -60,6 +62,9 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .zoom-controls { position: absolute; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
 .zoom-controls button { width: 30px; height: 30px; padding: 0; font-size: 15px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
 .error-box { max-width: 520px; padding: 16px; border: 1px solid #f1c0c0; background: #fff5f5; border-radius: 6px; }
+.notice-box { max-width: 460px; padding: 16px; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; }
+.notice-box p { margin: 8px 0 12px; }
+.notice-actions { display: flex; gap: 8px; }
 .error-box p { white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 
 .log { position: absolute; left: 0; right: 0; bottom: 0; height: 40%; background: var(--panel); border-top: 1px solid var(--line); display: flex; flex-direction: column; box-shadow: 0 -2px 8px rgba(0,0,0,.05); }
