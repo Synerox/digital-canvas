@@ -77,6 +77,9 @@ const DEFAULT_MAX_EXPANSIONS = 150_000;
 const BLOCK = 1e7;
 /** Cost of one grid edge along another net's wire. */
 const OVERLAP = 1e5;
+/** Extra cost (per grid pitch) of one grid edge on the line of another net's wire, at most LINE_GAP grid steps past its end. */
+const LINED = 10;
+const LINE_GAP = 2;
 /** Extra cost per px of running right next to a symbol (within one grid pitch of its keep-out). */
 const HUG = 0.3;
 /** Another net's coordinate this close to a grid line counts as being on it. */
@@ -136,9 +139,28 @@ export function orthogonalize(points: Point[]): Point[] {
  * Rubber-band a hand-edited route when its end points moved: keep the inner bends, move the first/last
  * point to the new positions and shift the adjacent bend so every segment stays horizontal or vertical
  * (insert corners if needed). Result orthogonal and simplified.
+ *
+ * Given the pins (not just their points), the wire also keeps leaving and entering each pin on a stub
+ * in the pin's direction: the leg next to a stub that ended up too close to (or behind) its pin is moved
+ * out to the stub's end, so the wire never runs back through its own symbol. When the bends left cannot
+ * do that, the wire falls back to simpleRoute.
  */
-export function adjustRoute(points: Point[], newStart: Point, newEnd: Point): Point[] {
-  const pts = orthogonalize(points);
+export function adjustRoute(points: Point[], newStart: Point, newEnd: Point): Point[];
+export function adjustRoute(points: Point[], from: RouteEnd, to: RouteEnd): Point[];
+export function adjustRoute(points: Point[], from: Point | RouteEnd, to: Point | RouteEnd): Point[] {
+  if (!('point' in from) || !('point' in to)) return stretch(orthogonalize(points), from as Point, to as Point);
+  let pts = keepStub(stretch(orthogonalize(points), from.point, to.point), from);
+  // The same at the target, walking the wire backward from it.
+  pts = pts && keepStub(pts.reverse(), to)?.reverse();
+  if (pts) {
+    pts = simplify(pts);
+    // Moving one end's leg may have spoilt the other end's stub.
+    if (leavesOnStub(pts, from) && leavesOnStub([...pts].reverse(), to)) return pts;
+  }
+  return simpleRoute(from, to);
+}
+
+function stretch(pts: Point[], newStart: Point, newEnd: Point): Point[] {
   if (pts.length < 2) return orthogonalize([newStart, newEnd]);
   if (pts.length === 2) {
     // A straight wire keeps leaving and entering the way it did: a Z with its bend in the middle.
@@ -159,6 +181,38 @@ export function adjustRoute(points: Point[], newStart: Point, newEnd: Point): Po
   if (lastHorizontal) pts[k - 2].y = newEnd.y;
   else pts[k - 2].x = newEnd.x;
   return orthogonalize(pts);
+}
+
+/** How far point v is out from the pin in the pin's direction. */
+const outward = (end: RouteEnd, v: Point) => {
+  const d = SIDE_DIR[end.side];
+  return (v.x - end.point.x) * DX[d] + (v.y - end.point.y) * DY[d];
+};
+
+/** Whether an orthogonal wire starting at the pin first runs out of it, at least to the stub's end. */
+function leavesOnStub(pts: Point[], end: RouteEnd): boolean {
+  if (pts.length < 2 || !samePoint(pts[0], end.point) || directionTo(pts[0], pts[1]) !== SIDE_DIR[end.side]) return false;
+  return outward(end, pts[1]) >= outward(end, stubEnd(end, STUB, STUB_CLEAR, 0)) - EPS;
+}
+
+/**
+ * Make an orthogonal wire that starts at the pin leave it on its stub: the leg across the pin's direction
+ * nearest the pin moves out to the stub's end. Undefined when that leg ends at the wire's other end (no
+ * bend to move).
+ */
+function keepStub(pts: Point[], end: RouteEnd): Point[] | undefined {
+  if (leavesOnStub(pts, end)) return pts;
+  const d = SIDE_DIR[end.side];
+  const out = pts.map((p) => ({ x: p.x, y: p.y }));
+  // A wire that starts across the pin's direction gets a stub of no length first.
+  const first = out.length >= 2 ? directionTo(out[0], out[1]) : -1;
+  if (first >= 0 && (first & 1) !== (d & 1)) out.splice(1, 0, { ...out[0] });
+  // out[1]-out[2] is the leg across: it moves out to the stub's end, unless out[2] is the far end.
+  if (out.length < 4) return undefined;
+  const a = stubEnd(end, STUB, STUB_CLEAR, 0);
+  if (d & 1) out[1].y = out[2].y = a.y;
+  else out[1].x = out[2].x = a.x;
+  return out;
 }
 
 /** Whether segment p-q passes through the interior of the box (Liang-Barsky clip, then test the middle of the clipped piece). */
@@ -361,12 +415,14 @@ interface Lattice {
   vCost: Float64Array;
   /** Per node: 0 free, 1 on the inside of another net's segment, 2 on a corner or end of another net. */
   touch: Uint8Array | null;
+  /** Per edge (the horizontal ones, then the vertical ones): charged already for lining up with another net (see addOther). */
+  lined: Uint8Array | null;
 }
 
 function makeLattice(xs: number[], ys: number[]): Lattice {
   const nx = xs.length;
   const ny = ys.length;
-  return { xs, ys, nx, ny, hCost: new Float64Array(Math.max(0, nx - 1) * ny), vCost: new Float64Array(nx * Math.max(0, ny - 1)), touch: null };
+  return { xs, ys, nx, ny, hCost: new Float64Array(Math.max(0, nx - 1) * ny), vCost: new Float64Array(nx * Math.max(0, ny - 1)), touch: null, lined: null };
 }
 
 /** Add `cost` to every edge that passes through the open box (l, t)-(r, b). */
@@ -766,10 +822,14 @@ function axisCoords(lo: number, hi: number, grid: number, exact: number[]): numb
   return out.sort((a, b) => a - b);
 }
 
-/** Mark another net's segment on the lattice: edges along it are nearly forbidden, crossings cost a little, its corners and ends must not be touched. */
-function addOther(L: Lattice, s: Seg, c: Costs): void {
+/**
+ * Mark another net's segment on the lattice: edges along it are nearly forbidden, crossings cost a little, its corners and ends must not
+ * be touched, and the line on past its ends costs extra.
+ */
+function addOther(L: Lattice, s: Seg, c: Costs, grid: number): void {
   const { nx, ny, hCost, vCost } = L;
   const touch = L.touch!;
+  const lined = L.lined!;
   // In the segment's own frame: `along` is the axis it runs on, `across` the other one.
   const along = s.horizontal ? L.xs : L.ys;
   const across = s.horizontal ? L.ys : L.xs;
@@ -788,6 +848,24 @@ function addOther(L: Lattice, s: Seg, c: Costs): void {
       if (s.horizontal) hCost[line * (nx - 1) + a] += OVERLAP;
       else vCost[a * nx + line] += OVERLAP;
     }
+    // A wire running on along the same line after a gap of a grid step or two reads as this wire carried
+    // on (or as joined to it): charge the line past each end, but not into a symbol (a pin's wire ends
+    // there, and the symbol between them keeps the two apart). Once per edge, as a net's wires share segments.
+    const cost = s.horizontal ? hCost : vCost;
+    const charge = (a: number): boolean => {
+      const k = s.horizontal ? line * (nx - 1) + a : a * nx + line;
+      if (cost[k] >= BLOCK) return false;
+      const m = s.horizontal ? k : hCost.length + k;
+      if (!lined[m]) {
+        lined[m] = 1;
+        cost[k] += LINED * grid;
+      }
+      return true;
+    };
+    const reach = LINE_GAP * grid + MATCH_TOL;
+    // Edges starting at most `reach` past the far end, and edges ending at most `reach` before the near one.
+    for (let a = lowerBound(along, s.hi - EPS); a + 1 < along.length && along[a] <= s.hi + reach; a++) if (!charge(a)) break;
+    for (let a = upperBound(along, s.lo + EPS) - 2; a >= 0 && along[a + 1] >= s.lo - reach; a--) if (!charge(a)) break;
   } else {
     // Between two lattice lines: the edges across it cross it (or hit its end).
     const e = lowerBound(across, s.at) - 1;
@@ -919,7 +997,8 @@ function routeInWindow(
   );
   if (inWindow.length) {
     L.touch = new Uint8Array(nx * ny);
-    for (const s of inWindow) addOther(L, s, costs);
+    L.lined = new Uint8Array(hCost.length + vCost.length);
+    for (const s of inWindow) addOther(L, s, costs, grid);
   }
 
   // Starts: the source stub, and every lattice point of the wires this net already has.

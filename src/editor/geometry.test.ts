@@ -6,7 +6,7 @@ import { type LayoutResult, type Point, approxMeasure, layoutDiagram } from '../
 import { type SheetEdits, emptyEdits } from './doc';
 import { buildGeometry, labelBox, runTogether } from './geometry';
 import { polylineCrowdsRect, polylineHitsRect, wiresMeet } from './router';
-import { addNodes, connect, effectiveDiagram, layoutToEdits, moveNodes, rename, resolveConnection, setParams } from './sheet';
+import { addNodes, connect, copyNodes, effectiveDiagram, layoutToEdits, moveNodes, pasteClip, rename, resolveConnection, setParams } from './sheet';
 import { type InterfaceOf, type SymKey, type SymParams, newUserNode } from './symbols';
 
 const noModules: InterfaceOf = () => undefined;
@@ -159,11 +159,12 @@ class Sheet {
     return g;
   }
 
-  wire(from: string, to: string): string {
+  /** A wire between two pins, drawn through bends when a route is given (a hand-shaped one). */
+  wire(from: string, to: string, route?: Point[]): string {
     const c = resolveConnection(this.d, { kind: 'port', node: from.split('.')[0], port: from }, { kind: 'port', node: to.split('.')[0], port: to });
     if ('error' in c) throw new Error(c.error);
     let id: string;
-    [id, this.e] = connect(this.e, c);
+    [id, this.e] = connect(this.e, c, route);
     this.refresh();
     return id;
   }
@@ -181,6 +182,11 @@ class Sheet {
   points(id: string): Point[] {
     return this.layout!.edges.find((x) => x.id === id)!.points;
   }
+
+  pin(id: string): Point {
+    const p = this.layout!.nodes.flatMap((n) => n.ports).find((q) => q.id === id)!;
+    return { x: p.x, y: p.y };
+  }
 }
 
 /** Wires that come closer to a symbol other than their own two than the router keeps them (along its edge, through its pins). */
@@ -188,6 +194,32 @@ function crowded(l: LayoutResult): string[] {
   const out: string[] = [];
   for (const x of l.edges)
     for (const n of l.nodes) if (n.id !== x.source.node && n.id !== x.target.node && polylineCrowdsRect(x.points, n)) out.push(`${x.id} at ${n.id}`);
+  return out;
+}
+
+/**
+ * Wires that come closer to one of their own symbols than routed wires do, but for their pieces running
+ * straight out of their pins there, or that pass over another pin of it.
+ */
+function crowdedOwn(l: LayoutResult): string[] {
+  const out: string[] = [];
+  const dir = { EAST: [1, 0], WEST: [-1, 0], NORTH: [0, -1], SOUTH: [0, 1] };
+  const pins = new Map(l.nodes.flatMap((n) => n.ports.map((p) => [p.id, p])));
+  const leaves = (port: string, a: Point, b: Point) => {
+    const [dx, dy] = dir[pins.get(port)!.side];
+    return Math.sign(b.x - a.x) === dx && Math.sign(b.y - a.y) === dy;
+  };
+  for (const x of l.edges)
+    for (const n of l.nodes) {
+      let line = x.points;
+      if (n.id === x.source.node && leaves(x.source.port, line[0], line[1])) line = line.slice(1);
+      if (n.id === x.target.node && line.length > 1 && leaves(x.target.port, line[line.length - 1], line[line.length - 2])) line = line.slice(0, -1);
+      if ((n.id !== x.source.node && n.id !== x.target.node) || line.length < 2) continue;
+      if (polylineCrowdsRect(line, n)) out.push(`${x.id} at ${n.id}`);
+      for (const p of n.ports)
+        if (p.id !== x.source.port && p.id !== x.target.port && x.points.some((a, i) => i > 0 && polylineHitsRect([a, x.points[i - 1]], { x: p.x - 1, y: p.y - 1, width: 2, height: 2 })))
+          out.push(`${x.id} over ${p.id}`);
+    }
   return out;
 }
 
@@ -247,6 +279,139 @@ describe('stored wires after edits', () => {
       expect(x.routed[w]).toBeDefined();
       expect(crowded(x.layout)).toEqual([]);
     }
+  });
+
+  it('routes a wire again when its own gate grows over it', () => {
+    for (const [sym, manual] of [
+      ['and', false],
+      ['mux', false],
+      ['and', true],
+    ] as const) {
+      // The input sits to the right of the gate: its wire into B wraps around under the gate.
+      const s = new Sheet([
+        ['u:1', sym, 340, 240],
+        ['u:2', 'input', 500, 280],
+      ]);
+      let w = s.wire('u:2.out', 'u:1.B');
+      if (manual) {
+        const route = s.points(w);
+        s.e = { ...s.e, edges: [], routes: {} };
+        w = s.wire('u:2.out', 'u:1.B', route);
+      }
+      const label = `${sym}${manual ? ' drawn by hand' : ''}`;
+      const below = Math.max(...s.points(w).map((p) => p.y));
+      expect(below, label).toBeGreaterThan(s.pin('u:1.B').y + 20);
+      expect(crowdedOwn(s.layout!), label).toEqual([]);
+      // Four inputs: B stays where it was, the gate now reaches down over the wire, and C and D are on it.
+      s.e = setParams(s.e, 'u:1', { inputs: 4 });
+      const g = s.refresh();
+      expect(g.layout.nodes[0].y + g.layout.nodes[0].height, label).toBeGreaterThan(below);
+      expect(g.routed[w], label).toBeDefined();
+      expect(g.routed[w].manual, label).toBeUndefined();
+      expect(crowdedOwn(g.layout), label).toEqual([]);
+    }
+  });
+
+  it('routes a wire drawn by hand again when a symbol is moved, placed or pasted onto it', () => {
+    const sheet = () => {
+      const s = new Sheet([
+        ['u:1', 'input', 20, 150],
+        ['u:2', 'output', 580, 150],
+        ['u:3', 'xor', 294, 380],
+        ['u:4', 'not', 300, 30],
+      ]);
+      const a = s.pin('u:1.out');
+      const b = s.pin('u:2.in');
+      // Through two bends, down to y = 220 and back up.
+      const route = [a, { x: a.x + 10, y: a.y }, { x: a.x + 10, y: 220 }, { x: b.x - 10, y: 220 }, { x: b.x - 10, y: b.y }, b];
+      const w = s.wire('u:1.out', 'u:2.in', route);
+      expect(s.points(w)).toEqual(route);
+      return { s, w, route };
+    };
+
+    // A move far from it leaves it as it is.
+    let { s, w, route } = sheet();
+    let g = s.move(['u:4'], 40, 0);
+    expect(s.points(w)).toEqual(route);
+    expect(s.e.routes[w].manual).toBe(true);
+
+    // The XOR moved up with its body and its output pin on the wire.
+    g = s.move(['u:3'], 0, -180);
+    expect(g.routed[w]).toBeDefined();
+    expect(s.e.routes[w].manual).toBeUndefined();
+    expect(crowded(g.layout)).toEqual([]);
+
+    // Placed on it: seen as new against the layout on screen, or named as moved (placed after a Verilog re-import).
+    ({ s, w } = sheet());
+    s.e = addNodes(s.e, [{ node: newUserNode('u:5', 'and'), pos: { x: 300, y: 200 } }]);
+    const named = buildGeometry({ netlist: s.d, pos: s.e.pos, routes: s.e.routes, measure: approxMeasure, moved: new Set(['u:5']) });
+    g = s.refresh();
+    for (const x of [g, named]) {
+      expect(x.routed[w]).toBeDefined();
+      expect(x.routed[w].manual).toBeUndefined();
+      expect(crowded(x.layout)).toEqual([]);
+    }
+
+    // Pasted on it.
+    ({ s, w } = sheet());
+    const clip = copyNodes(s.d, s.e, s.layout!, new Set(['u:4']), noModules)!;
+    [s.e] = pasteClip(s.e, clip, { x: 300, y: 210 });
+    g = s.refresh();
+    expect(g.routed[w]).toBeDefined();
+    expect(crowded(g.layout)).toEqual([]);
+  });
+
+  it('routes a wire drawn by hand again when it is moved with its symbols onto another symbol', () => {
+    const s = new Sheet([
+      ['u:1', 'input', 0, 0],
+      ['u:2', 'output', 400, 0],
+      ['u:3', 'and', 200, 200],
+    ]);
+    const a = s.pin('u:1.out');
+    const b = s.pin('u:2.in');
+    const w = s.wire('u:1.out', 'u:2.in', [a, { x: a.x + 10, y: a.y }, { x: a.x + 10, y: 40 }, { x: b.x - 10, y: 40 }, { x: b.x - 10, y: b.y }, b]);
+    const g = s.move(['u:1', 'u:2'], 0, 180);
+    expect(g.routed[w]).toBeDefined();
+    expect(crowded(g.layout)).toEqual([]);
+  });
+
+  it('keeps a stretched wire drawn by hand leaving and entering its pins on a stub', () => {
+    const sheet = () => {
+      const s = new Sheet([
+        ['u:1', 'and', 240, 240],
+        ['u:2', 'output', 540, 250],
+        ['u:3', 'not', 500, 290],
+      ]);
+      const y = s.pin('u:1.Y');
+      const i = s.pin('u:2.in');
+      // Out of Y, up over the gate, across and down into the output.
+      const route = [y, { x: y.x + 10, y: y.y }, { x: y.x + 10, y: 140 }, { x: i.x - 10, y: 140 }, { x: i.x - 10, y: i.y }, i];
+      return { s, w: s.wire('u:1.Y', 'u:2.in', route) };
+    };
+    const stub = (from: Point, to: Point, dx: number) => to.y === from.y && (to.x - from.x) * dx >= 10;
+    for (const [id, dx, dy] of [
+      ['u:1', 20, 0],
+      ['u:1', 20, 40],
+      ['u:1', 0, -150],
+      ['u:2', -20, 0],
+    ] as const) {
+      const { s, w } = sheet();
+      const g = s.move([id], dx, dy);
+      const p = s.points(w);
+      const label = `${id} by ${dx}, ${dy}: ${JSON.stringify(p)}`;
+      expect(g.routed[w]?.manual, label).toBe(true);
+      // Still through the bend the user made above the gate.
+      expect(p.some((q) => q.y === 140), label).toBe(true);
+      expect(stub(p[0], p[1], 1), label).toBe(true);
+      expect(stub(p[p.length - 1], p[p.length - 2], -1), label).toBe(true);
+      expect(crowdedOwn(g.layout), label).toEqual([]);
+    }
+    // Stretched down onto the NOT gate below the output: routed again.
+    const { s, w } = sheet();
+    const g = s.move(['u:2'], 0, 100);
+    expect(g.routed[w]).toBeDefined();
+    expect(g.routed[w].manual).toBeUndefined();
+    expect(crowded(g.layout)).toEqual([]);
   });
 
   it('checks a wire moved along with both of its symbols against the symbols and wires it now meets', () => {

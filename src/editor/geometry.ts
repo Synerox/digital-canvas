@@ -3,9 +3,11 @@
  * the exporters use) from a netlist, symbol positions and stored wire routes.
  *
  * Stored routes are used as long as both of their ends still meet their
- * ports; hand-shaped routes are stretched when a symbol moves; every other
- * wire is routed again with the orthogonal router. Junction dots are found
- * from the drawn wires, so they are right whoever routed them.
+ * ports and no symbol has been put on them since; hand-shaped routes are
+ * stretched when a symbol moves (and routed afresh when that runs them into a
+ * symbol); every other wire is routed again with the orthogonal router.
+ * Junction dots are found from the drawn wires, so they are right whoever
+ * routed them.
  */
 import type { DEdge, DNode, Diagram, Side } from '../core/diagram';
 import { FONT, type LEdge, type LNode, type LayoutResult, type MeasureText, type Point, sizeNode } from '../layout/elk-layout';
@@ -200,7 +202,8 @@ export function buildGeometry(input: GeometryInput): Geometry {
   }
   const netPorts = (net: string) => new Set([net, ...(netEdges.get(net) ?? []).map((x) => x.target.port)]);
 
-  // Symbols that are new, moved, grew or shrank since then: automatic wires now running into one are routed again.
+  // Symbols that are new, moved, grew or shrank since then: wires now running into one are routed again,
+  // those drawn by hand too (the symbol was put there after them).
   const changed: Keep[] = [];
   if (settledNodes || input.moved?.size)
     for (const n of nodes) {
@@ -208,6 +211,7 @@ export function buildGeometry(input: GeometryInput): Geometry {
       if (input.moved?.has(n.id) || (settledNodes && (!o || o.x !== n.x || o.y !== n.y || o.width !== n.width || o.height !== n.height)))
         changed.push(keepOut(n));
     }
+  const changedIds = new Set(changed.map((k) => k.id));
   let all: Keep[] | undefined;
   // Stored routes that still meet both of their pins, and whether each one is new here or moved along with
   // both of its symbols (pasted, or moved as a group): such a route may have landed on any symbol or wire.
@@ -222,8 +226,12 @@ export function buildGeometry(input: GeometryInput): Geometry {
     const r = routes[e.id];
     if (!s || !t || !r || !near(r.points[0], s.point) || !near(r.points[r.points.length - 1], t.point)) continue;
     const old = settledEdges?.get(e.id);
+    // A wire drawn by hand is where the user put it, unless it came along with both of its symbols.
     const isFresh =
-      !fast && !r.manual && ((settledEdges && (!old || !samePoints(old, r.points))) || (!!input.moved?.has(e.source.node) && input.moved.has(e.target.node)));
+      !fast &&
+      (r.manual
+        ? changedIds.has(e.source.node) && changedIds.has(e.target.node)
+        : (settledEdges && (!old || !samePoints(old, r.points))) || (!!input.moved?.has(e.source.node) && input.moved.has(e.target.node)));
     fits.set(e.id, isFresh);
     keptPins.add(e.source.port);
     keptPins.add(e.target.port);
@@ -242,19 +250,30 @@ export function buildGeometry(input: GeometryInput): Geometry {
     }
     return line;
   };
+  /** Whether wire piece a-b runs straight out of the pin (its stub, and maybe on). */
+  const leaves = (port: string, a: Point, b: Point) => {
+    const d = DIR[ends.get(port)!.side];
+    return Math.sign(Math.round(b.x - a.x)) === d.x && Math.sign(Math.round(b.y - a.y)) === d.y;
+  };
   /**
    * Whether a wire runs into one of the symbols, or touches the stub of one of their pins (but those in
-   * `drawn`): a wire routed to that pin later would have to start on it.
+   * `drawn`): a wire routed to that pin later would have to start on it. On the wire's own symbols only
+   * the pieces running straight out of its pins are let through: a symbol that grew may have grown over
+   * the rest of it.
    */
   const crowds = (e: DEdge, points: Point[], list: Keep[], drawn: Set<string>): boolean => {
     if (!list.length) return false;
     const b = boundsOf(points);
     let mine: Set<string> | undefined;
     for (const k of list) {
-      if (k.id === e.source.node || k.id === e.target.node || apart(k, b)) continue;
-      if (polylineCrowdsRect(points, k.rect)) return true;
+      if (apart(k, b)) continue;
+      let line = points;
+      if (k.id === e.source.node && leaves(e.source.port, line[0], line[1])) line = line.slice(1);
+      if (k.id === e.target.node && line.length >= 2 && leaves(e.target.port, line[line.length - 1], line[line.length - 2])) line = line.slice(0, -1);
+      if (line.length < 2) continue;
+      if (polylineCrowdsRect(line, k.rect)) return true;
       mine ??= netPorts(netOf(e));
-      for (const q of k.ports) if (!mine.has(q) && !drawn.has(q) && wiresMeet(points, stubOf(q))) return true;
+      for (const q of k.ports) if (!mine.has(q) && !drawn.has(q) && wiresMeet(line, stubOf(q))) return true;
     }
     return false;
   };
@@ -270,7 +289,6 @@ export function buildGeometry(input: GeometryInput): Geometry {
   const fresh: DEdge[] = [];
   /** Wires to route again because their target symbol changed, with the path they had (when known). */
   const retargeted: [DEdge, Point[]][] = [];
-  const changedIds = new Set(changed.map((k) => k.id));
 
   for (const e of netlist.edges) {
     const s = ends.get(e.source.port);
@@ -280,17 +298,21 @@ export function buildGeometry(input: GeometryInput): Geometry {
     const isFresh = fits.get(e.id);
     if (r && isFresh !== undefined) {
       // Any other route can only have run into the symbols that changed.
-      if (r.manual || !(isFresh ? crowds(e, r.points, (all ??= nodes.map(keepOut)), keptPins) : crowds(e, r.points, changed, steadyPins))) {
+      if (!(isFresh ? crowds(e, r.points, (all ??= nodes.map(keepOut)), keptPins) : crowds(e, r.points, changed, steadyPins))) {
         resolved.set(e.id, { points: r.points, label: r.label });
         if (isFresh) fresh.push(e);
         continue;
       }
     } else if (r?.manual && r.points.length >= 2) {
-      const points = adjustRoute(r.points, s.point, t.point);
-      resolved.set(e.id, { points });
-      if (!fast) routed[e.id] = { points, manual: true };
-      continue;
+      // Stretched to the pins where they are now; its legs next to them may have moved onto a symbol.
+      const points = adjustRoute(r.points, s, t);
+      if (!crowds(e, points, (all ??= nodes.map(keepOut)), keptPins)) {
+        resolved.set(e.id, { points });
+        if (!fast) routed[e.id] = { points, manual: true };
+        continue;
+      }
     }
+    // Routed again, a wire drawn by hand becomes an automatic one.
     todo.push(e);
     const old = r && r.points.length >= 2 ? r.points : settledEdges?.get(e.id);
     if (!fast && old && changedIds.has(e.target.node)) retargeted.push([e, old]);
