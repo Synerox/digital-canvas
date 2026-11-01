@@ -8,7 +8,11 @@
  *   written on the wire (`a[3:0]`) and resized to the port's width, so
  *   concatenations and part-selects always see the widths the drawing shows.
  * - Cells become `assign` statements or `always` blocks, blocks become module
- *   instances, and output pins are assigned from their driver.
+ *   instances, and output pins are assigned from their driver. Clock, enable and
+ *   reset polarities, reset values and signed operands of imported cells
+ *   (DNode.params) are written out (`negedge`, `if (!rst)`, `$signed(a)`).
+ * - Inout ports of blocks are never tied to a constant: an open one is left
+ *   open (`.io()`), and inout ports joined by wires share one net.
  *
  * Problems in the drawing (open inputs, width mismatches, cells that have no
  * Verilog form) become warnings rather than errors, so a half-finished drawing
@@ -263,6 +267,16 @@ function labelScale(label: string | undefined): number {
   return Number.isInteger(k) && k > 0 && k < 31 ? k : 0;
 }
 
+/**
+ * Low zero bits appended to what a wire carries. The import records them in `shift`, which a
+ * rename of the `×4` label does not touch; only a wire without it (drawn by hand, or copied
+ * from an import into a drawing) reads them from its label.
+ */
+function edgeShift(e: DEdge): number {
+  if (e.shift !== undefined) return Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
+  return labelScale(e.label);
+}
+
 /** A split port name such as `[7:4]` or `[3]`. */
 function portRange(name: string): { hi: number; lo: number } | undefined {
   const m = /^\[\s*(\d+)\s*(?::\s*(\d+)\s*)?\]$/.exec(name.trim());
@@ -316,17 +330,35 @@ const BINARY: Record<string, string> = {
   $shr: '>>',
   $sshl: '<<<',
   $sshr: '>>>',
-  // Signed shift amounts (negative = left) are not kept: the drawing has no signedness.
+  // A signed shift amount (B_SIGNED) shifts left when negative; combExpr writes that case.
   $shift: '>>',
   $shiftx: '>>',
   $logic_and: '&&',
   $logic_or: '||',
 };
 
+/**
+ * Shifts: only A's sign matters (a signed A is sign-extended). The amount B is unsigned, except
+ * that a signed B of $shift and $shiftx may be negative.
+ */
+const SHIFTS = new Set(['$shl', '$shr', '$sshl', '$sshr', '$shift', '$shiftx']);
+
+/** Operators whose result does not depend on the signedness of their operands. */
+const SIGN_BLIND = new Set(['$logic_and', '$logic_or', '$logic_not', '$reduce_and', '$reduce_or', '$reduce_xor', '$reduce_xnor', '$reduce_bool']);
+
 const SELECTS = new Set(['$mux', 'dc:mux', '$pmux', '$bmux', '$demux', '$tribuf', 'dc:and', 'dc:decoder']);
 
-/** Registers: positive-edge clock, active-high resets to 0 (the drawing does not carry other polarities or values). */
+/**
+ * Registers. Drawn ones have a rising clock and active-high enable and reset, and reset to 0;
+ * imported ones may say otherwise in their params (CLK_POLARITY, ARST_VALUE…).
+ */
 const REGISTERS = new Set(['$dff', '$dffe', '$adff', '$adffe', '$sdff', '$sdffe', '$dlatch']);
+
+/** A 1-bit Yosys parameter of a cell, e.g. CLK_POLARITY; `dflt` when the cell does not set it. */
+function paramFlag(n: DNode, name: string, dflt: boolean): boolean {
+  const v = n.params?.[name];
+  return v === undefined ? dflt : /1/.test(v);
+}
 
 function isPrimitive(type: string): boolean {
   return type.startsWith('$') || type.startsWith('dc:');
@@ -424,7 +456,9 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
   const instName = new Map<string, string>();
   for (const n of nodes) {
     if (!isInstanceNode(n)) continue;
-    const raw = n.instanceName ?? n.subLabel ?? (n.kind === 'cell' ? short.get(n.id) : undefined) ?? `u_${n.moduleName ?? 'block'}`;
+    // The drawn name first: a rename of an imported instance only changes subLabel (instanceName keeps
+    // the Yosys name for the breadcrumb). Drawn blocks have both set to the same name.
+    const raw = n.subLabel ?? n.instanceName ?? (n.kind === 'cell' ? short.get(n.id) : undefined) ?? `u_${n.moduleName ?? 'block'}`;
     // Blocks placed without a name get an automatic ID; renaming that is not worth a warning.
     instName.set(n.id, takeNamed(raw, 'Instance', n.kind === 'instance' && n.subLabel === undefined));
   }
@@ -438,13 +472,14 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     return `${short.get(n.id)} (${n.cellType ?? 'cell'})`;
   };
   /** Where a value is read, for warnings: "output 's'" or "input B of and1 ($and)". */
-  const where = (n: DNode, p: DPort): string => (isPin(n) ? describe(n) : `input ${p.name} of ${describe(n)}`);
+  const where = (n: DNode, p: DPort): string => (isPin(n) ? describe(n) : `${p.inout ? 'inout' : 'input'} ${p.name} of ${describe(n)}`);
   const source = (n: DNode, p: DPort): string => {
     if (isPin(n)) return describe(n);
     return n.ports.filter((q) => q.dir === 'out').length > 1 ? `output ${p.name} of ${describe(n)}` : describe(n);
   };
 
-  // Resolve wires to ports. A wire drawn from an input port to an output port is turned around.
+  // Resolve wires to ports. Outputs drive, and so do inout ports of blocks (wired as inputs, dir 'in').
+  const drives = (p: DPort) => p.dir === 'out' || !!p.inout;
   const wires: Wire[] = [];
   for (const e of d.edges) {
     let from = byId.get(e.source.node);
@@ -455,11 +490,17 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
       warn(`Wire ${e.id} does not connect two ports of the drawing; it is ignored`);
       continue;
     }
-    if (fromPort.dir === 'in' && toPort.dir === 'out') [from, fromPort, to, toPort] = [to, toPort, from, fromPort];
-    if (fromPort.dir !== 'out' || toPort.dir !== 'in') {
+    // A wire drawn from an input to an output, or from a plain input to an inout port, is turned around.
+    if ((fromPort.dir === 'in' && toPort.dir === 'out') || (fromPort.dir === 'in' && !fromPort.inout && toPort.inout)) {
+      [from, fromPort, to, toPort] = [to, toPort, from, fromPort];
+    }
+    if (!drives(fromPort) || toPort.dir !== 'in') {
       warn(`Wire from ${describe(from)} to ${describe(to)} joins two ${fromPort.dir === 'out' ? 'outputs' : 'inputs'}; it is ignored`);
       continue;
     }
+    // The import draws a wire from an inout pin to itself when nothing inside drives the pin; it carries nothing
+    // (written out, `assign io = io;` would fight every other driver of the pin).
+    if (from === to && from.kind === 'inout') continue;
     wires.push({ edge: e, from, fromPort, to, toPort });
   }
   const outgoing = new Map<string, Wire[]>();
@@ -468,48 +509,117 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     const ko = key(w.from, w.fromPort);
     const ki = key(w.to, w.toPort);
     outgoing.set(ko, [...(outgoing.get(ko) ?? []), w]);
-    incoming.set(ki, [...(incoming.get(ki) ?? []), w]);
+    // A wire from an inout port of a block to an inout pin joins the two (see buses below); it does not drive the pin.
+    if (!(w.fromPort.inout && w.to.kind === 'inout')) incoming.set(ki, [...(incoming.get(ki) ?? []), w]);
+  }
+
+  // Buses: inout ports of blocks that wires join, directly or through each other, share one net. An inout
+  // port may drive its net from inside its block, so it is never tied to a constant, and when the bus is
+  // also wired to a driver or to an inout pin, every port connects to that net itself (not to a copy).
+  interface Bus {
+    members: { n: DNode; p: DPort }[];
+    /** Wires into the bus from drivers that are not inout ports of blocks (the first one gives its net). */
+    anchors: Wire[];
+    /** The inout pin of this module the bus is wired to: the bus is the pin's net. */
+    pin?: DNode;
+    /** Wires out of the bus, including the ones that join its ports (they name its net). */
+    out: Wire[];
+    net?: Net;
+    value?: Vec;
+  }
+  const busRoot = new Map<string, string>();
+  const rootOf = (k: string): string => {
+    let r = k;
+    while (busRoot.get(r) !== r) r = busRoot.get(r)!;
+    return r;
+  };
+  for (const n of nodes) for (const p of n.ports) if (p.inout) busRoot.set(key(n, p), key(n, p));
+  for (const w of wires) {
+    if (w.fromPort.inout && w.toPort.inout) busRoot.set(rootOf(key(w.to, w.toPort)), rootOf(key(w.from, w.fromPort)));
+  }
+  const buses = new Map<string, Bus>();
+  const busOf = new Map<string, Bus>();
+  for (const n of nodes) {
+    for (const p of n.ports) {
+      if (!p.inout) continue;
+      const root = rootOf(key(n, p));
+      const b = buses.get(root) ?? { members: [], anchors: [], out: [] };
+      buses.set(root, b);
+      b.members.push({ n, p });
+      busOf.set(key(n, p), b);
+    }
+  }
+  for (const w of wires) {
+    const src = busOf.get(key(w.from, w.fromPort));
+    if (src) {
+      src.out.push(w);
+      if (w.to.kind === 'inout') {
+        if (!src.pin) src.pin = w.to;
+        else if (src.pin !== w.to) warn(`${capitalize(where(w.from, w.fromPort))} is wired to two inout pins; only ${describe(src.pin)} is connected`);
+      }
+    } else {
+      busOf.get(key(w.to, w.toPort))?.anchors.push(w);
+    }
   }
 
   // Nets: one per driver port that feeds at least one wire. Constants are written in place instead.
   const nets = new Map<string, Net>();
-  const pending: { n: DNode; p: DPort; k: string }[] = [];
+  /** A driver (or a bus that nothing outside drives) that still needs a net name. */
+  interface Pending {
+    n: DNode;
+    p: DPort;
+    k: string;
+    width: number;
+    /** The wires it drives. */
+    wires: Wire[];
+    bus?: Bus;
+  }
+  const pending: Pending[] = [];
   for (const n of nodes) {
     for (const p of n.ports) {
       const k = key(n, p);
+      const b = busOf.get(k);
+      if (b) {
+        // Named once, at its first port; a bus with no wires at all is left open.
+        if (b.members[0].p === p && !b.pin && b.anchors.length === 0 && b.out.length > 0) {
+          pending.push({ n, p, k, width: Math.max(...b.members.map((m) => Math.max(1, m.p.width))), wires: b.out, bus: b });
+        }
+        continue;
+      }
       if (p.dir !== 'out' || n.kind === 'const' || !outgoing.has(k)) continue;
       if (n.kind === 'input' || n.kind === 'inout') nets.set(k, { name: pinName.get(n.id)!, width: Math.max(1, p.width), reg: false, declare: false });
-      else pending.push({ n, p, k });
+      else pending.push({ n, p, k, width: Math.max(1, p.width), wires: outgoing.get(k)! });
     }
   }
-  const setNet = (x: (typeof pending)[number], name: string, declare = true) =>
-    nets.set(x.k, { name, width: Math.max(1, x.p.width), reg: isRegister(x.n), declare });
+  const setNet = (x: Pending, name: string, declare = true) => {
+    const net: Net = { name, width: x.width, reg: isRegister(x.n), declare };
+    nets.set(x.k, net);
+    if (x.bus) x.bus.net = net;
+  };
   /** A wire that carries its whole driver unchanged (no slice or scale written on it). */
   const isPlainWire = (w: Wire) =>
-    !labelRange(w.edge.label) && !labelScale(w.edge.label) && (w.edge.fullSource || w.edge.width >= w.fromPort.width);
+    !labelRange(w.edge.label) && !edgeShift(w.edge) && (w.edge.fullSource || w.edge.width >= w.fromPort.width);
 
   // 1. A name the user wrote on one of its wires.
   for (const x of pending) {
-    const label = outgoing
-      .get(x.k)!
-      .map((w) => w.edge.label?.trim())
-      .find((l) => isPlainIdent(l) && !used.has(l));
+    const label = x.wires.map((w) => w.edge.label?.trim()).find((l) => isPlainIdent(l) && !used.has(l));
     if (label) setNet(x, take(label));
   }
   // 2. A driver that feeds an output pin through a plain wire drives that pin directly (`assign s = a ^ b;`).
+  //    The same for an inout pin, where it also matters: its other readers then read the pin, which
+  //    carries what is driven from outside too, not just this driver. Not a bus: the ports on it may
+  //    drive it too, so it keeps a net of its own.
   const drivenPins = new Set<string>();
   for (const x of pending) {
-    if (nets.has(x.k) || isRegister(x.n)) continue;
-    const w = outgoing
-      .get(x.k)!
-      .find(
-        (w) =>
-          w.to.kind === 'output' &&
-          !drivenPins.has(w.to.id) &&
-          w.toPort.width === x.p.width &&
-          incoming.get(key(w.to, w.toPort))!.length === 1 &&
-          isPlainWire(w),
-      );
+    if (nets.has(x.k) || isRegister(x.n) || x.bus) continue;
+    const w = x.wires.find(
+      (w) =>
+        (w.to.kind === 'output' || w.to.kind === 'inout') &&
+        !drivenPins.has(w.to.id) &&
+        w.toPort.width === x.p.width &&
+        incoming.get(key(w.to, w.toPort))!.length === 1 &&
+        isPlainWire(w),
+    );
     if (!w) continue;
     drivenPins.add(w.to.id);
     setNet(x, pinName.get(w.to.id)!, false);
@@ -517,8 +627,7 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
   // 3. The signal name an import recorded on its wires.
   for (const x of pending) {
     if (nets.has(x.k)) continue;
-    const name = outgoing
-      .get(x.k)!
+    const name = x.wires
       .filter((w) => w.edge.fullSource)
       .map((w) => w.edge.netName?.trim())
       .find((l) => isPlainIdent(l) && !used.has(l));
@@ -539,7 +648,9 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
       return zeros(width);
     }
     const have = lit.bits.length;
-    if (have === width) return constVec(lit.bits, lit.signed ? undefined : c.label.replace(/\s+/g, ''));
+    // The user's text is kept only for sized literals: an unsized one ('hFF, 12) is illegal inside a
+    // concatenation, and the value may end up in one, so it is written sized (32'd255).
+    if (have === width) return constVec(lit.bits, lit.sized && !lit.signed ? c.label.replace(/\s+/g, '') : undefined);
     if (lit.sized) {
       warn(`Width mismatch: constant ${c.label} is ${bitsText(have)} but ${at} is ${bitsText(width)}; ${have < width ? 'zero-extended' : 'the high bits are dropped'}`);
     } else if (lit.bits.slice(width).some((b) => b !== '0')) {
@@ -548,30 +659,56 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     return constVec(padTo(lit.bits, width, lit.signed ? lit.bits[have - 1] : '0'));
   };
 
+  /**
+   * The net a bus connects its ports to: the inout pin it is wired to, else the value of its first
+   * driver, else its own net; undefined when nothing is wired to it (its ports are left open).
+   */
+  const busValue = (b: Bus): Vec | undefined => {
+    if (b.pin) return netVec(pinName.get(b.pin.id)!, Math.max(1, b.pin.ports.find((q) => q.dir === 'out')?.width ?? 1));
+    const [w, ...more] = b.anchors;
+    if (w) {
+      if (!b.value) {
+        if (more.length) warn(`The bus on ${where(w.to, w.toPort)} is driven by ${b.anchors.length} wires; only the one from ${source(w.from, w.fromPort)} is used`);
+        // Not fitted to the port: padding it would tie the missing bits of an inout port to 0.
+        b.value = w.from.kind === 'const' ? constAt(w.from, where(w.to, w.toPort), Math.max(1, w.toPort.width)) : wireVec(w);
+      }
+      return b.value;
+    }
+    return b.net && netVec(b.net.name, b.net.width);
+  };
+
+  /** The value a driver port puts on its wires: its net, or the bus an inout port is on. */
+  const sourceVec = (n: DNode, p: DPort): Vec => {
+    const b = busOf.get(key(n, p));
+    if (b) return busValue(b) ?? zeros(Math.max(1, p.width));
+    const net = nets.get(key(n, p))!;
+    return netVec(net.name, net.width);
+  };
+
   /** The value a wire delivers, before it is fitted to the port: the driver net, or the slice written on the wire. */
   const wireVec = (w: Wire): Vec => {
-    const net = nets.get(key(w.from, w.fromPort))!;
-    let v = netVec(net.name, net.width);
+    let v = sourceVec(w.from, w.fromPort);
+    const width = vecWidth(v);
     const e = w.edge;
     const r = labelRange(e.label);
-    const partial = !e.fullSource && e.width >= 1 && e.width < net.width;
+    const partial = !e.fullSource && e.width >= 1 && e.width < width;
     // The bits the wire carries, when the drawing records them, win over a slice written in the label
     // (the label may have been renamed to anything).
     const b = e.bits;
-    if (b && b.lo >= 0 && b.width >= 1 && b.lo + b.width <= net.width) {
-      if (b.width < net.width) v = slice(v, b.lo, b.width);
-    } else if (r && r.hi - r.lo + 1 !== net.width) {
-      if (r.lo <= r.hi && r.hi < net.width) {
+    if (b && b.lo >= 0 && b.width >= 1 && b.lo + b.width <= width) {
+      if (b.width < width) v = slice(v, b.lo, b.width);
+    } else if (r && r.hi - r.lo + 1 !== width) {
+      if (r.lo <= r.hi && r.hi < width) {
         v = slice(v, r.lo, r.hi - r.lo + 1);
       } else {
-        warn(`The slice '${e.label}' on the wire from ${source(w.from, w.fromPort)} is outside its ${bitsText(net.width)}; it is ignored`);
+        warn(`The slice '${e.label}' on the wire from ${source(w.from, w.fromPort)} is outside its ${bitsText(width)}; it is ignored`);
         if (partial) v = slice(v, 0, e.width);
       }
     } else if (partial && !r) {
-      warn(`The wire from ${source(w.from, w.fromPort)} to ${where(w.to, w.toPort)} carries ${e.width} of ${net.width} bits but names no slice; the low bits are used`);
+      warn(`The wire from ${source(w.from, w.fromPort)} to ${where(w.to, w.toPort)} carries ${e.width} of ${width} bits but names no slice; the low bits are used`);
       v = slice(v, 0, e.width);
     }
-    const k = labelScale(e.label);
+    const k = edgeShift(e);
     return k ? [...zeros(k), ...v] : v;
   };
 
@@ -595,6 +732,19 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     );
     return slice(v, 0, width);
   };
+
+  /** What an inout port of a block connects to: its bus (nothing when the bus is open), never a constant fill. */
+  const inoutText = (n: DNode, p: DPort): string => {
+    const v = busValue(busOf.get(key(n, p))!);
+    if (!v) return '';
+    const width = Math.max(1, p.width);
+    const have = vecWidth(v);
+    if (have === width) return render(v);
+    warn(
+      `Width mismatch: ${where(n, p)} is ${bitsText(width)} but its bus carries ${bitsText(have)}; ${have < width ? 'the high bits of the port are left open' : 'the high bits are dropped'}`,
+    );
+    return render(have < width ? v : slice(v, 0, width));
+  };
   /** The value an input port reads, by port name; a missing port reads 0. */
   const input = (n: DNode, name: string, width = 1): Vec => {
     const p = n.ports.find((q) => q.dir === 'in' && q.name === name);
@@ -613,18 +763,27 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
 
   /** Right-hand side of a combinational cell, or undefined when it has no Verilog form here. */
   const combExpr = (n: DNode, type: string, yWidth: number): string | undefined => {
+    // Signed operands (A_SIGNED, B_SIGNED) are written the way Yosys' own cell library defines them:
+    // most operators are signed only when both operands are, a shift only looks at A, and ** at each.
+    const aSigned = paramFlag(n, 'A_SIGNED', false) && !SIGN_BLIND.has(type);
+    const bSigned = paramFlag(n, 'B_SIGNED', false) && !SIGN_BLIND.has(type);
+    const signed = (text: string, yes: boolean) => (yes ? `$signed(${text})` : text);
     const gate = GATES[type];
     if (gate) {
-      const ins = n.ports.filter((p) => p.dir === 'in').map((p) => render(sinkVec(n, p)));
+      const ins = n.ports.filter((p) => p.dir === 'in').map((p) => signed(render(sinkVec(n, p)), aSigned && bSigned));
       if (ins.length === 0) return undefined;
       const e = ins.join(` ${gate.op} `);
       return gate.invert ? `~(${e})` : e;
     }
-    if (type in UNARY) return `${UNARY[type]}${render(input(n, 'A'))}`;
+    if (type in UNARY) return `${UNARY[type]}${signed(render(input(n, 'A')), aSigned)}`;
     if (type in BINARY) {
-      const a = render(input(n, 'A'));
+      const shift = SHIFTS.has(type);
+      // $shiftx is a part-select (A[B +: n]): bits outside A are undefined, so A's sign does not matter.
+      const a = signed(render(input(n, 'A')), shift || type === '$pow' ? aSigned && type !== '$shiftx' : aSigned && bSigned);
       const b = render(input(n, 'B'));
-      return `${a} ${BINARY[type]} ${b}`;
+      // A signed amount of $shift/$shiftx moves the other way when it is negative.
+      if ((type === '$shift' || type === '$shiftx') && bSigned) return `($signed(${b}) < 0) ? ${a} << -${b} : ${a} >> ${b}`;
+      return `${a} ${BINARY[type]} ${signed(b, shift ? false : type === '$pow' ? bSigned : aSigned && bSigned)}`;
     }
     switch (type) {
       case '$mux': {
@@ -696,11 +855,24 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     return undefined;
   };
 
-  /** A clock or reset for an event control: a net bit, or undefined when it is a constant. */
-  const eventSignal = (n: DNode, name: string): { text: string; zero: boolean } | undefined => {
+  /**
+   * A clock or reset for an event control: a net bit; 'idle' when it is a constant at its inactive
+   * level (a reset that never fires); undefined for any other constant.
+   */
+  const eventSignal = (n: DNode, name: string, activeHigh: boolean): { text: string } | 'idle' | undefined => {
     const v = input(n, name);
-    if (!isConstant(v)) return { text: render(v), zero: false };
-    return v.every((s) => s.kind === 'const' && s.bits.every((b) => b === '0')) ? { text: '', zero: true } : undefined;
+    if (!isConstant(v)) return { text: render(v) };
+    const idle = activeHigh ? '0' : '1';
+    return v.every((s) => s.kind === 'const' && s.bits.every((b) => b === idle)) ? 'idle' : undefined;
+  };
+  const edgeOf = (activeHigh: boolean) => (activeHigh ? 'posedge' : 'negedge');
+  const active = (text: string, activeHigh: boolean) => (activeHigh ? text : `!${text}`);
+  /** What a reset loads: ARST_VALUE or SRST_VALUE (binary, MSB first), 0 when the cell does not set it. */
+  const resetValue = (n: DNode, param: string, width: number): string => {
+    const v = n.params?.[param];
+    const ok = v !== undefined && /^[01xz]+$/.test(v);
+    if (v !== undefined && !ok) warn(`The reset value '${v}' of ${describe(n)} is not a constant; it resets to 0`);
+    return render(constVec(padTo(ok ? ([...v].reverse() as ConstBit[]) : [], width, '0')));
   };
 
   const emitRegister = (n: DNode, type: string) => {
@@ -711,42 +883,45 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
       return;
     }
     const dv = render(input(n, 'D', q.width));
-    const en = type === '$dffe' || type === '$adffe' || type === '$sdffe' || type === '$dlatch' ? render(input(n, 'EN')) : undefined;
+    const hasEn = type === '$dffe' || type === '$adffe' || type === '$sdffe' || type === '$dlatch';
+    const en = hasEn ? active(render(input(n, 'EN')), paramFlag(n, 'EN_POLARITY', true)) : undefined;
     if (type === '$dlatch') {
       blocks.push(`  always @* if (${en}) ${q.name} = ${dv};`);
       return;
     }
-    const clk = eventSignal(n, 'CLK');
-    if (!clk || clk.zero) {
+    const clkHigh = paramFlag(n, 'CLK_POLARITY', true);
+    const clk = eventSignal(n, 'CLK', clkHigh);
+    if (!clk || clk === 'idle') {
       warn(`The clock of ${describe(n)} is a constant; the register is left out`);
       return;
     }
+    const onClk = `${edgeOf(clkHigh)} ${clk.text}`;
     const load = `${en ? `if (${en}) ` : ''}${q.name} <= ${dv};`;
-    const reset = `${q.name} <= ${zeroText(q.width)};`;
     if (type === '$adff' || type === '$adffe') {
-      const arst = eventSignal(n, 'ARST');
-      if (arst && !arst.zero) {
-        blocks.push(`  always @(posedge ${clk.text} or posedge ${arst.text})`, `    if (${arst.text}) ${reset}`, `    else ${load}`);
+      const high = paramFlag(n, 'ARST_POLARITY', true);
+      const reset = `${q.name} <= ${resetValue(n, 'ARST_VALUE', q.width)};`;
+      const arst = eventSignal(n, 'ARST', high);
+      if (arst === 'idle') {
+        // A reset tied to its inactive level never fires: a plain register.
+        blocks.push(`  always @(${onClk}) ${load}`);
         return;
       }
-      if (!arst) {
-        // A reset tied to 1: give it a wire so the event control names a signal.
-        const name = take(verilogIdent(`${short.get(n.id)}_ARST`));
+      let name = arst?.text;
+      if (name === undefined) {
+        // A reset tied to its active level: give it a wire so the event control names a signal.
+        name = take(verilogIdent(`${short.get(n.id)}_ARST`));
         decls.push(`  wire ${name};`);
         assigns.push(`  assign ${name} = ${render(input(n, 'ARST'))};`);
-        blocks.push(`  always @(posedge ${clk.text} or posedge ${name})`, `    if (${name}) ${reset}`, `    else ${load}`);
-        return;
       }
-      // A reset tied to 0 never fires: a plain register.
-      blocks.push(`  always @(posedge ${clk.text}) ${load}`);
+      blocks.push(`  always @(${onClk} or ${edgeOf(high)} ${name})`, `    if (${active(name, high)}) ${reset}`, `    else ${load}`);
       return;
     }
     if (type === '$sdff' || type === '$sdffe') {
-      const srst = render(input(n, 'SRST'));
-      blocks.push(`  always @(posedge ${clk.text})`, `    if (${srst}) ${reset}`, `    else ${load}`);
+      const srst = active(render(input(n, 'SRST')), paramFlag(n, 'SRST_POLARITY', true));
+      blocks.push(`  always @(${onClk})`, `    if (${srst}) ${q.name} <= ${resetValue(n, 'SRST_VALUE', q.width)};`, `    else ${load}`);
       return;
     }
-    blocks.push(`  always @(posedge ${clk.text}) ${load}`);
+    blocks.push(`  always @(${onClk}) ${load}`);
   };
 
   const emitCell = (n: DNode) => {
@@ -825,6 +1000,7 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     const conns = n.ports.map((p) => {
       const pn = verilogIdent(p.name);
       if (p.dir === 'out') return `.${pn}(${netOf(n, p)?.name ?? ''})`;
+      if (p.inout) return `.${pn}(${inoutText(n, p)})`;
       return `.${pn}(${render(sinkVec(n, p))})`;
     });
     insts.push(conns.length ? `  ${modIdent} ${inst} (\n${conns.map((c) => `    ${c}`).join(',\n')}\n  );` : `  ${modIdent} ${inst} ();`);

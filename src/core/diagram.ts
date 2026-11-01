@@ -56,6 +56,14 @@ export interface DNode {
   rule?: string;
   /** Drawing hints from semantic transforms (e.g. inverted inputs). */
   attrs?: Record<string, string | number | boolean>;
+  /**
+   * Yosys parameters that change what a primitive cell computes (clock, enable and reset
+   * polarity, reset values, signed operands), as Yosys writes them (binary, MSB first).
+   * Only values that differ from what a drawn symbol assumes (rising clock, active-high
+   * enable and reset, reset to 0, unsigned operands) are kept, so a cell without `params`
+   * behaves like the library symbol of the same type.
+   */
+  params?: Record<string, string>;
 }
 
 export interface DEndpoint {
@@ -78,6 +86,11 @@ export interface DEdge {
   netName?: string;
   /** Which bits of the source port the edge carries, when not all of them. */
   bits?: { lo: number; width: number };
+  /**
+   * Low-order zero bits appended to what the edge carries (`{x, 2'b00}` is `x` with shift 2),
+   * set by the "scale" rule. The `×4` label only shows it, and the user may rename the label.
+   */
+  shift?: number;
 }
 
 export interface Diagram {
@@ -158,6 +171,24 @@ function sortPorts(type: string, names: string[]): string[] {
     const ib = PORT_ORDER.indexOf(b);
     return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
   });
+}
+
+/** Yosys parameters that change what a primitive cell computes (see DNode.params). */
+const SEMANTIC_PARAMS = ['CLK_POLARITY', 'EN_POLARITY', 'ARST_POLARITY', 'SRST_POLARITY', 'ARST_VALUE', 'SRST_VALUE', 'A_SIGNED', 'B_SIGNED'];
+
+/** The semantic parameters of a primitive cell that differ from the defaults, or undefined when none do. */
+function semanticParams(c: IRCell): Record<string, string> | undefined {
+  // Instances, blackboxes and the rules' dc: cells carry no parameters the export reads.
+  if (c.isInstance || !c.type.startsWith('$')) return undefined;
+  const out: Record<string, string> = {};
+  for (const k of SEMANTIC_PARAMS) {
+    const v = c.parameters[k]?.trim();
+    if (v === undefined) continue;
+    // Polarities default to 1 (rising edge, active high); reset values and signedness to 0.
+    const isDefault = k.endsWith('_POLARITY') ? /1/.test(v) : /^0*$/.test(v);
+    if (!isDefault) out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function portSide(cell: IRCell, port: string, dir: 'in' | 'out'): Side {
@@ -294,6 +325,7 @@ export function buildDiagram(
         }
       }
     }
+    const params = semanticParams(c);
     nodes.push(
       c.isInstance
         ? {
@@ -317,6 +349,7 @@ export function buildDiagram(
             src: c.src,
             rule: c.rule,
             attrs: c.attrs,
+            ...(params ? { params } : {}),
           },
     );
   }
@@ -368,7 +401,7 @@ export function buildDiagram(
     return nameBits(m.nets, bits)?.name;
   };
 
-  const connectRun = (r: Run, target: DEndpoint, fullSink: boolean, note?: string) => {
+  const connectRun = (r: Run, target: DEndpoint, fullSink: boolean, note?: string, shift?: number) => {
     if (r.kind === 'const') {
       const cid = `const:${target.port}[${r.lo}]`;
       const cport: DPort = { id: `${cid}.out`, name: 'out', dir: 'out', side: 'EAST', width: r.bits.length };
@@ -395,6 +428,7 @@ export function buildDiagram(
       label: note ? [fullSource ? undefined : name, note].filter(Boolean).join(' ') : fullSource && fullSink ? undefined : name,
       netName: name,
       ...(fullSource ? {} : { bits: { lo: d.index, width: len } }),
+      ...(shift ? { shift } : {}),
     });
   };
 
@@ -425,7 +459,7 @@ export function buildDiagram(
       // {x, 2'b00}: low-order zeros multiply by a power of two.
       const k = runs[0].bits.length;
       if (runs[0].bits.every((b) => b === '0') && k < 31) {
-        connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`);
+        connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`, k);
         runs = [];
       }
     } else if (runs.length <= 1) {

@@ -6,6 +6,8 @@ import { DEFAULT_RULES, type RuleId } from '../core/rules';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
+import { emptyEdits } from './doc';
+import { effectiveDiagram, rename } from './sheet';
 import { type InterfaceOf, type SymKey, type SymParams, newUserNode, symbolNode } from './symbols';
 import { diagramToVerilog, verilogIdent } from './verilog-export';
 
@@ -107,6 +109,30 @@ async function expectEquivalent(gold: Record<string, string>, gate: Record<strin
     throw new Error(`${top}: designs differ (${String(e)})\n${log.slice(-4000)}`);
   }
 }
+
+/** Flatten a design with Yosys and check it: fails when, for example, a port of an instance drives a constant. */
+async function expectFlattens(files: Record<string, string>, top: string): Promise<void> {
+  let log = '';
+  const sink = (bytes: Uint8Array | null) => {
+    if (bytes) log += new TextDecoder().decode(bytes);
+  };
+  const script = `read_verilog -sv ${Object.keys(files).join(' ')}; hierarchy -check -top ${top}; proc; flatten; tribuf -merge; check -assert`;
+  try {
+    await runYosys(['-p', script], files, { stdout: sink, stderr: sink });
+  } catch (e) {
+    throw new Error(`${top}: does not flatten (${String(e)})\n${log.slice(-4000)}`);
+  }
+}
+
+/** Flip-flops of a module as `type CLK=… ARST=… VALUE=…`, to compare clock edges the SAT check cannot tell apart. */
+const flops = (ir: IRDesign, m: string) =>
+  ir.modules[m].cells
+    .filter((c) => /^\$(a|s)?dff/.test(c.type))
+    .map((c) => {
+      const p = c.parameters;
+      return `${c.type} CLK=${p.CLK_POLARITY} ARST=${p.ARST_POLARITY ?? '-'} VALUE=${p.ARST_VALUE ?? '-'}`;
+    })
+    .sort();
 
 describe('verilogIdent', () => {
   it('keeps legal names and repairs the others', () => {
@@ -530,6 +556,273 @@ describe('diagramToVerilog', () => {
     expect(warnings).toContainEqual("Pin 'module' is not a legal Verilog name; it is written as module_");
     const ir = await design({ 'names.v': code });
     expect(portNames(ir, 'my_module')).toEqual(['module_', '_2x', 'a_b', 'a', 'a_2', 'y', 'reg_']);
+  }, 60_000);
+});
+
+describe('imported cell parameters', () => {
+  const ruleSets: [string, ReadonlySet<RuleId>][] = [
+    ['no rules', new Set()],
+    ['default rules', DEFAULT_RULES],
+  ];
+
+  it.each(ruleSets)('keep clock edges and reset values of registers (%s)', async (_name, rules) => {
+    const files = {
+      'regs.v': `module regs(input clk, rst, input [3:0] d, output reg [3:0] a, n, m);
+        always @(posedge clk or posedge rst) if (rst) a <= 4'hA; else a <= d;
+        always @(negedge clk) n <= d;
+        always @(negedge clk or posedge rst) if (rst) m <= 4'h5; else m <= d;
+      endmodule`,
+    };
+    const before = await design(files);
+    const { code, warnings } = diagramToVerilog(buildDiagram(before, 'regs', rules), 'regs');
+    expect(warnings).toEqual([]);
+    expect(code).toMatch(/always @\(negedge clk\) \w+ <= d;/);
+    // (Yosys reads the reset through a |rst cell.)
+    expect(code).toMatch(/always @\(negedge clk or posedge (\w+)\)\n {4}if \(\1\) \w+ <= 4'd5;/);
+    expect(code).toMatch(/always @\(posedge clk or posedge (\w+)\)\n {4}if \(\1\) \w+ <= 4'd10;/);
+    // The SAT proof below models every flip-flop as clocked by the same step, so compare the edges here.
+    const after = await design({ 'regs.v': code });
+    expect(flops(after, 'regs')).toEqual(flops(before, 'regs'));
+    expect(flops(after, 'regs')).toContain('$dff CLK=0 ARST=- VALUE=-');
+    await expectEquivalent(files, { 'regs.v': code }, 'regs');
+  }, 60_000);
+
+  it('writes active-low resets and enables, and reset values, of register cells', async () => {
+    const s = new Sheet();
+    const clk = s.add('input', 'clk');
+    const en = s.add('input', 'en');
+    const rst = s.add('input', 'rst');
+    const d = s.add('input', 'd', { width: 2 });
+    const reg = (type: string, extra: string[], params: Record<string, string>, out: string) => {
+      const ports: [string, 'in' | 'out', number][] = [['D', 'in', 2], ['Q', 'out', 2]];
+      if (type !== '$dlatch') ports.push(['CLK', 'in', 1]);
+      for (const p of extra) ports.push([p, 'in', 1]);
+      const r = s.cell(type, ports);
+      r.params = params;
+      s.wire(d, 'out', r, 'D');
+      if (type !== '$dlatch') s.wire(clk, 'out', r, 'CLK');
+      for (const p of extra) s.wire(p === 'EN' ? en : rst, 'out', r, p);
+      s.wire(r, 'Q', s.add('output', out, { width: 2 }), 'in');
+      return r;
+    };
+    reg('$adffe', ['ARST', 'EN'], { ARST_POLARITY: '0', EN_POLARITY: '0', ARST_VALUE: '10' }, 'q_adffe');
+    reg('$sdffe', ['SRST', 'EN'], { CLK_POLARITY: '0', SRST_POLARITY: '0', SRST_VALUE: '01' }, 'q_sdffe');
+    reg('$dlatch', ['EN'], { EN_POLARITY: '0' }, 'q_dlatch');
+    // A reset tied to its inactive level (1 for an active-low reset) never fires.
+    const idle = s.cell('$adff', [['D', 'in', 2], ['CLK', 'in', 1], ['ARST', 'in', 1], ['Q', 'out', 2]]);
+    idle.params = { ARST_POLARITY: '0', ARST_VALUE: '11' };
+    s.wire(d, 'out', idle, 'D');
+    s.wire(clk, 'out', idle, 'CLK');
+    s.wire(s.add('const', undefined, { value: "1'b1" }), 'out', idle, 'ARST');
+    s.wire(idle, 'Q', s.add('output', 'q_idle', { width: 2 }), 'in');
+
+    const { code, warnings } = diagramToVerilog(s.diagram('regs3'), 'regs3');
+    expect(warnings).toEqual([]);
+    expect(code).toContain("always @(posedge clk or negedge rst)\n    if (!rst) adffe1_Q <= 2'd2;\n    else if (!en) adffe1_Q <= d;");
+    expect(code).toContain("always @(negedge clk)\n    if (!rst) sdffe1_Q <= 2'd1;\n    else if (en) sdffe1_Q <= d;");
+    expect(code).toContain('always @* if (!en) dlatch1_Q = d;');
+    expect(code).toContain('always @(posedge clk) adff1_Q <= d;');
+    await design({ 'regs3.v': code });
+    const gold = `module regs3(input clk, en, rst, input [1:0] d, output reg [1:0] q_adffe, q_sdffe, q_idle);
+      always @(posedge clk or negedge rst) if (!rst) q_adffe <= 2'b10; else if (!en) q_adffe <= d;
+      always @(negedge clk) if (!rst) q_sdffe <= 2'b01; else if (en) q_sdffe <= d;
+      always @(posedge clk) q_idle <= d;
+    endmodule`;
+    // The latch is left out of the proof (SAT does not model latches); it only has to elaborate.
+    const flopsOnly = diagramToVerilog({ ...s.diagram('regs3'), nodes: s.nodes.filter((n) => n.cellType !== '$dlatch' && n.label !== 'q_dlatch') }, 'regs3');
+    await expectEquivalent({ 'r.v': gold }, { 'r.v': flopsOnly.code }, 'regs3');
+  }, 60_000);
+
+  it.each(ruleSets)('keep signed operands (%s)', async (_name, rules) => {
+    const files = {
+      'sg.v': `module sg(input signed [3:0] a, input signed [5:0] b, input [2:0] s, input signed [2:0] i, input [15:0] bus,
+        output lt, eq, output signed [7:0] sum, prod, sr, neg, inv, pos, output [3:0] part);
+        assign lt = a < b;
+        assign eq = a == b;
+        assign sum = a + b;
+        assign prod = a * b;
+        assign sr = a >>> s;
+        assign neg = -a;
+        assign inv = ~a;
+        assign pos = +a;
+        assign part = bus[i +: 4];
+      endmodule`,
+    };
+    const before = await design(files);
+    const { code, warnings } = diagramToVerilog(buildDiagram(before, 'sg', rules), 'sg');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('assign lt = $signed(a) < $signed(b);');
+    expect(code).toContain('assign eq = $signed(a) == $signed(b);');
+    expect(code).toContain('assign sum = $signed(a) + $signed(b);');
+    expect(code).toContain('assign sr = $signed(a) >>> s;');
+    // Yosys widens the operand of a unary operator itself (with copies of the sign bit).
+    expect(code).toMatch(/assign neg = -\$signed\(\w+\);/);
+    expect(code).toMatch(/\(\$signed\(\w+\) < 0\) \? bus << -\w+ : bus >> \w+;/);
+    await expectEquivalent(files, { 'sg.v': code }, 'sg');
+  }, 60_000);
+});
+
+describe('edits of imported sheets', () => {
+  it('keeps the ×4 scale of an imported wire when its label is renamed or cleared', async () => {
+    const files = { 'sc.v': "module sc(input [3:0] a, b, output [5:0] y); assign y = a + {b, 2'b00}; endmodule" };
+    const base = buildDiagram(await design(files), 'sc', DEFAULT_RULES);
+    const scaled = base.edges.find((e) => e.label === '×4');
+    expect(scaled?.shift).toBe(2);
+    for (const text of ['b_shifted', '']) {
+      const d = effectiveDiagram('sc', base, rename(emptyEdits(), scaled!.id, text), () => undefined);
+      expect(d.edges.find((e) => e.id === scaled!.id)?.label).toBe(text || undefined);
+      const { code } = diagramToVerilog(d, 'sc');
+      expect(code).toContain("{b, 2'd0}");
+      await expectEquivalent(files, { 'sc.v': code }, 'sc');
+    }
+    // A hand-drawn (or copied) wire has no recorded shift: its ×4 label still counts.
+    const s = new Sheet();
+    const b = s.add('input', 'b', { width: 4 });
+    const y = s.add('output', 'y', { width: 6 });
+    s.wire(b, 'out', y, 'in', '×4');
+    expect(diagramToVerilog(s.diagram('drawn'), 'drawn').code).toContain("assign y = {b, 2'd0};");
+  }, 60_000);
+
+  it('names a renamed imported instance by its new name', async () => {
+    const files = {
+      'h.v': 'module leaf(input a, output y); assign y = ~a; endmodule\nmodule top(input a, output y); leaf u_leaf(.a(a), .y(y)); endmodule',
+    };
+    const base = buildDiagram(await design(files, 'top'), 'top', DEFAULT_RULES);
+    const inst = base.nodes.find((n) => n.instanceName === 'u_leaf')!;
+    const renamed = effectiveDiagram('top', base, rename(emptyEdits(), inst.id, 'first'), () => undefined);
+    const { code, warnings } = diagramToVerilog(renamed, 'top');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('leaf first (');
+    expect(code).not.toContain('u_leaf');
+    // Clearing the rename goes back to the name in the Verilog.
+    const cleared = effectiveDiagram('top', base, rename(emptyEdits(), inst.id, ''), () => undefined);
+    expect(diagramToVerilog(cleared, 'top').code).toContain('leaf u_leaf (');
+  }, 60_000);
+
+  it('writes unsized constants sized, so they are legal inside a concatenation', async () => {
+    const s = new Sheet();
+    const a = s.add('input', 'a', { width: 32 });
+    const hi = s.add('const', undefined, { value: "'hFF" });
+    const cat = s.add('concat', undefined, { parts: 2, width: 32 });
+    const y = s.add('output', 'y', { width: 64 });
+    s.wire(hi, 'out', cat, '[63:32]');
+    s.wire(a, 'out', cat, '[31:0]');
+    s.wire(cat, 'out', y, 'in');
+    const { code, warnings } = diagramToVerilog(s.diagram('cat'), 'cat');
+    expect(warnings).toEqual([]);
+    expect(code).toContain("assign y = {32'd255, a};");
+    const gold = "module cat(input [31:0] a, output [63:0] y); assign y = {32'hFF, a}; endmodule";
+    await expectEquivalent({ 'c.v': gold }, { 'c.v': code }, 'cat');
+  }, 60_000);
+});
+
+describe('inout ports of blocks', () => {
+  /** A drawing with an inout pin `io` that `a` drives and `y` reads. */
+  const leafSheet = () => {
+    const leaf = new Sheet();
+    const io = leaf.add('inout', 'io', { width: 4 });
+    const a = leaf.add('input', 'a', { width: 4 });
+    const y = leaf.add('output', 'y', { width: 4 });
+    leaf.wire(a, 'out', io, 'in');
+    leaf.wire(io, 'out', y, 'in');
+    return leaf;
+  };
+  /** A drawing that only reads its inout pin `io` (into `y`). */
+  const readerSheet = () => {
+    const reader = new Sheet();
+    const io = reader.add('inout', 'io', { width: 4 });
+    reader.wire(io, 'out', reader.add('output', 'y', { width: 4 }), 'in');
+    return reader;
+  };
+  const iface: InterfaceOf = (m) =>
+    m === 'leaf' || m === 'reader'
+      ? {
+          label: m,
+          ports: [
+            { name: 'io', dir: 'inout', width: 4 },
+            ...(m === 'leaf' ? [{ name: 'a', dir: 'input' as const, width: 4 }] : []),
+            { name: 'y', dir: 'output', width: 4 },
+          ],
+        }
+      : undefined;
+
+  it('leaves an open inout port open instead of tying it to 0', async () => {
+    const leafOut = diagramToVerilog(leafSheet().diagram('leaf'), 'leaf');
+    expect(leafOut.warnings).toEqual([]);
+    const top = new Sheet(iface);
+    const p = top.add('input', 'p', { width: 4 });
+    const u = top.add('block', 'u1', { module: 'leaf' });
+    expect(u.ports.find((q) => q.name === 'io')?.inout).toBe(true);
+    top.wire(p, 'out', u, 'a');
+    top.wire(u, 'y', top.add('output', 's', { width: 4 }), 'in');
+    const { code, warnings } = diagramToVerilog(top.diagram('top'), 'top');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('leaf u1 (\n    .io(),\n    .a(p),\n    .y(s)\n  );');
+    const gate = { 'leaf.v': leafOut.code, 'top.v': code };
+    await expectFlattens(gate, 'top');
+    await expectEquivalent({ 't.v': 'module top(input [3:0] p, output [3:0] s); assign s = p; endmodule' }, gate, 'top');
+  }, 60_000);
+
+  it('gives inout ports joined by wires one shared net', async () => {
+    const top = new Sheet(iface);
+    const p = top.add('input', 'p', { width: 4 });
+    const u1 = top.add('block', 'u1', { module: 'leaf' });
+    const u2 = top.add('block', 'u2', { module: 'reader' });
+    top.wire(p, 'out', u1, 'a');
+    // The editor draws a wire between two inout ports from one to the other (both are wired as inputs).
+    top.wire(u1, 'io', u2, 'io', 'shared');
+    top.wire(u1, 'io', top.add('output', 'seen', { width: 4 }), 'in');
+    top.wire(u2, 'y', top.add('output', 't', { width: 4 }), 'in');
+    const { code, warnings } = diagramToVerilog(top.diagram('top'), 'top');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('wire [3:0] shared;');
+    expect(code).toContain('leaf u1 (\n    .io(shared),');
+    expect(code).toContain('reader u2 (\n    .io(shared),');
+    expect(code).toContain('assign seen = shared;');
+    const gate = {
+      'leaf.v': diagramToVerilog(leafSheet().diagram('leaf'), 'leaf').code,
+      'reader.v': diagramToVerilog(readerSheet().diagram('reader'), 'reader').code,
+      'top.v': code,
+    };
+    await expectFlattens(gate, 'top');
+    // What u1 drives onto the bus reaches u2 and the output.
+    const gold = 'module top(input [3:0] p, output [3:0] seen, t); assign seen = p; assign t = p; endmodule';
+    await expectEquivalent({ 't.v': gold }, gate, 'top');
+  }, 60_000);
+
+  it('keeps an imported tristate bus shared between instances and pins', async () => {
+    const child = `module child(inout [3:0] bus, input en, input [3:0] d, output [3:0] q);
+      assign bus = en ? d : 4'bz;
+      assign q = bus;
+    endmodule`;
+    const shared = `module top(input e1, e2, input [3:0] d1, d2, output [3:0] q1, q2, seen);
+      wire [3:0] bus;
+      child c1(.bus(bus), .en(e1), .d(d1), .q(q1));
+      child c2(.bus(bus), .en(e2), .d(d2), .q(q2));
+      assign seen = bus;
+    endmodule`;
+    const files = { 'child.v': child, 'top.v': shared };
+    const ir = await design(files, 'top');
+    for (const rules of [new Set<RuleId>(), DEFAULT_RULES]) {
+      const top = diagramToVerilog(buildDiagram(ir, 'top', rules), 'top');
+      expect(top.warnings).toEqual([]);
+      expect(top.code).toContain('wire [3:0] bus;');
+      expect(top.code.match(/\.bus\(bus\)/g)).toHaveLength(2);
+      expect(top.code).toContain('assign seen = bus;');
+      // The child reads the bus itself (what the other instance drives too), not only its own driver.
+      const leaf = diagramToVerilog(buildDiagram(ir, 'child', rules), 'child');
+      expect(leaf.warnings).toEqual([]);
+      expect(leaf.code).toContain('assign q = bus;');
+      await expectFlattens({ 'child.v': leaf.code, 'top.v': top.code }, 'top');
+    }
+
+    // An inout pin of the parent passed down: the import draws the pin feeding itself, which must not become `assign bus = bus;`.
+    const pinned = await design({ 'child.v': child, 'top.v': 'module top(inout [3:0] bus, input en, input [3:0] d, output [3:0] q); child c1(.bus(bus), .en(en), .d(d), .q(q)); endmodule' }, 'top');
+    const { code, warnings } = diagramToVerilog(buildDiagram(pinned, 'top', new Set()), 'top');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('.bus(bus),');
+    expect(code).not.toContain('assign bus');
+    await expectFlattens({ 'child.v': child, 'top.v': code }, 'top');
   }, 60_000);
 });
 
