@@ -1,0 +1,84 @@
+import { describe, expect, it } from 'vitest';
+import { type LEdge, type LNode, type LayoutResult, approxMeasure } from '../layout/elk-layout';
+import { exportSvg } from './export';
+import { THEMES } from './theme';
+
+const box = (x: number, y: number, width: number, height: number) => ({ x, y, width, height });
+
+function layout(nodes: LNode[], edges: LEdge[]): LayoutResult {
+  return { module: 't', x: 0, y: 0, width: 600, height: 300, nodes, edges };
+}
+
+/** The x and y of the text element that writes `text`. */
+function textAt(svg: string, text: string): { x: number; y: number } {
+  const m = new RegExp(`<text([^>]*)>${text.replace(/[[\]]/g, '\\$&')}</text>`).exec(svg)!;
+  const attr = (k: string) => Number(new RegExp(`\\s${k}="([^"]*)"`).exec(m[1])![1]);
+  return { x: attr('x'), y: attr('y') };
+}
+
+describe('wire labels', () => {
+  const pin = (id: string, kind: 'input' | 'output', x: number, y: number, width: number): LNode => ({
+    id,
+    kind,
+    label: id,
+    src: [],
+    x,
+    y,
+    width: 40,
+    height: 20,
+    ports: [
+      kind === 'input'
+        ? { id: `${id}.out`, name: 'out', side: 'EAST', dir: 'out', width, x: x + 40, y: y + 10 }
+        : { id: `${id}.in`, name: 'in', side: 'WEST', dir: 'in', width, x, y: y + 10 },
+    ],
+  });
+  const wire = (id: string, from: string, to: string, points: { x: number; y: number }[], extra: Partial<LEdge> = {}): LEdge => ({
+    id,
+    source: { node: from.split('.')[0], port: from },
+    target: { node: to.split('.')[0], port: to },
+    width: 1,
+    fullSource: true,
+    points,
+    junctions: [],
+    ...extra,
+  });
+
+  it('are drawn over the symbols, with a rim of background over what is behind them, and let clicks through', () => {
+    // Where no clear spot was left, the text stays readable rather than hidden under the symbol.
+    const nodes = [pin('a', 'input', 100, 110, 1), pin('y', 'output', 300, 110, 1)];
+    const edges = [wire('a.out>y.in', 'a.out', 'y.in', [{ x: 140, y: 120 }, { x: 300, y: 120 }], { label: 'busy', labelBox: box(280, 104, 30, 13) })];
+    const svg = exportSvg(layout(nodes, edges), THEMES.report);
+    expect(svg.indexOf('>busy</text>')).toBeGreaterThan(svg.lastIndexOf('<polygon'));
+    expect(svg).toMatch(/<g pointer-events="none"><text[^>]*stroke="#ffffff"[^>]*paint-order="stroke"[^>]*>busy</);
+  });
+
+  it('keep the slice names of a split off them', () => {
+    // A split whose upper slice carries a label right where that slice's name goes.
+    const split: LNode = {
+      id: 's',
+      kind: 'split',
+      label: '}{',
+      src: [],
+      x: 250,
+      y: 100,
+      width: 10,
+      height: 40,
+      ports: [
+        { id: 's.in', name: 'in', side: 'WEST', dir: 'in', width: 8, x: 250, y: 120 },
+        { id: 's.[7:4]', name: '[7:4]', side: 'EAST', dir: 'out', width: 4, x: 260, y: 110 },
+        { id: 's.[3:0]', name: '[3:0]', side: 'EAST', dir: 'out', width: 4, x: 260, y: 130 },
+      ],
+    };
+    const nodes = [pin('a', 'input', 100, 110, 8), split, pin('hi', 'output', 450, 100, 4), pin('lo', 'output', 450, 120, 4)];
+    const label = 'high_nibble';
+    const w = Math.ceil(approxMeasure(label, 11)) + 4;
+    const edges = [
+      wire('a.out>s.in', 'a.out', 's.in', [{ x: 140, y: 120 }, { x: 250, y: 120 }], { width: 8 }),
+      wire('s.[7:4]>hi.in', 's.[7:4]', 'hi.in', [{ x: 260, y: 110 }, { x: 450, y: 110 }], { width: 4, label, labelBox: box(262, 94, w, 13) }),
+      wire('s.[3:0]>lo.in', 's.[3:0]', 'lo.in', [{ x: 260, y: 130 }, { x: 450, y: 130 }], { width: 4 }),
+    ];
+    const svg = exportSvg(layout(nodes, edges), THEMES.report);
+    // Below its wire instead of above it, under the label.
+    expect(textAt(svg, '[7:4]').y).toBeGreaterThan(110);
+  });
+});

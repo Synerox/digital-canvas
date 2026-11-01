@@ -688,6 +688,24 @@ export function portStub(end: RouteEnd, grid = 10): Point {
   return stubEnd(end, STUB, STUB_CLEAR, grid > 0 ? grid : 10);
 }
 
+/** Whether a point is inside the keep-out of a symbol other than `own`. */
+const inKeepOut = (pt: Point, obstacles: Rect[], own: Rect) =>
+  obstacles.some(
+    (r) => !sameRect(r, own) && pt.x > r.x - INFLATE + EPS && pt.x < r.x + r.width + INFLATE - EPS && pt.y > r.y - INFLATE + EPS && pt.y < r.y + r.height + INFLATE - EPS,
+  );
+
+/**
+ * The stub's end for a search: on the grid, unless that is in another symbol's keep-out (a symbol right
+ * under a MUX's select pin) and the shortest stub ends clear of it. A wire to a grid point in there has to
+ * cross into the symbol and runs along its outline, dipping down and back up into the pin.
+ */
+function searchStubEnd(end: RouteEnd, obstacles: Rect[], grid: number): Point {
+  const snapped = stubEnd(end, STUB, STUB_CLEAR, grid);
+  if (!inKeepOut(snapped, obstacles, end.rect)) return snapped;
+  const shortest = stubEnd(end, STUB, STUB_CLEAR, 0);
+  return inKeepOut(shortest, obstacles, end.rect) ? snapped : shortest;
+}
+
 /** Direction of travel from a to an axis-aligned b, or -1 when they are the same point or not aligned. */
 function directionTo(a: Point, b: Point): number {
   if (a.y === b.y && a.x !== b.x) return b.x > a.x ? 0 : 2;
@@ -901,8 +919,8 @@ export function routeWire(from: RouteEnd, to: RouteEnd, opts: RouteOptions): Poi
   const straight = straightRoute(from, to, obstacles, others);
   if (straight) return straight;
 
-  const a = stubEnd(from, STUB, STUB_CLEAR, grid);
-  const b = stubEnd(to, STUB, STUB_CLEAR, grid);
+  const a = searchStubEnd(from, obstacles, grid);
+  const b = searchStubEnd(to, obstacles, grid);
   // Own-net wires that start at this port, cut to their orthogonal part, and to before they first run
   // through a symbol: a branch takes the wire's path up to the branch point and must not copy a crossing.
   const own: Point[][] = [];

@@ -290,6 +290,26 @@ describe('routeWire', () => {
     expect(polylineHitsRect(pts, to.rect)).toBe(false);
   });
 
+  it('enters a SOUTH pin over a symbol right under it without dipping onto that symbol', () => {
+    // A MUX's select pin on its sloped bottom edge, another MUX 10px under it (F12): the grid line the stub
+    // usually ends on is inside the lower MUX, and the wire went down to it along the MUX's outline and back up.
+    const upper = R(328, 146, 60, 60);
+    const lower = R(330, 216, 60, 60);
+    const src = R(239, 588, 40, 40);
+    const from = east(src, 608);
+    const to: RouteEnd = { point: P(358, 201), side: 'SOUTH', rect: upper };
+    const pts = routeWire(from, to, { obstacles: [upper, lower, src] });
+    expectClean(pts, from, to);
+    expect(polylineCrowdsRect(pts, lower)).toBe(false);
+    // Up from the source, across under the pin and up into it: no dip down and back up.
+    expect(lastMove(pts)).toBe('N');
+    expect(bends(pts)).toBe(3);
+    expect(pts[pts.length - 2].y).toBeLessThanOrEqual(lower.y - 4);
+    // With room under the pin, the stub still ends on the grid.
+    const roomy = routeWire(from, to, { obstacles: [upper, R(330, 236, 60, 60), src] });
+    expect(roomy[roomy.length - 2]).toEqual(P(358, 220));
+  });
+
   it('falls back to simpleRoute when the search budget is exhausted', () => {
     const B2 = R(300, 60, 60, 60);
     const from = east(A, 40);

@@ -146,8 +146,8 @@ const SLICE_FONT = 9;
 /**
  * Where the slice names of splits (`[7:4]` right of the bar, above its wire) and of concatenations
  * (left of the bar, below its wire) go. When a wire (typically the name's own, turning just next to
- * the bar) or another name runs through it, the name moves past its wire's bend, or else to the
- * other side of its wire.
+ * the bar), a wire label or another name runs through it, the name moves past its wire's bend, or
+ * else to the other side of its wire.
  */
 function placeSliceNames(nodes: readonly LNode[], edges: readonly LEdge[], labeledPorts?: ReadonlySet<string>): Map<string, TextSpot> {
   const out = new Map<string, TextSpot>();
@@ -162,7 +162,8 @@ function placeSliceNames(nodes: readonly LNode[], edges: readonly LEdge[], label
     }
     return undefined;
   };
-  const placed: Box[] = [];
+  // Wire labels are placed already (by the sheet's geometry): names keep off them too.
+  const placed: Box[] = edges.flatMap((e) => (e.label && e.labelBox ? [e.labelBox] : []));
   for (const n of nodes) {
     if (n.kind !== 'split' && n.kind !== 'join') continue;
     for (const q of n.ports) {
@@ -594,6 +595,18 @@ function Edges({
           ))}
         </g>
       )}
+    </g>
+  );
+}
+
+/**
+ * Wire labels, drawn over everything else: the geometry keeps them off symbols, wires and each other
+ * where it can, and where it cannot, the text stays readable on top, with a rim of background colour
+ * over the wires behind it. Clicks go through to what is underneath.
+ */
+function WireLabels({ edges, theme }: { edges: readonly LEdge[]; theme: Theme }) {
+  return (
+    <g pointerEvents="none">
       {edges.map((e) =>
         e.label && e.labelBox ? (
           <text
@@ -604,6 +617,10 @@ function Edges({
             fontStyle="italic"
             fill={theme.ink}
             fontFamily={theme.font}
+            stroke={theme.background}
+            strokeWidth={3}
+            strokeLinejoin="round"
+            paintOrder="stroke"
           >
             {e.label}
           </text>
@@ -629,6 +646,7 @@ export function DiagramGraphic(props: GraphicProps) {
       {nodes.map((n) => (
         <NodeShape key={n.id} n={n} p={p} names={names} />
       ))}
+      <WireLabels edges={edges} theme={p.theme} />
     </g>
   );
 }

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildDiagram } from '../core/diagram';
+import { withFlattened } from '../core/flatten';
+import { withAutoBlocks } from '../core/partition';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
+import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 import { type LayoutResult, type Point, approxMeasure, layoutDiagram } from '../layout/elk-layout';
 import { type SheetEdits, emptyEdits } from './doc';
 import { buildGeometry, labelBox, runTogether } from './geometry';
@@ -232,6 +235,143 @@ function touching(l: LayoutResult): string[] {
 }
 
 const verticalX = (points: Point[]) => points.find((p, i) => i > 0 && p.x === points[i - 1].x)!.x;
+
+type Box = { x: number; y: number; width: number; height: number };
+const overlaps = (a: Box, b: Box) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+const segmentBox = (p: Point, q: Point): Box => ({ x: Math.min(p.x, q.x) - 0.5, y: Math.min(p.y, q.y) - 0.5, width: Math.abs(p.x - q.x) + 1, height: Math.abs(p.y - q.y) + 1 });
+
+/** Wire labels drawn on a symbol, on another label, or with a wire running through them. */
+function labelClashes(l: LayoutResult): string[] {
+  const out: string[] = [];
+  const labelled = l.edges.filter((x) => x.label && x.labelBox);
+  for (const x of labelled) {
+    const b = x.labelBox!;
+    for (const n of l.nodes) if (overlaps(b, n)) out.push(`${x.label} on ${n.id}`);
+    for (const y of labelled) if (y.id > x.id && overlaps(b, y.labelBox!)) out.push(`${x.label} on ${y.label}`);
+    for (const y of l.edges) if (y.points.some((q, i) => i > 0 && overlaps(b, segmentBox(y.points[i - 1], q)))) out.push(`${x.label} crossed by ${y.id}`);
+  }
+  return out;
+}
+
+/** Whether a label sits along its wire: just above or below one of its horizontal stretches, or beside a vertical one. */
+function alongWire(b: Box, points: Point[]): boolean {
+  return points.some((q, i) => {
+    if (i === 0) return false;
+    const p = points[i - 1];
+    if (p.y === q.y) return (b.y + b.height === p.y - 3 || b.y === p.y + 3) && b.x < Math.max(p.x, q.x) && b.x + b.width > Math.min(p.x, q.x);
+    return (b.x === p.x + 3 || b.x + b.width === p.x - 3) && b.y < Math.max(p.y, q.y) && b.y + b.height > Math.min(p.y, q.y);
+  });
+}
+
+describe('wire labels', () => {
+  const m = approxMeasure;
+  const line = [
+    { x: 0, y: 100 },
+    { x: 300, y: 100 },
+  ];
+
+  it('goes above the wire next to its target when nothing is in the way', () => {
+    const b = labelBox(line, 'data_bus', m, { nodes: [], wires: [], labels: [] });
+    expect(b.x + b.width).toBe(296);
+    expect(b.y + b.height).toBe(97);
+  });
+
+  it('moves along its wire, or below it, away from wires, symbols and labels in the way', () => {
+    const scene = { nodes: [] as Box[], wires: [segmentBox({ x: 280, y: 0 }, { x: 280, y: 200 })], labels: [] as Box[] };
+    let b = labelBox(line, 'data_bus', m, scene);
+    expect(b.x + b.width).toBeLessThan(279.5);
+    expect(b.y + b.height).toBe(97);
+    // A symbol over the whole wire: below it.
+    scene.nodes.push({ x: 0, y: 40, width: 300, height: 50 });
+    b = labelBox(line, 'data_bus', m, scene);
+    expect(b.y).toBe(103);
+    expect(b.x + b.width).toBeLessThan(279.5);
+    // And another label there too: further along.
+    scene.labels.push({ ...b });
+    const c = labelBox(line, 'data_bus', m, scene);
+    expect(c.y).toBe(103);
+    expect(c.x + c.width + 2).toBeLessThan(b.x);
+  });
+
+  it('keeps off the stretch a wire shares with others of its net, when it can', () => {
+    // The wire runs along another wire of its net up to (100, 100), then turns off down to its target.
+    const branch = [
+      { x: 0, y: 100 },
+      { x: 100, y: 100 },
+      { x: 100, y: 200 },
+      { x: 300, y: 200 },
+    ];
+    const b = labelBox(branch, 'data_bus', m, { nodes: [], wires: [], labels: [] }, 100);
+    expect(b.y + b.height).toBe(197);
+    // A symbol on the stretch it has to itself: beside the vertical, still past the branch.
+    const c = labelBox(branch, 'data_bus', m, { nodes: [{ x: 100, y: 150, width: 200, height: 46 }], wires: [], labels: [] }, 100);
+    expect(alongWire(c, branch.slice(1))).toBe(true);
+    expect(c.y).toBeGreaterThan(100);
+  });
+
+  it('takes the least cluttered spot when no spot is clear', () => {
+    const scene = { nodes: [{ x: -50, y: 0, width: 400, height: 96 }], wires: [segmentBox({ x: 150, y: 90 }, { x: 150, y: 300 })], labels: [] };
+    // Above: on the symbol; below: crossed by the wire, unless it fits on one side of it.
+    const b = labelBox(line, 'a_long_signal_name_that_does_not_fit', m, scene);
+    expect(b.y).toBe(103);
+  });
+
+  it('keeps a label drawn by hand on a wire clear of the symbols, when the last stretch is too short for it', () => {
+    // A counter's feedback wire round the top (F11): its last stretch into the adder is 10px long.
+    const s = new Sheet([
+      ['u:1', 'add', 200, 140],
+      ['u:2', 'dff', 360, 140],
+    ]);
+    const q = s.pin('u:2.Q');
+    const a = s.pin('u:1.A');
+    const route = [q, { x: q.x + 10, y: q.y }, { x: q.x + 10, y: 100 }, { x: a.x - 10, y: 100 }, { x: a.x - 10, y: a.y }, a];
+    const w = s.wire('u:2.Q', 'u:1.A', route);
+    s.e = rename(s.e, w, 'count');
+    const g = s.refresh();
+    const x = g.layout.edges.find((y) => y.id === w)!;
+    expect(x.points).toEqual(route);
+    expect(labelClashes(g.layout)).toEqual([]);
+    // Above the stretch along the top, at its end nearest the adder.
+    expect(x.labelBox!.y + x.labelBox!.height).toBe(97);
+    expect(x.labelBox!.x).toBe(a.x - 8);
+  });
+
+  it('stays where it is while nothing comes into its way', () => {
+    const s = new Sheet([
+      ['u:1', 'input', 0, 90],
+      ['u:2', 'output', 400, 90],
+      ['u:3', 'input', 0, 300],
+      ['u:4', 'output', 400, 300],
+    ]);
+    const w = s.wire('u:1.out', 'u:2.in');
+    s.e = rename(s.e, w, 'data_bus');
+    s.refresh();
+    const before = s.layout!.edges.find((y) => y.id === w)!.labelBox!;
+    // A wire of another net drawn by hand through the label's spot moves it; it stays put after that.
+    const v = s.wire('u:3.out', 'u:4.in', [s.pin('u:3.out'), { x: 380, y: 310 }, { x: 380, y: 60 }, { x: 390, y: 60 }, { x: 390, y: 310 }, s.pin('u:4.in')]);
+    const moved = s.layout!.edges.find((y) => y.id === w)!.labelBox!;
+    expect(moved).not.toEqual(before);
+    expect(labelClashes(s.layout!)).toEqual([]);
+    s.move(['u:3'], 0, 20);
+    expect(s.layout!.edges.find((y) => y.id === v)!.points.some((p) => p.x === 380)).toBe(true);
+    expect(s.layout!.edges.find((y) => y.id === w)!.labelBox).toEqual(moved);
+  });
+
+  it('keeps the labels of the Fruit Battle sheets off symbols, wires and each other', async () => {
+    const files = { [FRUIT_FILE]: FRUIT_SOURCE };
+    const d = await design(files);
+    const blocks = withAutoBlocks(d, files);
+    const sheets = [buildDiagram(withFlattened(d, d.top), d.top), buildDiagram(blocks, 'top/field_owner'), buildDiagram(blocks, 'top/crop_points')];
+    for (const sheet of sheets) {
+      const e = layoutToEdits(emptyEdits(), await layoutDiagram(sheet), 'none');
+      const g = buildGeometry({ netlist: sheet, pos: e.pos, routes: e.routes, measure: approxMeasure });
+      const labelled = g.layout.edges.filter((x) => x.labelBox);
+      expect(labelled.length, sheet.module).toBeGreaterThan(8);
+      expect(labelClashes(g.layout), sheet.module).toEqual([]);
+      for (const x of labelled) expect(alongWire(x.labelBox!, x.points), `${x.label} on ${sheet.module}`).toBe(true);
+    }
+  }, 120_000);
+});
 
 describe('stored wires after edits', () => {
   it('routes a wire again when a symbol lands with its edge on it, or with its pins next to it', () => {
