@@ -663,7 +663,10 @@ export function EditorCanvas() {
                         pointerEvents="none"
                       />
                     )}
-                    <circle cx={p.x} cy={p.y} r={6} fill="transparent" data-port-id={p.id} data-port-node={n.id} style={{ cursor: 'crosshair' }} />
+                    <circle cx={p.x} cy={p.y} r={6} fill="transparent" data-port-id={p.id} data-port-node={n.id} style={{ cursor: 'crosshair' }}>
+                      {/* The pin's name on hover: tells EN from ARST, A from B, and so on. */}
+                      <title>{p.width > 1 ? `${p.name} [${p.width}]` : p.name}</title>
+                    </circle>
                   </g>
                 );
               }),

@@ -21,21 +21,12 @@ export interface SheetIssues {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** Low zero bits a `×2ⁿ` note on a wire adds (written by the import's "scale" rule, read the same way by the export). */
-function scaleBits(label: string | undefined): number {
-  const m = label ? /×\s*(\d+)/.exec(label) : null;
-  if (!m) return 0;
-  const k = Math.log2(Number(m[1]));
-  return Number.isInteger(k) && k > 0 && k < 31 ? k : 0;
-}
-
 /**
- * Low zero bits a wire appends to what it carries, read as the export reads them: its `shift`
- * when it has one (a rename of the `×4` label does not change it), otherwise its label.
+ * Low zero bits a wire appends to what it carries (an imported `×4` wire has 2), read as the
+ * export reads them: only from its `shift`. Its label is text the user may rename, never logic.
  */
-export function wireShift(e: Pick<DEdge, 'shift' | 'label'>): number {
-  if (e.shift !== undefined) return Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
-  return scaleBits(e.label);
+export function wireShift(e: Pick<DEdge, 'shift'>): number {
+  return e.shift !== undefined && Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
 }
 
 export function checkSheet(d: Diagram): SheetIssues {

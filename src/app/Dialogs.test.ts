@@ -233,18 +233,19 @@ describe('Import Verilog', () => {
     const code = 'module a(input x, output y); assign y = !x; endmodule\nmodule b(input x, output y); assign y = x; endmodule\n';
     const p = planImport(open, code, 'auction_v2.v', false);
     expect(p.replaced).toEqual(['auction.v']);
-    expect(p.apply).toEqual({ files: { 'auction_v2.v': code }, replace: true });
+    // A new version of the design: the store replaces the file and keeps the edits.
+    expect(p.apply).toEqual({ files: { 'auction_v2.v': code }, replace: false, newVersion: true });
     // Unnamed, it takes the name of the file it replaces.
-    expect(planImport(open, code, '', false)).toMatchObject({ fname: 'auction.v', changed: ['auction.v'], apply: { files: { 'auction.v': code }, replace: false } });
+    expect(planImport(open, code, '', false)).toMatchObject({ fname: 'auction.v', changed: ['auction.v'], apply: { files: { 'auction.v': code } } });
   });
 
-  it('keeps an open file that declares more modules than the code, and reports the clash', () => {
+  it('cuts a module out of an open file that declares more modules than the code, and says so', () => {
     const code = 'module b(input x, output y); assign y = x; endmodule\n';
     const named = planImport(open, code, 'b.v', false);
-    expect(named).toMatchObject({ replaced: [], changed: [], clashes: [{ file: 'auction.v', modules: ['b'] }] });
-    expect(named.apply).toEqual({ files: { 'b.v': code }, replace: false });
+    expect(named).toMatchObject({ replaced: [], changed: ['auction.v'], trimmed: [{ file: 'auction.v', modules: ['b'] }], clashes: [] });
+    expect(named.apply).toEqual({ files: { 'b.v': code }, replace: false, newVersion: true });
     // Unnamed, it does not take the open file's name either (that would overwrite it).
-    expect(planImport(open, code, '', false)).toMatchObject({ fname: 'pasted.v', clashes: [{ file: 'auction.v' }], apply: { files: { 'pasted.v': code } } });
+    expect(planImport(open, code, '', false)).toMatchObject({ fname: 'pasted.v', trimmed: [{ file: 'auction.v' }], apply: { files: { 'pasted.v': code } } });
   });
 
   it('says which modules an update of an open file under its own name drops', () => {

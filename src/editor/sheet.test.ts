@@ -386,15 +386,18 @@ describe('wires joined to a sliced wire', () => {
     expect(resolveConnection(s.d, onWire(scaled.id), at(`${tap}.in`))).toEqual({ error: 'These pins are already connected.' });
     expect(resolveConnection(s.d, at(scaled.source.port), at(`${tap}.in`))).not.toHaveProperty('error');
 
-    // A wire copied into a drawing keeps its zero bits in `shift`, and a hand-drawn `×4` label says the same.
+    // A wire copied into a drawing keeps its zero bits in `shift`, and a tap of it does too.
+    // A label is only text: writing `×4` on a hand-drawn wire changes nothing.
     const d = new Drawing();
     const b = d.add('input', 'b', { width: 2 });
     const add = d.add('add', undefined, { width: 4 });
     const y = d.add('output', 'y', { width: 4 });
     const w = d.wire(`${b}.out`, `${add}.B`);
-    d.e = { ...d.e, edges: d.e.edges.map((x) => (x.id === w ? { ...x, label: '×4' } : x)) };
-    d.wire(onWire(w), `${y}.in`);
+    d.e = { ...d.e, edges: d.e.edges.map((x) => (x.id === w ? { ...x, shift: 2 } : x)) };
+    const t = d.wire(onWire(w), `${y}.in`);
     expect(diagramToVerilog(d.d, 'm').code).toContain("assign y = {b, 2'd0};");
+    d.e = { ...d.e, edges: d.e.edges.map((x) => (x.id === w || x.id === t ? { ...x, shift: undefined, label: '×4' } : x)) };
+    expect(diagramToVerilog(d.d, 'm').code).not.toContain("2'd0}");
   });
 });
 

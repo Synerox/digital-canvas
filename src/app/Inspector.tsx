@@ -209,7 +209,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
             Export Verilog…
           </button>
           {!drawn && (
-            <button onClick={() => s.convertToDrawing()} title="Copy this sheet into a new drawing that is no longer tied to the Verilog">
+            <button onClick={() => s.convertToDrawing()} title="Copy this sheet into a new drawing you can edit freely. Automatic blocks become drawings of their own; instances of your Verilog modules still use those modules from your files.">
               Copy to new drawing
             </button>
           )}

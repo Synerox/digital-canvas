@@ -11,7 +11,7 @@ import { downloadBlob } from '../render/export';
 import { elaborate } from '../yosys/client';
 import { parseYosysJson } from '../core/yosys-json';
 import { declaredModules } from '../yosys/script';
-import { useStore } from './store';
+import { planImport as planFiles, useStore } from './store';
 
 /** Close a dialog on Escape, before the canvas and the shortcuts see the key. */
 // oxlint-disable-next-line react/only-export-components
@@ -45,23 +45,24 @@ export interface ImportPlan {
   fname: string;
   /** Open files the import takes the place of: the code declares every module they declare. */
   replaced: string[];
+  /** Open files that keep their other modules: the definitions the code declares again are cut out of them. */
+  trimmed: { file: string; modules: string[] }[];
   /** Open files the import changes: `fname` when it is open, and the replaced ones. */
   changed: string[];
-  /** Open files that are kept although they declare some of the code's modules (they declare others too). */
+  /** Open files that declare some of the code's modules but could not be trimmed (Yosys reports them declared twice). */
   clashes: { file: string; modules: string[] }[];
   /** Modules of the open file `fname` that the code no longer declares. */
   lost: string[];
   /** What to hand to setFiles. */
-  apply: { files: Record<string, string>; replace: boolean };
+  apply: { files: Record<string, string>; replace: boolean; newVersion?: boolean };
 }
 
 /**
  * What importing `code` under the file name `name` does to the open files.
- * Code that declares every module of an open file is a new version of that
- * file: it replaces it (whatever its own file name), and the edits made on its
- * sheets are kept. A file that shares only some modules with the code is never
- * removed, as that would take its other modules with it (and undo does not
- * bring files back): the code is added beside it, and the clash is reported.
+ * The code is a new version of the design (the store's planImport): an open
+ * file whose modules it all declares is replaced (whatever its own file name),
+ * one that shares only some modules keeps the others, and the edits made on
+ * the sheets are kept. Undo brings the old files back.
  */
 // oxlint-disable-next-line react/only-export-components
 export function planImport(files: Record<string, string>, code: string, name: string, replace: boolean): ImportPlan {
@@ -81,16 +82,21 @@ export function planImport(files: Record<string, string>, code: string, name: st
   // module with will do: the store keeps the sheets' edits when the import reuses a file name.
   const n = name.trim() || covered[0] || (replace ? shared[0]?.file : undefined) || 'pasted.v';
   const fname = /\.(v|sv|vh|svh)$/i.test(n) ? n : `${n}.v`;
-  if (replace) return { fname, replaced: [], changed: [], clashes: [], lost: [], apply: { files: { [fname]: code }, replace } };
-  const replaced = covered.filter((f) => f !== fname);
+  if (replace) return { fname, replaced: [], trimmed: [], changed: [], clashes: [], lost: [], apply: { files: { [fname]: code }, replace } };
+  const plan = planFiles(files, { [fname]: code });
+  const sharedOf = (f: string) => shared.find((c) => c.file === f)?.modules ?? [];
   const updated = files[fname] !== undefined;
-  const changed = [...(updated ? [fname] : []), ...replaced];
-  const clashes = shared.filter((c) => c.file !== fname);
+  const changed = [...(updated ? [fname] : []), ...plan.replaced, ...plan.trimmed];
   const lost = updated ? declaredModules({ [fname]: files[fname] }).filter((m) => !mods.has(m)) : [];
-  if (replaced.length === 0) return { fname, replaced, changed, clashes, lost, apply: { files: { [fname]: code }, replace } };
-  const next = { ...files };
-  for (const f of replaced) delete next[f];
-  return { fname, replaced, changed, clashes, lost, apply: { files: { ...next, [fname]: code }, replace: true } };
+  return {
+    fname,
+    replaced: plan.replaced,
+    trimmed: plan.trimmed.map((f) => ({ file: f, modules: sharedOf(f) })),
+    changed,
+    clashes: plan.clashes.map((f) => ({ file: f, modules: sharedOf(f) })),
+    lost,
+    apply: { files: { [fname]: code }, replace: false, newVersion: true },
+  };
 }
 
 export function ImportDialog({ onClose }: { onClose(): void }) {
@@ -104,12 +110,12 @@ export function ImportDialog({ onClose }: { onClose(): void }) {
 
   // Shown for the code as typed a moment ago (scanning a long file on every key is slow); the import reads the code as it is.
   const deferred = useDeferredValue(code);
-  const { fname, replaced, changed, clashes, lost } = useMemo(() => planImport(files, deferred, name, replace), [files, deferred, name, replace]);
+  const { fname, replaced, trimmed, changed, clashes, lost } = useMemo(() => planImport(files, deferred, name, replace), [files, deferred, name, replace]);
 
   const run = async () => {
     onClose();
     const { apply } = planImport(files, code, name, replace);
-    await setFiles(apply.files, apply.replace);
+    await setFiles(apply.files, apply.replace, { newVersion: apply.newVersion });
   };
 
   return (
@@ -134,10 +140,15 @@ export function ImportDialog({ onClose }: { onClose(): void }) {
           Paste or open Verilog / SystemVerilog. Yosys reads it in your browser (nothing is uploaded) and every module becomes a sheet you can edit:
           move, rename and delete symbols, and draw more. Importing changed code later keeps your edits.
         </p>
+        {trimmed.map((t) => (
+          <p key={t.file} className="small">
+            Replaces <b>{t.modules.join(', ')}</b> in <b>{t.file}</b>; its other modules stay.
+          </p>
+        ))}
         {changed.length > 0 && (
           <p className="small">
             {replaced.length ? 'Replaces' : 'Updates'} <b>{changed.join(', ')}</b>. Your moves, renames, deletions and hand-drawn parts on its sheets are
-            kept.
+            kept (Undo brings the old {changed.length === 1 ? 'file' : 'files'} back).
             {lost.length > 0 && (
               <>
                 {' '}
@@ -148,7 +159,7 @@ export function ImportDialog({ onClose }: { onClose(): void }) {
         )}
         {clashes.map((c) => (
           <p key={c.file} className="small error-text">
-            <b>{c.file}</b> also declares <b>{c.modules.join(', ')}</b>, and other modules too, so it stays open. Yosys will report{' '}
+            <b>{c.file}</b> also declares <b>{c.modules.join(', ')}</b>, and the definition could not be cut out of it. Yosys will report{' '}
             {c.modules.length === 1 ? 'that module' : 'those modules'} declared twice until one of the files no longer declares{' '}
             {c.modules.length === 1 ? 'it' : 'them'}.
           </p>
