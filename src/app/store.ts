@@ -3,7 +3,10 @@ import { buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES, type RuleId } from '../core/rules';
 import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy } from '../core/ir';
 import { parseYosysJson } from '../core/yosys-json';
+import { withFlattened } from '../core/flatten';
+import { withAutoBlocks } from '../core/partition';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
+import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 import { type LayoutResult, layoutDiagram } from '../layout/elk-layout';
 import { canvasMeasure } from '../render/export';
 import { THEMES, type ThemeName } from '../render/theme';
@@ -15,6 +18,16 @@ export interface PathEntry {
   module: string;
 }
 
+/** blocks: sub-modules and automatic functional blocks; flat: the whole circuit on one sheet. */
+export type ViewMode = 'blocks' | 'flat';
+
+export type ExampleName = 'auction' | 'fruit';
+
+export const EXAMPLES: Record<ExampleName, { label: string; files: Record<string, string> }> = {
+  auction: { label: 'Auction (hierarchical)', files: { [AUCTION_FILE]: AUCTION_SOURCE } },
+  fruit: { label: 'Fruit Battle (single module)', files: { [FRUIT_FILE]: FRUIT_SOURCE } },
+};
+
 export type Status = 'idle' | 'loading' | 'elaborating' | 'layout' | 'ready' | 'error';
 
 interface State {
@@ -22,7 +35,11 @@ interface State {
   /** Modules declared in the sources, for the Top selector. */
   moduleNames: string[];
   topOverride?: string;
+  /** The elaborated design, as Yosys produced it. */
   design?: IRDesign;
+  /** The design with automatic blocks added (used in block view). */
+  blockDesign?: IRDesign;
+  viewMode: ViewMode;
   hierarchy?: HierarchyNode;
   path: PathEntry[];
   layout?: LayoutResult;
@@ -42,7 +59,10 @@ interface State {
 
   setFiles(files: Record<string, string>, replace: boolean): Promise<void>;
   removeFile(name: string): Promise<void>;
-  loadExample(): Promise<void>;
+  loadExample(name?: ExampleName): Promise<void>;
+  setViewMode(mode: ViewMode): Promise<void>;
+  /** The design the current view is drawn from. */
+  viewDesign(): IRDesign | undefined;
   rebuild(): Promise<void>;
   openPath(path: PathEntry[]): Promise<void>;
   enterInstance(instance: string, module: string): Promise<void>;
@@ -83,6 +103,7 @@ export const useStore = create<State>((set, get) => ({
   codeRanges: [],
   theme: 'report',
   rules: DEFAULT_RULES,
+  viewMode: 'blocks',
 
   async setFiles(files, replace) {
     set({ files: replace ? files : { ...get().files, ...files }, ...(replace ? { topOverride: undefined } : {}) });
@@ -96,9 +117,26 @@ export const useStore = create<State>((set, get) => ({
     await get().rebuild();
   },
 
-  async loadExample() {
+  async loadExample(name = 'auction') {
     set({ topOverride: undefined });
-    await get().setFiles({ [AUCTION_FILE]: AUCTION_SOURCE }, true);
+    await get().setFiles(EXAMPLES[name].files, true);
+  },
+
+  viewDesign() {
+    const { viewMode, design, blockDesign } = get();
+    return viewMode === 'blocks' ? (blockDesign ?? design) : design;
+  },
+
+  async setViewMode(mode) {
+    if (mode === get().viewMode) return;
+    const { design, blockDesign } = get();
+    set({ viewMode: mode });
+    if (!design) return;
+    const view = mode === 'blocks' ? (blockDesign ?? design) : design;
+    set({ hierarchy: buildHierarchy(view) });
+    // Auto blocks do not exist in the full circuit: show the module they were cut from.
+    const path = get().path.filter((p) => view.modules[p.module]);
+    await get().openPath(path.length ? path : [{ instance: design.top, module: design.top }]);
   },
 
   async setTop(top) {
@@ -117,6 +155,7 @@ export const useStore = create<State>((set, get) => ({
       navSeq++;
       set({
         design: undefined,
+        blockDesign: undefined,
         hierarchy: undefined,
         layout: undefined,
         path: [],
@@ -140,19 +179,21 @@ export const useStore = create<State>((set, get) => ({
       set({ status: 'elaborating', log: result.log });
       const json = parseYosysJson(result.json);
       const design = buildDesign(json, files);
-      const hierarchy = buildHierarchy(design);
+      const blockDesign = withAutoBlocks(design, files);
+      const view = get().viewMode === 'blocks' ? blockDesign : design;
+      const hierarchy = buildHierarchy(view);
       layoutCache.clear();
       // Keep the current drill-down path when it still exists in the new design.
       const old = get().path;
       const path: PathEntry[] = [{ instance: design.top, module: design.top }];
       for (const p of old.slice(1)) {
-        const parent = design.modules[path[path.length - 1].module];
+        const parent = view.modules[path[path.length - 1].module];
         const cell = parent?.cells.find((c) => c.isInstance && c.name === p.instance);
         if (!cell) break;
         path.push({ instance: cell.name, module: cell.type });
       }
       const codeFile = get().codeFile && files[get().codeFile!] !== undefined ? get().codeFile : Object.keys(files)[0];
-      set({ design, hierarchy, codeFile });
+      set({ design, blockDesign, hierarchy, codeFile });
       await get().openPath(path);
       if (gen === rebuildGen) set({ elapsedMs: performance.now() - t0 });
     } catch (e) {
@@ -164,20 +205,23 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async openPath(path) {
-    const { design, theme, rules } = get();
-    if (!design || path.length === 0) return;
+    const { design, theme, rules, viewMode } = get();
+    const view = get().viewDesign();
+    if (!design || !view || path.length === 0) return;
     const seq = ++navSeq;
     const module = path[path.length - 1].module;
     set({ status: 'layout', path, selected: undefined, highlighted: new Set(), codeRanges: [] });
-    let layout = layoutCache.get(module);
+    const key = `${viewMode}:${module}`;
+    let layout = layoutCache.get(key);
     if (!layout) {
-      const diagram = buildDiagram(design, module, rules);
+      const source = viewMode === 'flat' ? withFlattened(view, module) : view;
+      const diagram = buildDiagram(source, module, rules);
       layout = await layoutDiagram(diagram, canvasMeasure(THEMES[theme].font));
       // A newer navigation or rebuild happened while ELK was running.
-      if (seq !== navSeq || get().design !== design || get().rules !== rules) return;
-      layoutCache.set(module, layout);
+      if (seq !== navSeq || get().design !== design || get().rules !== rules || get().viewMode !== viewMode) return;
+      layoutCache.set(key, layout);
     }
-    const m = design.modules[module];
+    const m = view.modules[module];
     const file = findFile(get().files, m?.src[0]?.file);
     set({ layout, status: get().error ? 'error' : 'ready', codeFile: file ?? get().codeFile });
   },

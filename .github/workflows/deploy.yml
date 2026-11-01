@@ -2,7 +2,7 @@ name: Test and deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
   pull_request:
 
 permissions:
@@ -27,3 +27,22 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
           exclude_assets: 'yosys/VERSION'
+          # Keep the branch previews under preview/.
+          keep_files: true
+      - name: Preview folder name
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        id: preview
+        run: echo "dir=preview/$(echo '${{ github.ref_name }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+      - name: Deploy branch preview (gh-pages/preview/<branch>)
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          destination_dir: ${{ steps.preview.outputs.dir }}
+          exclude_assets: 'yosys/VERSION'
+          keep_files: true
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false

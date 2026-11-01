@@ -18,6 +18,8 @@ export function HierarchyTree() {
         <button className={`tree-item ${key === current ? 'active' : ''}`} onClick={() => openPath(here)}>
           {prefix.length === 0 ? (
             <b>{n.module}</b>
+          ) : n.module.startsWith(`${prefix[prefix.length - 1].module}/`) ? (
+            <span className="auto-block">{n.instance}</span>
           ) : (
             <>
               <span>{n.instance}</span> <span className="muted">: {n.module}</span>
@@ -54,9 +56,35 @@ export function FileList() {
   );
 }
 
+export function ViewToggle() {
+  const mode = useStore((s) => s.viewMode);
+  const setViewMode = useStore((s) => s.setViewMode);
+  const design = useStore((s) => s.design);
+  if (!design) return null;
+  return (
+    <div className="view-toggle" role="group" aria-label="View">
+      <button
+        className={mode === 'blocks' ? 'on' : ''}
+        title="Sub-modules and automatically found functional blocks; double-click a block to open it"
+        onClick={() => setViewMode('blocks')}
+      >
+        Block diagram
+      </button>
+      <button
+        className={mode === 'flat' ? 'on' : ''}
+        title="Expand every block and sub-module into one circuit"
+        onClick={() => setViewMode('flat')}
+      >
+        Full circuit
+      </button>
+    </div>
+  );
+}
+
 export function Breadcrumb() {
   const path = useStore((s) => s.path);
   const openPath = useStore((s) => s.openPath);
+  const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
   if (path.length === 0) return null;
   return (
     <nav className="breadcrumb">
@@ -64,7 +92,7 @@ export function Breadcrumb() {
         <span key={i}>
           {i > 0 && <span className="sep">›</span>}
           <button className={i === path.length - 1 ? 'current' : ''} onClick={() => openPath(path.slice(0, i + 1))}>
-            {i === 0 ? p.module : `${p.instance} (${p.module})`}
+            {i === 0 ? p.module : view?.modules[p.module]?.auto ? view.modules[p.module].displayName : `${p.instance} (${p.module})`}
           </button>
         </span>
       ))}
