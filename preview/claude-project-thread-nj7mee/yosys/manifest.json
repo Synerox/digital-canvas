@@ -1,0 +1,34 @@
+{
+  "bundle": "bundle.js",
+  "modules": {
+    "yosys.core.wasm": {
+      "chunks": [
+        "yosys.core.0.bin",
+        "yosys.core.1.bin"
+      ],
+      "gzip": true,
+      "size": 15674130
+    },
+    "yosys.core2.wasm": {
+      "chunks": [
+        "yosys.core2.0.bin"
+      ],
+      "gzip": true,
+      "size": 10389
+    },
+    "yosys.core3.wasm": {
+      "chunks": [
+        "yosys.core3.0.bin"
+      ],
+      "gzip": true,
+      "size": 661
+    },
+    "yosys.core4.wasm": {
+      "chunks": [
+        "yosys.core4.0.bin"
+      ],
+      "gzip": true,
+      "size": 404
+    }
+  }
+}
