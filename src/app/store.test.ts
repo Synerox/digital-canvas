@@ -27,18 +27,27 @@ import { type InterfaceOf, type UserNode, newUserNode, symbolNode } from '../edi
 import { diagramToVerilog } from '../editor/verilog-export';
 import { type Point, sizeNode } from '../layout/elk-layout';
 import {
+  AUTOSAVE_KEY,
   drawingPorts,
   drawnRoute,
   followPinRenames,
   importedTop,
   measureFor,
+  pasteSpot,
+  planImport,
   renameDrawingIn,
   sheetsUsing,
   useStore,
   viewModeOf,
+  withoutModuleDefinitions,
+  withoutModuleEdits,
   withoutVerilogEdits,
 } from './store';
+import { exportCurrent } from './Dialogs';
+import { elaborate } from '../yosys/client';
+import { declaredModules } from '../yosys/script';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
+import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 
 const st = () => useStore.getState();
 
@@ -127,6 +136,53 @@ describe('drawing interfaces (pins → block ports)', () => {
     // Nothing to follow: the same document.
     expect(followPinRenames(doc, 'inner', inner, inner)).toBe(doc);
   });
+
+  it('drops the wires of a deleted pin instead of moving them to the pin that inherits its name (N3)', () => {
+    // Two inputs named x: the block's ports are x and x_2.
+    const inner = drawing([pin('u:1', 'input', 'x'), pin('u:2', 'input', 'x'), pin('u:3', 'output', 'out1')]);
+    const block: UserNode = { ...newUserNode('u:1', 'block'), params: { module: 'inner' } };
+    const outer = drawing(
+      [block, pin('u:2', 'input', 'in1'), pin('u:3', 'input', 'in2')],
+      [
+        { id: 'w:5', source: { node: 'u:2', port: 'u:2.out' }, target: { node: 'u:1', port: 'u:1.x' } },
+        { id: 'w:6', source: { node: 'u:3', port: 'u:3.out' }, target: { node: 'u:1', port: 'u:1.x_2' } },
+      ],
+    );
+    outer.routes = { 'w:5': { points: [{ x: 0, y: 0 }, { x: 10, y: 0 }] } };
+    const doc: EditDoc = { drawn: ['inner', 'outer'], sheets: { 'd:inner': inner, 'd:outer': outer } };
+    // Delete the first x: the second one is x now.
+    const after: SheetEdits = { ...inner, nodes: inner.nodes.filter((n) => n.id !== 'u:1') };
+    expect(drawingPorts(after).map((p) => p.name)).toEqual(['x', 'out1']);
+    const next = followPinRenames({ ...doc, sheets: { ...doc.sheets, 'd:inner': after } }, 'inner', inner, after);
+    // in2 still drives the pin it drove; in1's wire is gone with its pin.
+    expect(next.sheets['d:outer'].edges.map((x) => [x.id, x.target.port])).toEqual([['w:6', 'u:1.x']]);
+    expect(next.sheets['d:outer'].routes['w:5']).toBeUndefined();
+  });
+
+  it('gives a block the ports of frozen pins wider than a library pin (N10)', () => {
+    const wide = (id: string, kind: 'input' | 'output', name: string, width: number): UserNode => ({
+      id,
+      sym: 'raw',
+      params: {},
+      raw: { id, kind, label: name, ports: [{ id: `${id}.${kind === 'input' ? 'out' : 'in'}`, name: kind === 'input' ? 'out' : 'in', dir: kind === 'input' ? 'out' : 'in', side: kind === 'input' ? 'EAST' : 'WEST', width }], src: [] },
+    });
+    const leaf = drawing([wide('a', 'input', 'a', 300), pin('b', 'input', 'b'), wide('y', 'output', 'y', 300), pin('z', 'output', 'z')]);
+    expect(drawingPorts(leaf).map((p) => [p.name, p.dir, p.width])).toEqual([
+      ['a', 'input', 300],
+      ['b', 'input', 1],
+      ['y', 'output', 300],
+      ['z', 'output', 1],
+    ]);
+    // The exported module has the same ports, in the same order.
+    const iface: InterfaceOf = () => undefined;
+    const header = /module leaf \(([\s\S]*?)\);/.exec(diagramToVerilog(effectiveDiagram('leaf', undefined, leaf, iface), 'leaf').code)![1];
+    expect([...header.matchAll(/(input|output) wire (?:\[(\d+):0\] )?(\w+)/g)].map((m) => [m[3], m[1], Number(m[2] ?? 0) + 1])).toEqual([
+      ['a', 'input', 300],
+      ['b', 'input', 1],
+      ['y', 'output', 300],
+      ['z', 'output', 1],
+    ]);
+  });
 });
 
 describe('document helpers', () => {
@@ -143,6 +199,70 @@ describe('document helpers', () => {
     expect(withoutVerilogEdits(doc)).toEqual({ drawn: ['d1'], sheets: { 'd:d1': doc.sheets['d:d1'] } });
     const clean: EditDoc = { drawn: [], sheets: { 'v:blocks:top': emptyEdits() } };
     expect(withoutVerilogEdits(clean)).toBe(clean);
+  });
+
+  it('drops the edits of some modules, with their automatic blocks (C5)', () => {
+    const edited: SheetEdits = { ...emptyEdits(), hidden: ['in:clk'] };
+    const doc: EditDoc = {
+      drawn: ['d1'],
+      sheets: { 'v:blocks:top': edited, 'v:flat:top': edited, 'v:blocks:top/alu': edited, 'v:blocks:topx': edited, 'v:blocks:sub': edited, 'd:d1': drawing([]) },
+    };
+    expect(Object.keys(withoutModuleEdits(doc, ['top']).sheets)).toEqual(['v:blocks:topx', 'v:blocks:sub', 'd:d1']);
+    expect(withoutModuleEdits(doc, ['other'])).toBe(doc);
+  });
+
+  it('cuts module definitions out of Verilog text, or says it cannot (N6)', () => {
+    const text = `// two modules
+module a(input x, output y); // module b inside a comment
+  assign y = x; /* endmodule */
+endmodule : a
+module b(input x, output y);
+  initial $display("endmodule");
+  assign y = ~x;
+endmodule
+module c(); endmodule
+`;
+    expect(withoutModuleDefinitions(text, new Set(['b']))).toBe(`// two modules
+module a(input x, output y); // module b inside a comment
+  assign y = x; /* endmodule */
+endmodule : a
+module c(); endmodule
+`);
+    expect(withoutModuleDefinitions(text, new Set(['a', 'c']))).toBe(`// two modules
+module b(input x, output y);
+  initial $display("endmodule");
+  assign y = ~x;
+endmodule
+`);
+    // A module that never ends is not cut by guessing.
+    expect(withoutModuleDefinitions('module a(); \nmodule b(); endmodule\n', new Set(['b']))).toBeUndefined();
+  });
+
+  it('plans an import of a new version of open files (N5, N6)', () => {
+    const open = { [AUCTION_FILE]: AUCTION_SOURCE, 'other.v': 'module other(input a, output y); assign y = a; endmodule\n' };
+    // Every module again, under another name: the file is replaced.
+    const all = planImport(open, { 'auction_v2.v': AUCTION_SOURCE.replace('4\'d0', '4\'d1') });
+    expect(all.replaced).toEqual([AUCTION_FILE]);
+    expect(Object.keys(all.files)).toEqual(['other.v', 'auction_v2.v']);
+    // One module of a file: the file keeps the others, and the import has the new one.
+    const one = planImport(open, { 'bid_check.v': 'module bid_check(input [3:0] bid, input [3:0] budget, output valid); assign valid = bid < budget; endmodule\n' });
+    expect(one.replaced).toEqual([]);
+    expect(one.trimmed).toEqual([AUCTION_FILE]);
+    expect(declaredModules({ [AUCTION_FILE]: one.files[AUCTION_FILE] })).toEqual(['auction_top', 'max_select', 'result_decode', 'score_board', 'score_calc']);
+    expect(declaredModules(one.files)).toContain('bid_check');
+    expect(Object.keys(one.files)).toEqual([AUCTION_FILE, 'other.v', 'bid_check.v']);
+  });
+
+  it('pastes a copy where it overlaps nothing (N30)', () => {
+    const a = { x: 0, y: 0, width: 40, height: 40 };
+    const b = { x: 100, y: 60, width: 40, height: 40 };
+    const box = { x: 0, y: 0, width: 140, height: 100 };
+    // On the sheet it was copied from: straight below the original.
+    expect(pasteSpot(box, [a, b])).toEqual({ x: 0, y: 120 });
+    // Below a symbol that is in the way there too.
+    expect(pasteSpot(box, [a, b, { x: 50, y: 150, width: 40, height: 40 }])).toEqual({ x: 0, y: 210 });
+    // On an empty sheet: the same place.
+    expect(pasteSpot(box, [])).toEqual({ x: 0, y: 0 });
   });
 
   it('renames a drawing with its blocks, and lists where it is used (C7, C21)', () => {
@@ -196,22 +316,58 @@ module other(input a, output y); assign y = a; endmodule`,
 const HALF = 'module half_adder(input a, input b, output s, output c); assign s = a ^ b; assign c = a & b; endmodule\n';
 
 describe('store', () => {
-  it('keeps the ports of a block copied from an automatic block in the full circuit (C1)', async () => {
-    await open({ 'fruit.v': (await import('../examples/fruit-battle')).FRUIT_SOURCE });
-    const auto = Object.values(st().blockDesign!.modules).find((m) => m.auto)!;
-    expect(auto).toBeDefined();
-    const ports = st().interfaceOf(auto.name)!.ports.length;
-    expect(ports).toBeGreaterThan(0);
-    st().convertToDrawing();
+  it('copies a sheet with automatic blocks into drawings that need no Verilog (C1)', async () => {
+    await open({ 'fruit.v': FRUIT_SOURCE });
+    const autos = Object.values(st().blockDesign!.modules).filter((m) => m.auto);
+    expect(autos.length).toBeGreaterThan(0);
+    const before = st().netlist!;
+    const drawnBefore = st().doc.drawn.length;
+    await st().convertToDrawing();
     await settle();
+    expect(st().path).toEqual([{ instance: 'top_drawing', module: 'top_drawing', drawn: true }]);
     const wires = st().netlist!.edges.length;
-    expect(wires).toBeGreaterThan(0);
+    expect(wires).toBe(before.edges.length);
+    // Each automatic block is a drawing of its own (named after it), and the copy's blocks use those.
+    const blocks = st().doc.sheets['d:top_drawing'].nodes.filter((n) => n.sym === 'block');
+    expect(blocks.length).toBe(autos.length);
+    expect(st().doc.drawn).toEqual(['top_drawing', ...autos.map((m) => m.name.replace('/', '_'))]);
+    expect(blocks.every((b) => st().doc.drawn.includes(b.params.module!))).toBe(true);
+    // Every block keeps all its pins (named as before) and wires.
+    for (const b of blocks) {
+      const n = st().netlist!.nodes.find((x) => x.id === b.id)!;
+      const was = before.nodes.find((x) => x.id === b.id)!;
+      expect(n.ports.map((p) => p.name)).toEqual(was.ports.map((p) => p.name));
+    }
+    expect(st().notice).toMatch(/drawings of their own/);
+    // One undo step.
+    const drawn = st().doc.drawn;
+    st().undo();
+    await settle();
+    expect(st().doc.drawn.length).toBe(drawnBefore);
+    st().redo();
+    await settle();
+    expect(st().doc.drawn).toEqual(drawn);
+    await st().openPath([{ instance: 'top_drawing', module: 'top_drawing', drawn: true }]);
+    // The full circuit does not change what the drawing shows.
     await st().setViewMode('flat');
     await settle();
-    expect(st().interfaceOf(auto.name)?.ports.length).toBe(ports);
-    // The drawing is still on screen, with all its wires.
-    expect(st().sheet.startsWith('d:')).toBe(true);
+    expect(st().sheet).toBe('d:top_drawing');
     expect(st().netlist!.edges.length).toBe(wires);
+    // Nor does another design: no block loses its pins, and Yosys reads the exported Verilog alone.
+    await st().loadExample('auction');
+    await settle();
+    await st().openPath([{ instance: 'top_drawing', module: 'top_drawing', drawn: true }]);
+    expect(st().netlist!.edges.length).toBe(wires);
+    expect(st().netlist!.nodes.filter((n) => n.attrs?.missingModule)).toEqual([]);
+    const out = exportCurrent();
+    expect(Object.keys(out.check.files)).toEqual(['top_drawing.v']);
+    await expect(elaborate(out.check.files, out.check.top)).resolves.toBeDefined();
+    // Instances of Verilog modules stay instances of those modules, and the notice says so.
+    await st().openPath([{ instance: 'auction_top', module: 'auction_top' }]);
+    await st().setViewMode('blocks');
+    await settle();
+    await st().convertToDrawing();
+    expect(st().notice).toMatch(/Instances of .*bid_check.* still use those modules from your Verilog files/);
   }, 60_000);
 
   it('lays out a sheet again when undo unpins it after a rule change (C2)', async () => {
@@ -282,13 +438,188 @@ describe('store', () => {
     await st().setFiles({ 'other.v': 'module top(input clk, input rst, input [7:0] d, output reg [7:0] q); always @(posedge clk) if (rst) q <= 0; else q <= d; endmodule\n' }, true);
     expect(st().doc.sheets['v:blocks:top']).toBeUndefined();
     expect(input('clk')).toBeDefined();
-    // One undo step brings them back.
+    // One undo step brings them back, with the file they belong to.
     st().undo();
     await settle();
+    expect(Object.keys(st().files)).toEqual(['mine.v']);
     expect(st().doc.sheets['v:blocks:top'].hidden.length).toBe(1);
     // An example always opens clean.
     await st().loadExample('fruit');
     expect(Object.keys(st().doc.sheets).filter((k) => k.startsWith('v:'))).toEqual([]);
+  }, 60_000);
+
+  it('undoes opening another design with its files, so no edit lands on the other design (N1)', async () => {
+    await open({ 'mine.v': 'module top(input clk, input rst, output y); assign y = clk & rst; endmodule\n' });
+    st().select([input('clk').id]);
+    st().deleteSelection();
+    await st().loadExample('fruit');
+    await settle();
+    const fruitInputs = st().layout!.nodes.filter((n) => n.kind === 'input').length;
+    st().undo();
+    await settle();
+    // The other design is back, with its edit; Fruit's top never shows it.
+    expect(Object.keys(st().files)).toEqual(['mine.v']);
+    expect(st().doc.sheets['v:blocks:top'].hidden.length).toBe(1);
+    expect(st().layout!.nodes.some((n) => n.kind === 'input' && n.label === 'clk')).toBe(false);
+    st().redo();
+    await settle();
+    expect(Object.keys(st().files)).toEqual([FRUIT_FILE]);
+    expect(st().doc.sheets['v:blocks:top']).toBeUndefined();
+    expect(st().layout!.nodes.filter((n) => n.kind === 'input').length).toBe(fruitInputs);
+
+    // Undo twice after a move on Auction and Load example: Auction, then the move undone, on screen.
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE });
+    const y0 = input('clk').y;
+    st().moveSelection(new Set([input('clk').id]), 0, 100);
+    await st().loadExample('fruit');
+    await settle();
+    st().undo();
+    await settle();
+    expect(st().path).toEqual([{ instance: 'auction_top', module: 'auction_top' }]);
+    expect(input('clk').y).toBe(y0 + 100);
+    st().undo();
+    await settle();
+    expect(input('clk').y).toBe(y0);
+    expect(st().past).toEqual([]);
+    // Opening the first example at start is not a step.
+    await open({});
+    await st().loadExample();
+    expect(st().past).toEqual([]);
+  }, 60_000);
+
+  it('keeps the edits when an import replaces an open file under another name, and Undo brings the file back (N5, N6)', async () => {
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE });
+    const y0 = input('clk').y;
+    st().moveSelection(new Set([input('clk').id]), 0, 100);
+    await st().setFiles({ 'auction_v2.v': AUCTION_SOURCE.replace("bid != 4'd0", "bid != 4'd1") }, false, { newVersion: true });
+    await settle();
+    expect(Object.keys(st().files)).toEqual(['auction_v2.v']);
+    expect(input('clk').y).toBe(y0 + 100);
+    st().undo();
+    await settle();
+    expect(Object.keys(st().files)).toEqual([AUCTION_FILE]);
+    expect(input('clk').y).toBe(y0 + 100);
+
+    // A file with one module of auction.v replaces that module only.
+    await st().setFiles({ 'bid_check.v': 'module bid_check(input [3:0] bid, input [3:0] budget, output valid); assign valid = bid < budget; endmodule\n' }, false, { newVersion: true });
+    await settle();
+    expect(st().error).toBeUndefined();
+    expect(Object.keys(st().files)).toEqual([AUCTION_FILE, 'bid_check.v']);
+    expect(st().design!.top).toBe('auction_top');
+    expect(Object.keys(st().design!.modules).sort()).toEqual(['auction_top', 'bid_check', 'max_select', 'result_decode', 'score_board', 'score_calc']);
+    expect(input('clk').y).toBe(y0 + 100);
+    st().undo();
+    await settle();
+    expect(st().files).toEqual({ [AUCTION_FILE]: AUCTION_SOURCE });
+
+    // Replacing all files with some of the same names keeps the edits; Undo brings back the files left out.
+    await st().setFiles({ 'other.v': HALF }, false);
+    await st().setTop('auction_top');
+    await settle();
+    await st().setFiles({ 'other.v': HALF, 'auction_v2.v': AUCTION_SOURCE }, true);
+    await settle();
+    expect(input('clk').y).toBe(y0 + 100);
+    st().undo();
+    await settle();
+    expect(Object.keys(st().files).sort()).toEqual([AUCTION_FILE, 'other.v']);
+  }, 60_000);
+
+  it('drops the edits of the modules a removed file declared, in one undo step (C5)', async () => {
+    await open({ 'pasted.v': 'module top(input clk, input rst, output y); assign y = clk & rst; endmodule\n', 'keep.v': 'module keep(input a, output y); assign y = a; endmodule\n' }, { top: 'top' });
+    st().select([input('clk').id]);
+    st().deleteSelection();
+    useStore.setState({ doc: { ...st().doc, sheets: { ...st().doc.sheets, 'v:blocks:keep': { ...emptyEdits(), hidden: ['in:a'] } } } });
+    await st().removeFile('pasted.v');
+    await settle();
+    expect(st().doc.sheets['v:blocks:top']).toBeUndefined();
+    expect(st().doc.sheets['v:blocks:keep'].hidden).toEqual(['in:a']);
+    // Another file with a module of that name does not get them.
+    await st().setFiles({ [FRUIT_FILE]: FRUIT_SOURCE }, false);
+    await settle();
+    expect(st().doc.sheets['v:blocks:top']).toBeUndefined();
+    await st().removeFile(FRUIT_FILE);
+    await settle();
+    // Undo puts back the file and its edits.
+    st().undo();
+    await settle();
+    expect(Object.keys(st().files).sort()).toEqual([FRUIT_FILE, 'keep.v']);
+    st().undo();
+    await settle();
+    expect(Object.keys(st().files).sort()).toEqual(['keep.v', 'pasted.v']);
+    expect(st().doc.sheets['v:blocks:top'].hidden.length).toBe(1);
+  }, 60_000);
+
+  it('keeps the notice about a renamed drawing when an import is shown as the top (N25)', async () => {
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE });
+    st().newDrawing('fa');
+    await settle();
+    await st().setFiles({ 'pasted.v': 'module fa (input a, input b, input cin, output s, output cout); assign {cout, s} = a + b + cin; endmodule\n' }, false);
+    await settle();
+    expect(st().doc.drawn).toEqual(['fa_2']);
+    expect(st().notice).toMatch(/Renamed drawing fa → fa_2.*Showing fa/);
+  }, 60_000);
+
+  it('keeps the browser copy in step with an opened or saved file (N27, N28)', async () => {
+    const store = new Map<string, string>();
+    let writes = 0;
+    const setItem = (k: string, v: string) => {
+      writes++;
+      store.set(k, v);
+    };
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem });
+    try {
+      const stored = () => JSON.parse(store.get(AUTOSAVE_KEY) ?? '{}') as SavedFile & { saved?: boolean };
+      // Opening a file updates the copy at once (a reload must not bring back the work before it).
+      await open({}, { doc: { drawn: ['ripple'], sheets: { 'd:ripple': drawing([pin('u:1', 'input', 'a')]) } }, path: [{ instance: 'ripple', module: 'ripple', drawn: true }] });
+      await vi.waitFor(() => expect(stored().doc?.drawn).toEqual(['ripple']));
+      expect(stored().saved).toBe(true);
+      // An edit is unsaved work; Save makes it saved, and a reload says so.
+      st().renameItem('u:1', 'b');
+      await vi.waitFor(() => expect(stored().saved).toBeUndefined());
+      st().markSaved();
+      await vi.waitFor(() => expect(stored().saved).toBe(true));
+      await st().restoreAutosave();
+      expect(st().dirty).toBe(false);
+      st().renameItem('u:1', 'c');
+      await vi.waitFor(() => expect(stored().saved).toBeUndefined());
+      const n = writes;
+      await st().restoreAutosave();
+      expect(st().dirty).toBe(true);
+      // Let the copy that restoring schedules be written while there is storage.
+      await vi.waitFor(() => expect(writes).toBeGreaterThan(n));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 60_000);
+
+  it('pastes and duplicates beside the original, not on top of it (N30)', async () => {
+    const and: UserNode = newUserNode('u:3', 'and');
+    const e: SheetEdits = {
+      ...drawing(
+        [pin('u:1', 'input', 'a'), pin('u:2', 'input', 'b'), and, pin('u:4', 'output', 'y')],
+        [
+          { id: 'w:5', source: { node: 'u:1', port: 'u:1.out' }, target: { node: 'u:3', port: 'u:3.A' } },
+          { id: 'w:6', source: { node: 'u:2', port: 'u:2.out' }, target: { node: 'u:3', port: 'u:3.B' } },
+          { id: 'w:7', source: { node: 'u:3', port: 'u:3.Y' }, target: { node: 'u:4', port: 'u:4.in' } },
+        ],
+      ),
+      pos: { 'u:1': { x: 0, y: 0 }, 'u:2': { x: 0, y: 60 }, 'u:3': { x: 120, y: 20 }, 'u:4': { x: 240, y: 30 } },
+    };
+    await open({}, { doc: { drawn: ['d'], sheets: { 'd:d': e } }, path: [{ instance: 'd', module: 'd', drawn: true }] });
+    const overlapping = () => {
+      const ns = st().layout!.nodes;
+      return ns.some((a, i) => ns.some((b, j) => j > i && a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height));
+    };
+    st().selectAll();
+    expect(st().copy()).toBe(true);
+    st().paste();
+    st().paste();
+    expect(st().layout!.nodes.length).toBe(12);
+    expect(overlapping()).toBe(false);
+    st().select(['u:3']);
+    st().duplicate();
+    expect(st().layout!.nodes.length).toBe(13);
+    expect(overlapping()).toBe(false);
   }, 60_000);
 
   it('renames a drawing whose name an imported module takes, and opens imported instances as Verilog (C7)', async () => {

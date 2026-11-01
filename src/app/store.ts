@@ -13,6 +13,7 @@ import { THEMES, type ThemeName } from '../render/theme';
 import { YosysError, elaborate } from '../yosys/client';
 import { declaredModules } from '../yosys/script';
 import {
+  type Box,
   type EditDoc,
   FILE_FORMAT,
   type PathEntry,
@@ -53,7 +54,7 @@ import {
   toDrawing,
   userIds,
 } from '../editor/sheet';
-import { type InterfaceOf, type ModulePort, type SymKey, type SymParams, clampParam, newUserNode, symbolNode } from '../editor/symbols';
+import { type InterfaceOf, type ModulePort, type SymKey, type SymParams, type UserNode, clampParam, newUserNode, symbolNode } from '../editor/symbols';
 import { orthogonalize } from '../editor/router';
 import { type SheetIssues, checkSheet } from '../editor/check';
 import { verilogIdent } from '../editor/verilog-export';
@@ -82,6 +83,13 @@ export interface HistoryEntry {
   doc: EditDoc;
   path: PathEntry[];
   sheet: string;
+  /**
+   * For a step that changed the Verilog files in a way the document alone cannot undo (another
+   * design opened, open files removed): the files and Top choice to go back to. Undo and redo of
+   * such a step swap the whole state, so `path` and `sheet` are where to return in those files.
+   */
+  files?: Record<string, string>;
+  top?: string;
 }
 
 export interface Placing {
@@ -147,7 +155,14 @@ interface State {
   /** A short message about the last action (e.g. why a wire was refused). */
   notice?: string;
 
-  setFiles(files: Record<string, string>, replace: boolean): Promise<void>;
+  /**
+   * Import Verilog files. `replace`: they are all the files now (another design,
+   * unless they reuse an open file's name). Otherwise they are added, and replace
+   * open files of the same names. `newVersion`: the code is a new version of the
+   * open files that declare the same modules, whatever their names (see
+   * planImport); the edits are kept.
+   */
+  setFiles(files: Record<string, string>, replace: boolean, opts?: { newVersion?: boolean }): Promise<void>;
   removeFile(name: string): Promise<void>;
   loadExample(name?: ExampleName): Promise<void>;
   setViewMode(mode: ViewMode): Promise<void>;
@@ -195,7 +210,8 @@ interface State {
   newDrawing(name?: string): void;
   renameDrawing(from: string, to: string): string | undefined;
   deleteDrawing(name: string): void;
-  convertToDrawing(): void;
+  /** Copy the sheet on screen into a new drawing (with drawings of the automatic blocks it uses). */
+  convertToDrawing(): Promise<void>;
 
   // ----- files -----
   savedFile(): SavedFile;
@@ -212,8 +228,8 @@ const flatAllowed = new Set<string>();
 /** Incremented by every rebuild/navigation, so a slow older call cannot overwrite a newer result. */
 let rebuildGen = 0;
 let navSeq = 0;
-let clipboard: Clip | undefined;
-let pasteCount = 0;
+/** What Copy took, and the box of the copied symbols on their sheet (see paste). */
+let clipboard: { clip: Clip; box: Box } | undefined;
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
 
 const measures = new Map<string, MeasureText>();
@@ -232,6 +248,23 @@ export function measureFor(theme: ThemeName): MeasureText {
 const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 const snap = (v: number) => Math.round(v / GRID) * GRID;
+
+/**
+ * Where a copy of the symbols in `box` goes when no point is given: at the
+ * same place if nothing is there (pasted on another sheet), otherwise straight
+ * below, past every symbol it would overlap.
+ */
+export function pasteSpot(box: Box, nodes: readonly Box[]): Point {
+  const gap = 2 * GRID;
+  let y = box.y;
+  // Each round moves below at least one more symbol.
+  for (let i = 0; i <= nodes.length; i++) {
+    const hits = nodes.filter((n) => box.x < n.x + n.width + gap && n.x < box.x + box.width + gap && y < n.y + n.height + gap && n.y < y + box.height + gap);
+    if (hits.length === 0) break;
+    y = Math.max(...hits.map((n) => n.y + n.height)) + gap;
+  }
+  return { x: box.x, y };
+}
 
 /** True when a Yosys src file name refers to the uploaded file (Yosys may add directories). */
 export function sameFile(srcFile: string, file: string): boolean {
@@ -285,18 +318,23 @@ export function drawingPorts(e: SheetEdits | undefined): DrawingPort[] {
   const used = new Set<string>();
   const seen = new Set<string>();
   for (const n of e?.nodes ?? []) {
-    if (n.sym !== 'input' && n.sym !== 'output' && n.sym !== 'inout') continue;
+    // A pin wider than a library pin is a frozen copy (`raw`, see toUserNode); the export writes it as a port all the same.
+    const raw = n.sym === 'raw' ? n.raw : undefined;
+    const dir = raw ? raw.kind : n.sym;
+    if (dir !== 'input' && dir !== 'output' && dir !== 'inout') continue;
     // effectiveDiagram draws a repeated ID once.
     if (seen.has(n.id)) continue;
     seen.add(n.id);
     // The label symbolNode gives the pin, and the take() rule of diagramToVerilog.
-    const label = n.name || (n.sym === 'input' ? 'in' : n.sym === 'output' ? 'out' : 'io');
+    const label = raw ? n.name || raw.label : n.name || (dir === 'input' ? 'in' : dir === 'output' ? 'out' : 'io');
     const ident = verilogIdent(label);
     let written = ident;
     for (let i = 2; used.has(written); i++) written = `${ident}_${i}`;
     used.add(written);
     const own = label.trim();
-    ports.push({ pin: n.id, name: own && verilogIdent(own) === written ? own : written, dir: n.sym, width: clampParam('width', n.params.width, 1) });
+    // The width the module header gets (see diagramToVerilog).
+    const width = raw ? Math.max(1, (raw.ports.find((q) => q.dir === (dir === 'output' ? 'in' : 'out')) ?? raw.ports[0])?.width ?? 1) : clampParam('width', n.params.width, 1);
+    ports.push({ pin: n.id, name: own && verilogIdent(own) === written ? own : written, dir, width });
   }
   return ports;
 }
@@ -305,16 +343,21 @@ export function drawingPorts(e: SheetEdits | undefined): DrawingPort[] {
  * Wires to a block of a drawing name the block's ports by pin name
  * (`<block>.<name>`). When an edit of the drawing changes the name of a pin's
  * port (a rename, or a repeated name that now resolves differently), move those
- * wires to the new name on every sheet, so they stay connected.
+ * wires to the new name on every sheet, so they stay connected. Wires to the
+ * port of a deleted pin are removed: another pin can inherit its name (x and
+ * x_2 become x), and they must not land on that one.
  */
 export function followPinRenames(doc: EditDoc, drawing: string, before: SheetEdits | undefined, after: SheetEdits | undefined): EditDoc {
   const was = new Map(drawingPorts(before).map((p) => [p.pin, p.name]));
+  const now = drawingPorts(after);
   const renamed = new Map<string, string>();
-  for (const p of drawingPorts(after)) {
+  for (const p of now) {
     const old = was.get(p.pin);
     if (old !== undefined && old !== p.name) renamed.set(old, p.name);
   }
-  if (renamed.size === 0) return doc;
+  const kept = new Set(now.map((p) => p.pin));
+  const deleted = new Set([...was].filter(([pin]) => !kept.has(pin)).map(([, name]) => name));
+  if (renamed.size === 0 && deleted.size === 0) return doc;
   let changed = false;
   const sheets: EditDoc['sheets'] = {};
   for (const [k, e] of Object.entries(doc.sheets)) {
@@ -323,21 +366,34 @@ export function followPinRenames(doc: EditDoc, drawing: string, before: SheetEdi
       sheets[k] = e;
       continue;
     }
+    /** The block port an end names (by its name before the edit), if it is a block of this drawing. */
+    const portOf = (end: { node: string; port: string }) =>
+      blocks.has(end.node) && end.port.startsWith(`${end.node}.`) ? end.port.slice(end.node.length + 1) : undefined;
     // One lookup per end, so pins that swap names do not collide.
     const follow = (end: { node: string; port: string }) => {
-      if (!blocks.has(end.node) || !end.port.startsWith(`${end.node}.`)) return end;
-      const to = renamed.get(end.port.slice(end.node.length + 1));
+      const port = portOf(end);
+      const to = port === undefined ? undefined : renamed.get(port);
       return to === undefined ? end : { ...end, port: `${end.node}.${to}` };
     };
+    const gone = (end: { node: string; port: string }) => {
+      const port = portOf(end);
+      return port !== undefined && deleted.has(port);
+    };
     let edited = false;
-    const edges = e.edges.map((w) => {
+    const routes = { ...e.routes };
+    const edges = e.edges.flatMap((w) => {
+      if (gone(w.source) || gone(w.target)) {
+        edited = true;
+        delete routes[w.id];
+        return [];
+      }
       const source = follow(w.source);
       const target = follow(w.target);
-      if (source === w.source && target === w.target) return w;
+      if (source === w.source && target === w.target) return [w];
       edited = true;
-      return { ...w, source, target };
+      return [{ ...w, source, target }];
     });
-    sheets[k] = edited ? { ...e, edges } : e;
+    sheets[k] = edited ? { ...e, edges, routes } : e;
     changed ||= edited;
   }
   return changed ? { ...doc, sheets } : doc;
@@ -381,6 +437,21 @@ export function withoutVerilogEdits(doc: EditDoc): EditDoc {
   return { drawn: doc.drawn, sheets: Object.fromEntries(Object.entries(doc.sheets).filter(([k]) => isDrawnKey(k))) };
 }
 
+/**
+ * The document without the edits of these Verilog modules' sheets, in both
+ * views and of their automatic blocks (`<module>/<block>`): no file declares
+ * them any more, and a module of the same name added later is another one.
+ * Returns `doc` itself when there is nothing to drop.
+ */
+export function withoutModuleEdits(doc: EditDoc, modules: readonly string[]): EditDoc {
+  const gone = (key: string) => {
+    const m = /^v:[a-z]+:(.*)$/.exec(key)?.[1];
+    return m !== undefined && modules.some((x) => m === x || m.startsWith(`${x}/`));
+  };
+  if (!Object.keys(doc.sheets).some((k) => gone(k) && !isEmptyEdits(doc.sheets[k]))) return doc;
+  return { drawn: doc.drawn, sheets: Object.fromEntries(Object.entries(doc.sheets).filter(([k]) => !gone(k))) };
+}
+
 const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
 /**
@@ -401,6 +472,81 @@ export function importedTop(files: Record<string, string>, added: readonly strin
     return texts.some((t) => re.test(t));
   };
   return order.find((m) => !used(m)) ?? order[0];
+}
+
+/**
+ * Verilog text without the definitions (`module … endmodule`) of these
+ * modules, or undefined when they cannot be cut out exactly. Comments and
+ * strings are blanked out first, so neither hides nor fakes a keyword.
+ */
+export function withoutModuleDefinitions(text: string, modules: ReadonlySet<string>): string | undefined {
+  const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"/g, (m) => m.replace(/[^\n]/g, ' '));
+  const cuts: [number, number][] = [];
+  let open: { at: number; cut: boolean } | undefined;
+  for (const m of code.matchAll(/\bendmodule\b|\b(?:macro)?module\s+(?:automatic\s+|static\s+)?([A-Za-z_][\w$]*)/g)) {
+    if (m[1] === undefined) {
+      if (!open) return undefined;
+      if (open.cut) {
+        let end = m.index + 'endmodule'.length;
+        end += /^[ \t]*(?::[ \t]*[A-Za-z_][\w$]*)?[ \t]*(?:\r?\n)?/.exec(code.slice(end))![0].length;
+        cuts.push([open.at, end]);
+      }
+      open = undefined;
+      continue;
+    }
+    // A module header inside a module: not something to cut by text.
+    if (open) return undefined;
+    const line = code.lastIndexOf('\n', m.index - 1) + 1;
+    open = { at: /^[ \t]*$/.test(code.slice(line, m.index)) ? line : m.index, cut: modules.has(m[1]) };
+  }
+  if (open) return undefined;
+  let out = text;
+  for (const [a, b] of cuts.reverse()) out = out.slice(0, a) + out.slice(b);
+  // Only what was asked for is gone (a macro or an odd layout could fool the search above).
+  const before = declaredModules({ 'f.v': text }).filter((m) => !modules.has(m));
+  const after = declaredModules({ 'f.v': out });
+  return after.length === before.length && before.every((m) => after.includes(m)) ? out : undefined;
+}
+
+export interface ImportPlan {
+  /** All files after the import. */
+  files: Record<string, string>;
+  /** Open files the import takes the place of: it declares every module they declare. */
+  replaced: string[];
+  /** Open files that keep their other modules: the definitions the import declares again are cut out. */
+  trimmed: string[];
+  /** Open files with a module the import declares again that could not be cut out (Yosys reports it defined twice). */
+  clashes: string[];
+}
+
+/**
+ * Importing code as a new version of open files of other names (see
+ * setFiles): a file whose modules it all declares is replaced; one that
+ * shares only some of them keeps the others, so importing one module of a
+ * file never removes the rest of the design.
+ */
+export function planImport(open: Record<string, string>, incoming: Record<string, string>): ImportPlan {
+  const mods = new Set(declaredModules(incoming));
+  const plan: ImportPlan = { files: { ...open }, replaced: [], trimmed: [], clashes: [] };
+  for (const [f, text] of Object.entries(open)) {
+    if (f in incoming) continue;
+    const own = declaredModules({ [f]: text });
+    const again = own.filter((m) => mods.has(m));
+    if (again.length === 0) continue;
+    if (again.length === own.length) {
+      delete plan.files[f];
+      plan.replaced.push(f);
+      continue;
+    }
+    const cut = withoutModuleDefinitions(text, new Set(again));
+    if (cut === undefined) plan.clashes.push(f);
+    else {
+      plan.files[f] = cut;
+      plan.trimmed.push(f);
+    }
+  }
+  Object.assign(plan.files, incoming);
+  return plan;
 }
 
 /**
@@ -508,7 +654,8 @@ export const useStore = create<State>((set, get) => {
     clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(() => {
       try {
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(get().savedFile()));
+        // Whether the work is saved to a file goes along (only here, not in saved files): see restoreAutosave.
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ ...get().savedFile(), ...(get().dirty ? {} : { saved: true }) }));
       } catch {
         set({ notice: 'Could not keep a copy in this browser (storage is full or blocked). Use File › Save drawing.' });
       }
@@ -562,6 +709,33 @@ export const useStore = create<State>((set, get) => {
     }
     layoutCache.set(key, l);
     return l;
+  };
+
+  /**
+   * An automatic block's sheet as it shows in the block diagram (with its
+   * edits), laid out as refresh() lays it out, for Copy to new drawing.
+   * Undefined when the layout was cancelled.
+   */
+  const autoBlockSheet = async (module: string): Promise<{ netlist: Diagram; layout: LayoutResult; edits: SheetEdits } | undefined> => {
+    const { blockDesign, rules, theme, doc } = get();
+    if (!blockDesign?.modules[module]) return undefined;
+    const cacheKey = `blocks:${module}:${rulesKey(rules)}`;
+    let base = baseCache.get(cacheKey);
+    if (!base) {
+      base = buildDiagram(blockDesign, module, rules);
+      baseCache.set(cacheKey, base);
+    }
+    const e = doc.sheets[sheetKey({ instance: module, module }, 'blocks')] ?? emptyEdits();
+    const netlist = effectiveDiagram(module, base, e, interfaceOf);
+    const measure = measureFor(theme);
+    let { pos, routes } = e;
+    if (!isPinned(e) || netlist.nodes.some((n) => !pos[n.id])) {
+      const elk = await elkOf(cacheKey, base);
+      if (!elk) return undefined;
+      if (!isPinned(e)) ({ pos, routes } = layoutToEdits(e, elk, 'none'));
+      else pos = placeMissing(netlist, pos, elk, (n) => sizeNode(n, measure));
+    }
+    return { netlist, edits: e, layout: buildGeometry({ netlist, pos, routes, measure }).layout };
   };
 
   /** Show the first drawing, or nothing. */
@@ -626,7 +800,7 @@ export const useStore = create<State>((set, get) => {
         path = renamePathDrawing(path, from, to);
         if (sheet === `d:${from}`) sheet = `d:${to}`;
       }
-      return doc === h.doc ? h : { doc, path, sheet };
+      return doc === h.doc ? h : { ...h, doc, path, sheet };
     };
     const now = fix({ doc: s.doc, path: s.path, sheet: s.sheet });
     const list = [...names].map(([from, to]) => `${from} → ${to}`).join(', ');
@@ -640,7 +814,8 @@ export const useStore = create<State>((set, get) => {
     scheduleAutosave();
   };
 
-  const applySaved = async (f: SavedFile) => {
+  /** Start over from a saved file. `dirty`: the work is not saved to a file (it comes from the browser's copy). */
+  const applySaved = async (f: SavedFile, dirty = false) => {
     navSeq++;
     cancelLayouts();
     layoutCache.clear();
@@ -654,7 +829,7 @@ export const useStore = create<State>((set, get) => {
       doc: f.doc,
       past: [],
       future: [],
-      dirty: false,
+      dirty,
       selection: new Set(),
       path: f.path,
       sheet: '',
@@ -667,38 +842,67 @@ export const useStore = create<State>((set, get) => {
       blockDesign: undefined,
       hierarchy: undefined,
     });
+    // The browser's copy is this file now, or a reload brings back the work from before it.
+    scheduleAutosave();
     await get().rebuild();
   };
 
   /**
-   * Add or replace Verilog files. `otherDesign`: the files are not a new version
-   * of the open ones, so the edits of Verilog sheets are dropped first (one undo
-   * step): they are keyed by module name only, and a module of another design
-   * with the same name (top, say) would show them.
+   * Record a change of the Verilog files as one undo step that puts them back
+   * too (see HistoryEntry.files), with `doc` as the document after it. Nothing
+   * is recorded when there is nothing to go back to: no files, no history and
+   * no change of the document (the example opened at start).
    */
-  const openFiles = async (files: Record<string, string>, replace: boolean, otherDesign: boolean) => {
+  const pushFilesStep = (doc: EditDoc) => {
     const s = get();
-    if (otherDesign) {
-      const doc = withoutVerilogEdits(s.doc);
-      // The entry names no sheet: undoing it redraws whatever is on screen.
-      if (doc !== s.doc) set({ past: [...s.past.slice(-(HISTORY - 1)), { doc: s.doc, path: [], sheet: '' }], future: [], doc, dirty: true });
-    }
-    const imported = replace ? [] : declaredModules(files);
+    if (Object.keys(s.files).length === 0 && s.past.length === 0 && doc === s.doc) return;
+    set({ past: [...s.past.slice(-(HISTORY - 1)), { ...here(), files: s.files, top: s.topOverride }], future: [], doc, dirty: true });
+  };
+
+  /** After undo/redo of a step that changed the files: open those files again, where the step left them. */
+  const reopenFiles = async (entry: HistoryEntry) => {
+    const mode = viewModeOf(entry.sheet);
+    set({ files: entry.files ?? {}, topOverride: entry.top, path: entry.path, ...(mode ? { viewMode: mode } : {}) });
+    scheduleAutosave();
+    await get().rebuild();
+  };
+
+  /**
+   * Open a new set of Verilog files (`all`). `imported`: the files the user
+   * added, whose modules are shown when the design does not use them.
+   */
+  const openFiles = async (all: Record<string, string>, opts: { imported?: Record<string, string>; clearTop?: boolean } = {}) => {
+    const s = get();
+    const imported = opts.imported ? declaredModules(opts.imported) : [];
     // Opening Verilog while a drawing is on screen shows the Verilog.
     const path = s.path[0]?.drawn ? [] : s.path;
-    const all = replace ? files : { ...s.files, ...files };
-    set({ files: all, path, ...(replace ? { topOverride: undefined } : {}) });
+    set({ files: all, path, ...(opts.clearTop ? { topOverride: undefined } : {}) });
     scheduleAutosave();
+    const noticeBefore = get().notice;
     await get().rebuild();
     // Added files whose modules the top does not use are not in the design at all (Yosys keeps
     // only the top's hierarchy), so nothing would show them: make the import the top. A new
     // version of an open file, or a submodule the top uses, has modules in the design.
     const { design, error } = get();
     if (!imported.length || get().files !== all || !design || error || imported.some((m) => design.modules[m])) return;
-    const top = importedTop(files, imported);
+    const top = importedTop(opts.imported!, imported);
     if (!top) return;
+    // What the rebuild said (a drawing renamed away from an imported module's name) is kept: there is one notice line.
+    const said = get().notice !== noticeBefore ? get().notice : undefined;
     await get().setTop(top);
-    if (get().design?.top === top) set({ notice: `Showing ${top}, which ${design.top} does not use. Pick another module under Top.` });
+    if (get().design?.top === top) set({ notice: [said, `Showing ${top}, which ${design.top} does not use. Pick another module under Top.`].filter(Boolean).join(' ') });
+  };
+
+  /**
+   * Open files that are not a new version of the open ones. The edits of
+   * Verilog sheets are dropped: they are keyed by module name only, and a module
+   * of another design with the same name (top, say) would show them. One undo
+   * step brings back the files and the edits, and nothing older refers to the
+   * other design while it is not open.
+   */
+  const openOtherDesign = async (files: Record<string, string>) => {
+    pushFilesStep(withoutVerilogEdits(get().doc));
+    await openFiles(files, { clearTop: true });
   };
 
   return {
@@ -721,16 +925,37 @@ export const useStore = create<State>((set, get) => {
     dirty: false,
     interfaceOf,
 
-    async setFiles(files, replace) {
-      // Replacing files keeps the edits only when it is a new version of the open design:
-      // it reuses a file name (the Import dialog names a re-import after the file it updates).
+    async setFiles(files, replace, opts = {}) {
       const current = get().files;
-      await openFiles(files, replace, replace && !Object.keys(files).some((f) => f in current));
+      if (replace) {
+        // Replacing all files keeps the edits only when it is a new version of the open design:
+        // it reuses a file name (File › Open Verilog of the same files).
+        if (!Object.keys(files).some((f) => f in current)) return openOtherDesign(files);
+        // Open files it leaves out come back with Undo.
+        if (Object.keys(current).some((f) => !(f in files))) pushFilesStep(get().doc);
+        await openFiles(files, { clearTop: true });
+        return;
+      }
+      if (opts.newVersion) {
+        // The same design under other file names: the edits stay. Open files it replaces, or cuts
+        // a module out of, come back with Undo.
+        const plan = planImport(current, files);
+        if (plan.replaced.length || plan.trimmed.length) pushFilesStep(get().doc);
+        await openFiles(plan.files, { imported: files });
+        return;
+      }
+      await openFiles({ ...current, ...files }, { imported: files });
     },
 
     async removeFile(name) {
-      const files = { ...get().files };
+      const s = get();
+      if (!(name in s.files)) return;
+      const files = { ...s.files };
       delete files[name];
+      // The edits of modules only this file declared would show on a module of the same name added
+      // later (another design's top, say): drop them, in one undo step that brings back the file too.
+      const left = new Set(declaredModules(files));
+      pushFilesStep(withoutModuleEdits(s.doc, declaredModules({ [name]: s.files[name] }).filter((m) => !left.has(m))));
       set({ files });
       scheduleAutosave();
       await get().rebuild();
@@ -738,7 +963,7 @@ export const useStore = create<State>((set, get) => {
 
     async loadExample(name = 'auction') {
       // An example always opens as it is, even over an edited copy of itself.
-      await openFiles(EXAMPLES[name].files, true, true);
+      await openOtherDesign(EXAMPLES[name].files);
     },
 
     viewDesign() {
@@ -1166,11 +1391,13 @@ export const useStore = create<State>((set, get) => {
     copy() {
       const s = get();
       if (!s.netlist || !s.layout || !settled(s)) return false;
-      const nodes = new Set([...s.selection].filter((id) => s.layout!.nodes.some((n) => n.id === id)));
-      const clip = copyNodes(s.netlist, edits(), s.layout, nodes, interfaceOf);
+      const copied = s.layout.nodes.filter((n) => s.selection.has(n.id));
+      const clip = copyNodes(s.netlist, edits(), s.layout, new Set(copied.map((n) => n.id)), interfaceOf);
       if (!clip) return false;
-      clipboard = clip;
-      pasteCount = 0;
+      const x = Math.min(...copied.map((n) => n.x));
+      const y = Math.min(...copied.map((n) => n.y));
+      const box = { x, y, width: Math.max(...copied.map((n) => n.x + n.width)) - x, height: Math.max(...copied.map((n) => n.y + n.height)) - y };
+      clipboard = { clip, box };
       return true;
     },
 
@@ -1179,18 +1406,11 @@ export const useStore = create<State>((set, get) => {
     },
 
     paste(at) {
-      const clip = clipboard;
       const s = get();
-      if (!clip || !s.layout || !settled(s)) return;
-      pasteCount++;
-      let where = at;
-      if (!where) {
-        // Next to where it was copied from: offset a little more each time.
-        const sel = s.layout.nodes.filter((n) => s.selection.has(n.id));
-        const x = sel.length ? Math.min(...sel.map((n) => n.x)) : (s.layout.x ?? 0) + 40;
-        const y = sel.length ? Math.min(...sel.map((n) => n.y)) : (s.layout.y ?? 0) + 40;
-        where = { x: x + 20, y: y + 20 };
-      }
+      if (!clipboard || !s.layout || !settled(s)) return;
+      const { clip, box } = clipboard;
+      // Without a point: where it was copied from if that is free, otherwise below it, never on top of it.
+      const where = at ?? pasteSpot(box, s.layout.nodes);
       const at2 = { x: snap(where.x), y: snap(where.y) };
       let pasted: string[] = [];
       editSheet((e) => {
@@ -1210,18 +1430,21 @@ export const useStore = create<State>((set, get) => {
       const prev = s.past[s.past.length - 1];
       if (!prev) return;
       // The redo entry keeps where the change was made (not where Undo was pressed), so Redo shows it too.
-      set({ past: s.past.slice(0, -1), future: [{ ...prev, doc: s.doc }, ...s.future], doc: prev.doc, dirty: true });
+      // A step that changed the files swaps the whole state: Redo comes back here.
+      const redo = prev.files ? { ...here(), files: s.files, top: s.topOverride } : { ...prev, doc: s.doc };
+      set({ past: s.past.slice(0, -1), future: [redo, ...s.future], doc: prev.doc, dirty: true });
       scheduleAutosave();
-      void showAfterHistory(prev);
+      void (prev.files ? reopenFiles(prev) : showAfterHistory(prev));
     },
 
     redo() {
       const s = get();
       const next = s.future[0];
       if (!next) return;
-      set({ future: s.future.slice(1), past: [...s.past, { ...next, doc: s.doc }], doc: next.doc, dirty: true });
+      const undo = next.files ? { ...here(), files: s.files, top: s.topOverride } : { ...next, doc: s.doc };
+      set({ future: s.future.slice(1), past: [...s.past, undo], doc: next.doc, dirty: true });
       scheduleAutosave();
-      void showAfterHistory(next);
+      void (next.files ? reopenFiles(next) : showAfterHistory(next));
     },
 
     newDrawing(name = 'drawing') {
@@ -1259,14 +1482,92 @@ export const useStore = create<State>((set, get) => {
       else refresh();
     },
 
-    convertToDrawing() {
+    async convertToDrawing() {
       const s = get();
       if (!s.netlist || !s.layout || !settled(s)) return;
-      const taken = new Set([...s.doc.drawn, ...Object.keys(s.design?.modules ?? {}), ...s.moduleNames]);
-      const name = uniqueModuleName(`${currentModule().replace(/^.*\//, '')}_drawing`, taken);
-      const sheetEdits = toDrawing(s.netlist, s.layout, edits(), interfaceOf);
-      const doc: EditDoc = { drawn: [...s.doc.drawn, name], sheets: { ...s.doc.sheets, [`d:${name}`]: sheetEdits } };
-      pushDoc(doc);
+      const { blockDesign } = s;
+      const module = currentModule();
+      const main = toDrawing(s.netlist, s.layout, edits(), interfaceOf);
+      // Automatic blocks are cut out of the Verilog by this app, so another design (or a changed file)
+      // takes them away. The copy gets a drawing of its own for each one it uses, and for those they use,
+      // so it keeps working without them. Instances of Verilog modules still name those modules.
+      const moduleOf = (u: UserNode) => (u.sym === 'block' ? u.params.module : u.sym === 'raw' && u.raw?.kind === 'instance' ? u.raw.moduleName : undefined);
+      const autoOf = (u: UserNode) => {
+        const m = moduleOf(u);
+        return m && blockDesign?.modules[m]?.auto ? m : undefined;
+      };
+      const subs = new Map<string, SheetEdits>();
+      const queue = main.nodes.map(autoOf);
+      while (queue.length) {
+        const m = queue.shift();
+        if (!m || subs.has(m)) continue;
+        const sheet = await autoBlockSheet(m);
+        if (!sheet) {
+          set({ notice: 'Copy to new drawing was interrupted. Try again.' });
+          return;
+        }
+        const d = toDrawing(sheet.netlist, sheet.layout, sheet.edits, interfaceOf);
+        subs.set(m, d);
+        queue.push(...d.nodes.map(autoOf));
+      }
+      // The files changed meanwhile: these blocks are gone.
+      if (get().blockDesign !== blockDesign) return;
+      const now = get();
+      const taken = new Set([...now.doc.drawn, ...Object.keys(now.design?.modules ?? {}), ...now.moduleNames]);
+      const name = uniqueModuleName(`${module.replace(/^.*\//, '')}_drawing`, taken);
+      taken.add(name);
+      // Each block's drawing is named after the block's module (top/crop_points → top_crop_points).
+      const names = new Map<string, string>();
+      for (const m of subs.keys()) {
+        names.set(m, uniqueModuleName(m, taken));
+        taken.add(names.get(m)!);
+      }
+      // Wires name a block's ports; a drawing's ports are named after its pins (see drawingPorts),
+      // which are the block's ports as its sheet shows them (`in:<port>`, kept by toDrawing).
+      const portNames = new Map<string, Map<string, string>>();
+      for (const [m, d] of subs) {
+        const byPin = new Map(drawingPorts(d).map((p) => [p.pin, p.name]));
+        const map = new Map<string, string>();
+        for (const p of blockDesign!.modules[m].ports) {
+          const to = byPin.get(`${p.direction === 'input' ? 'in' : p.direction === 'output' ? 'out' : 'io'}:${p.name}`);
+          if (to !== undefined) map.set(p.name, to);
+        }
+        portNames.set(m, map);
+      }
+      const retarget = (e: SheetEdits): SheetEdits => {
+        const ports = new Map<string, Map<string, string>>();
+        const nodes = e.nodes.map((u): UserNode => {
+          const m = autoOf(u);
+          if (!m) return u;
+          ports.set(u.id, portNames.get(m)!);
+          return { id: u.id, sym: 'block', params: { module: names.get(m)! }, ...(u.name ? { name: u.name } : {}) };
+        });
+        if (ports.size === 0) return e;
+        const end = (x: { node: string; port: string }) => {
+          const map = ports.get(x.node);
+          const port = map && x.port.startsWith(`${x.node}.`) ? x.port.slice(x.node.length + 1) : undefined;
+          const to = port === undefined ? undefined : map!.get(port);
+          return to === undefined || to === port ? x : { ...x, port: `${x.node}.${to}` };
+        };
+        return { ...e, nodes, edges: e.edges.map((w) => ({ ...w, source: end(w.source), target: end(w.target) })) };
+      };
+      const sheets: EditDoc['sheets'] = { ...now.doc.sheets, [`d:${name}`]: retarget(main) };
+      for (const [m, d] of subs) sheets[`d:${names.get(m)}`] = retarget(d);
+      const doc: EditDoc = { drawn: [...now.doc.drawn, name, ...names.values()], sheets };
+      // Say what the copy is made of, and what still comes from the Verilog files.
+      const drawings = new Set(doc.drawn);
+      const linked = new Set<string>();
+      for (const d of [main, ...subs.values()]) {
+        for (const u of d.nodes) {
+          const m = moduleOf(u);
+          if (m && !autoOf(u) && !drawings.has(m)) linked.add(m);
+        }
+      }
+      const said = [
+        names.size ? `Copied ${module} to ${name}, with its blocks as drawings of their own: ${[...names.values()].join(', ')}.` : '',
+        linked.size ? `Instances of ${[...linked].join(', ')} still use those modules from your Verilog files.` : '',
+      ].filter(Boolean);
+      pushDoc(doc, said.length ? { notice: said.join(' ') } : {});
       void get().openPath([{ instance: name, module: name, drawn: true }]);
     },
 
@@ -1297,8 +1598,9 @@ export const useStore = create<State>((set, get) => {
       if (!text) return false;
       try {
         const f = parseSavedFile(text);
-        await applySaved(f);
-        set({ dirty: true });
+        // Whether the work was saved to a file when the browser kept it (see scheduleAutosave).
+        const saved = (JSON.parse(text) as { saved?: unknown }).saved === true;
+        await applySaved(f, !saved);
         return true;
       } catch {
         return false;
@@ -1307,6 +1609,8 @@ export const useStore = create<State>((set, get) => {
 
     markSaved() {
       set({ dirty: false });
+      // The browser's copy says so too, so a reload does not call the work unsaved.
+      scheduleAutosave();
     },
   };
 });
