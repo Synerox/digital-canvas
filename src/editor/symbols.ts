@@ -296,7 +296,9 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
       const module = p.module ?? '';
       const info = module ? iface(module) : undefined;
       const ports = (info?.ports ?? []).map((q) =>
-        q.dir === 'output' ? port(id, q.name, 'out', 'EAST', q.width) : port(id, q.name, 'in', 'WEST', q.width),
+        q.dir === 'output'
+          ? port(id, q.name, 'out', 'EAST', q.width)
+          : { ...port(id, q.name, 'in', 'WEST', q.width), ...(q.dir === 'inout' ? { inout: true } : {}) },
       );
       return {
         id,

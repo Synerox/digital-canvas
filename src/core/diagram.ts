@@ -29,6 +29,11 @@ export interface DPort {
   dir: 'in' | 'out';
   side: Side;
   width: number;
+  /**
+   * An inout port of a block or instance. It is drawn and wired as an input (dir 'in'),
+   * but it may also drive its net, so it is never tied to a constant when left open.
+   */
+  inout?: boolean;
 }
 
 export interface DNode {
@@ -273,6 +278,7 @@ export function buildDiagram(
         dir,
         side: portSide(c, pname, dir),
         width: bits.length,
+        ...(direction === 'inout' ? { inout: true } : {}),
       };
       ports.push(port);
       if (dir === 'out') {
