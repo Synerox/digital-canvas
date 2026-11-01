@@ -81,6 +81,12 @@ describe('routeWire', () => {
     const O = R(150, 90, 40, 40); // not in the way
     const pts = routeWire(east(A2, 43.5), west(B2, 43.5), { obstacles: [A2, B2, O] });
     expect(pts).toEqual([P(103, 43.5), P(297, 43.5)]);
+    // Off-grid ports at different heights: still one clean Z, no jog onto the grid.
+    const from = east(A2, 23.25);
+    const to = west(B2, 61.75);
+    const z = routeWire(from, to, { obstacles: [A2, B2, O] });
+    expectClean(z, from, to);
+    expect(bends(z)).toBe(2);
   });
 
   it('uses a Z with two bends between ports at different heights', () => {

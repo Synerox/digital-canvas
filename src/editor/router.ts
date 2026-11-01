@@ -218,6 +218,8 @@ function clusterCoords(values: number[], tol: number): { index: Map<number, numb
 }
 
 type Interval = [number, number];
+/** A point in cluster index space: [column, row]. */
+type Cell = [number, number];
 
 /** Union of intervals; touching ones merge too (a straight continuation is not a branch). */
 function mergeIntervals(list: Interval[]): Interval[] {
@@ -251,7 +253,7 @@ export function netJunctions(polylines: Point[][]): Point[] {
   // Work in cluster index space: rows/columns of merged intervals, plus candidate points.
   const rows = new Map<number, Interval[]>();
   const cols = new Map<number, Interval[]>();
-  const candidates: Interval[] = [];
+  const candidates: Cell[] = [];
   const add = (m: Map<number, Interval[]>, k: number, iv: Interval) => {
     const list = m.get(k);
     if (list) list.push(iv);
@@ -259,10 +261,10 @@ export function netJunctions(polylines: Point[][]): Point[] {
   };
   for (const pl of polylines) {
     for (let i = 0; i < pl.length; i++) {
-      const a: Interval = [cx.index.get(pl[i].x)!, cy.index.get(pl[i].y)!];
+      const a: Cell = [cx.index.get(pl[i].x)!, cy.index.get(pl[i].y)!];
       candidates.push(a);
       if (i === 0) continue;
-      const b: Interval = [cx.index.get(pl[i - 1].x)!, cy.index.get(pl[i - 1].y)!];
+      const b: Cell = [cx.index.get(pl[i - 1].x)!, cy.index.get(pl[i - 1].y)!];
       if (a[1] === b[1] && a[0] !== b[0]) add(rows, a[1], [Math.min(a[0], b[0]), Math.max(a[0], b[0])]);
       else if (a[0] === b[0] && a[1] !== b[1]) add(cols, a[0], [Math.min(a[1], b[1]), Math.max(a[1], b[1])]);
       // Slanted segments only contribute their end points (they never come out of the router).
@@ -275,7 +277,7 @@ export function netJunctions(polylines: Point[][]): Point[] {
       if (hs.some(([a, b]) => a <= x && x <= b) && vs.some(([a, b]) => a <= y && y <= b)) candidates.push([x, y]);
 
   const seen = new Set<number>();
-  const found: Interval[] = [];
+  const found: Cell[] = [];
   const stride = cy.value.length + 1;
   for (const [x, y] of candidates) {
     const key = x * stride + y;
@@ -374,10 +376,14 @@ interface Costs {
   touch: number;
 }
 
-/** A search start, travelling in any of the directions in the bit mask `dirs` (1 << d) without a bend. tag says where it came from. */
+/**
+ * A search start, travelling in any of the directions in the bit mask `dirs` (1 << d) without a bend;
+ * the directions in `ban` may not be taken from it at all. tag says where it came from.
+ */
 interface Seed {
   node: number;
   dirs: number;
+  ban?: number;
   g: number;
   tag: number;
 }
@@ -506,7 +512,9 @@ function search(L: Lattice, c: Costs, seeds: Seed[], goal: number, goalDir: numb
     return Math.abs(dx) + Math.abs(dy) + minBends(dx, dy, d, goalDir) * c.bend;
   };
 
+  const banned = new Map<number, number>();
   for (const seed of seeds) {
+    if (seed.ban) banned.set(seed.node, (banned.get(seed.node) ?? 0) | seed.ban);
     for (let d = 0; d < 4; d++) {
       if (!(seed.dirs & (1 << d))) continue;
       const s = seed.node * 4 + d;
@@ -535,8 +543,9 @@ function search(L: Lattice, c: Costs, seeds: Seed[], goal: number, goalDir: numb
     const j = (node - i) / nx;
     // Other nets are not charged at a start: that point was not chosen by the search.
     const t = touch && parent[s] >= 0 ? touch[node] : 0;
+    const ban = parent[s] < 0 ? (banned.get(node) ?? 0) : 0;
     for (let d2 = 0; d2 < 4; d2++) {
-      if (d2 === (d ^ 2)) continue;
+      if (d2 === (d ^ 2) || ban & (1 << d2)) continue;
       let next: number;
       let cost: number;
       if (d2 === 0) {
@@ -875,7 +884,8 @@ function routeInWindow(
           // old one and really branch earlier, perhaps inside the source stub.
           const prior = x === u.x && y === u.y ? pl[s - 1] : u;
           const back = prior ? directionTo({ x, y }, prior) : -1;
-          seeds.push({ node: n, dirs: back < 0 ? 15 : 15 & ~(1 << back), g: joins.has(n) ? costs.bend : 0, tag: branchFrom.length });
+          const ban = back < 0 ? 0 : 1 << back;
+          seeds.push({ node: n, dirs: 15 & ~ban, ban, g: joins.has(n) ? costs.bend : 0, tag: branchFrom.length });
         }
       }
     });
