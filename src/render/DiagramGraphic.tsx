@@ -4,7 +4,7 @@
  */
 import type { JSX } from 'react';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT } from '../layout/elk-layout';
+import { FONT, isMuxType } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -12,10 +12,13 @@ export interface GraphicProps {
   /** Ports whose incoming wire already carries a label (filled in by DiagramGraphic). */
   labeledPorts?: ReadonlySet<string>;
   theme: Theme;
-  selected?: string;
+  /** Selected node and edge IDs. */
+  selection?: ReadonlySet<string>;
   highlighted?: ReadonlySet<string>;
-  /** Attach data-node-id attributes for hit testing (off for export). */
+  /** Attach data-node-id / data-edge-id attributes for hit testing (off for export). */
   interactive?: boolean;
+  /** Edges drawn in the warning colour in the editor (for example a width mismatch). */
+  flagged?: ReadonlySet<string>;
 }
 
 const STROKE = 1.4;
@@ -59,7 +62,7 @@ function BusMark({ at, width, theme }: { at: Point; width: number; theme: Theme 
 }
 
 function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; width: number } {
-  const sel = p.selected === n.id;
+  const sel = !!p.selection?.has(n.id);
   const hi = p.highlighted?.has(n.id);
   return {
     stroke: sel ? p.theme.accent : p.theme.ink,
@@ -88,7 +91,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     </text>
   );
 
-  if (t === '$mux' || t === '$pmux' || t === '$bmux') {
+  if (isMuxType(t)) {
     const inset = Math.min(10, h / 4);
     const west = n.ports.filter((q) => q.side === 'WEST');
     return (
@@ -100,7 +103,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
           strokeWidth={s.width}
           strokeLinejoin="round"
         />
-        {t === '$mux' &&
+        {(t === '$mux' || t === 'dc:mux') &&
           west.map((q, k) => (
             <text key={q.id} x={x + 4} y={q.y + 3.5} fontSize={10} fill={theme.muted} fontFamily={theme.font}>
               {k}
@@ -157,22 +160,26 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     );
   }
 
-  const isAnd = t === '$and' || t === '$logic_and' || t === '$reduce_and' || t === 'dc:and';
-  const isOr = t === '$or' || t === '$logic_or' || t === '$reduce_or' || t === '$reduce_bool';
+  const isAnd = t === '$and' || t === '$logic_and' || t === '$reduce_and' || t === 'dc:and' || t === 'dc:nand';
+  const isOr = t === '$or' || t === '$logic_or' || t === '$reduce_or' || t === '$reduce_bool' || t === 'dc:nor';
   const isXor = t === '$xor' || t === '$xnor' || t === '$reduce_xor' || t === '$reduce_xnor';
   if (isAnd) {
-    const d = `M${x},${y} H${x + w / 2} A${w / 2},${h / 2} 0 0 1 ${x + w / 2},${y + h} H${x} Z`;
+    // NAND: the same body, shortened to make room for the output bubble.
+    const bubble = t === 'dc:nand';
+    const bw = bubble ? w - 8 : w;
+    const d = `M${x},${y} H${x + bw / 2} A${bw / 2},${h / 2} 0 0 1 ${x + bw / 2},${y + h} H${x} Z`;
     const inverted = n.attrs?.invertB ? n.ports.find((q) => q.name === 'B') : undefined;
     return (
       <g>
         <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
         {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
+        {bubble && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />}
       </g>
     );
   }
   if (isOr || isXor) {
     const curve = (dx: number) => `M${x + dx},${y} Q${x + dx + w * 0.25},${y + h / 2} ${x + dx},${y + h}`;
-    const inverted = t === '$xnor' || t === '$reduce_xnor';
+    const inverted = t === '$xnor' || t === '$reduce_xnor' || t === 'dc:nor';
     const bw = inverted ? w - 8 : w;
     const body = `M${x},${y} Q${x + bw * 0.6},${y} ${x + bw},${y + h / 2} Q${x + bw * 0.6},${y + h} ${x},${y + h} Q${x + w * 0.25},${y + h / 2} ${x},${y} Z`;
     const edgeX = (py: number) => {
@@ -188,8 +195,8 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       </g>
     );
   }
-  if (t === '$not' || t === '$logic_not') {
-    const br = 4;
+  if (t === '$not' || t === '$logic_not' || t === 'dc:buf') {
+    const br = t === 'dc:buf' ? 0 : 4;
     return (
       <g>
         <polygon
@@ -199,7 +206,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
           strokeWidth={s.width}
           strokeLinejoin="round"
         />
-        <circle cx={x + w - br} cy={y + h / 2} r={br} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />
+        {br > 0 && <circle cx={x + w - br} cy={y + h / 2} r={br} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />}
       </g>
     );
   }
@@ -261,7 +268,7 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
     case 'const':
       body = (
         <g>
-          <rect x={x} y={y} width={w} height={h} fill="transparent" stroke={p.selected === n.id ? theme.accent : 'none'} />
+          <rect x={x} y={y} width={w} height={h} fill="transparent" stroke={p.selection?.has(n.id) ? theme.accent : 'none'} />
           <text
             x={x + w - 3}
             y={y + h / 2 + 4}
@@ -297,13 +304,39 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
         </g>
       );
       break;
+    case 'split':
+      body = (
+        <g>
+          <rect x={x} y={y} width={w} height={h} fill={s.stroke} stroke={s.stroke} strokeWidth={1} />
+          {n.ports
+            .filter((q) => q.side === 'EAST')
+            .map((q) => (
+              <text key={q.id} x={x + w + 3} y={q.y - 3} fontSize={9} fill={theme.muted} fontFamily={theme.font}>
+                {q.name}
+              </text>
+            ))}
+        </g>
+      );
+      break;
+    case 'text':
+      body = (
+        <g>
+          <rect x={x} y={y} width={w} height={h} fill="transparent" stroke={p.selection?.has(n.id) ? theme.accent : 'none'} strokeDasharray="3 2" />
+          {n.label.split('\n').map((line, i) => (
+            <text key={i} x={x + 2} y={y + 14 + i * 16} fontSize={FONT.pin} fill={theme.ink} fontFamily={theme.font}>
+              {line}
+            </text>
+          ))}
+        </g>
+      );
+      break;
     case 'instance': {
       body = (
         <g>
           <rect x={x} y={y} width={w} height={h} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />
           <text
             x={x + w / 2}
-            y={y + 17}
+            y={y + 20}
             fontSize={FONT.title}
             fontWeight={700}
             textAnchor="middle"
@@ -315,7 +348,7 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
           {n.subLabel && (
             <text
               x={x + w / 2}
-              y={y + 31}
+              y={y + 37}
               fontSize={FONT.sub}
               fontStyle="italic"
               textAnchor="middle"
@@ -350,7 +383,7 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
   return <g {...dataAttrs}>{body}</g>;
 }
 
-function Edges({ edges, theme }: { edges: LEdge[]; theme: Theme }) {
+function Edges({ edges, theme, selection, flagged, interactive }: { edges: LEdge[]; theme: Theme; selection?: ReadonlySet<string>; flagged?: ReadonlySet<string>; interactive?: boolean }) {
   const marks: JSX.Element[] = [];
   const doneSources = new Set<string>();
   const junctionKeys = new Set<string>();
@@ -385,10 +418,26 @@ function Edges({ edges, theme }: { edges: LEdge[]; theme: Theme }) {
           <path key={e.id} d={pathOf(e.points)} />
         ))}
       </g>
+      {(selection || flagged) && (
+        <g fill="none" strokeWidth={STROKE + 1} strokeLinejoin="round">
+          {edges.map((e) =>
+            selection?.has(e.id) || flagged?.has(e.id) ? (
+              <path key={e.id} d={pathOf(e.points)} stroke={selection?.has(e.id) ? theme.accent : '#e03131'} strokeDasharray={selection?.has(e.id) ? undefined : '5 3'} />
+            ) : null,
+          )}
+        </g>
+      )}
       {junctions.map((j, i) => (
         <circle key={i} cx={j.x} cy={j.y} r={3} fill={theme.wire} />
       ))}
       {marks}
+      {interactive && (
+        <g fill="none" stroke="transparent" strokeWidth={9} style={{ cursor: 'pointer' }}>
+          {edges.map((e) => (
+            <path key={e.id} d={pathOf(e.points)} data-edge-id={e.id} />
+          ))}
+        </g>
+      )}
       {edges.map((e) =>
         e.label && e.labelBox ? (
           <text
@@ -412,7 +461,7 @@ export function DiagramGraphic(props: GraphicProps) {
   const p = { ...props, labeledPorts: new Set(props.layout.edges.filter((e) => e.label).map((e) => e.target.port)) };
   return (
     <g>
-      <Edges edges={p.layout.edges} theme={p.theme} />
+      <Edges edges={p.layout.edges} theme={p.theme} selection={p.selection} flagged={p.flagged} interactive={p.interactive} />
       {p.layout.nodes.map((n) => (
         <NodeShape key={n.id} n={n} p={p} />
       ))}

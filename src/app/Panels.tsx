@@ -7,8 +7,8 @@ export function HierarchyTree() {
   const hierarchy = useStore((s) => s.hierarchy);
   const path = useStore((s) => s.path);
   const openPath = useStore((s) => s.openPath);
-  if (!hierarchy) return <p className="muted small">No design loaded.</p>;
-  const current = path.map((p) => p.instance).join('/');
+  if (!hierarchy) return <p className="muted small">No Verilog loaded.</p>;
+  const current = path[0]?.drawn ? '' : path.map((p) => p.instance).join('/');
 
   const render = (n: HierarchyNode, prefix: PathEntry[]) => {
     const here = [...prefix, { instance: n.instance, module: n.module }];
@@ -92,11 +92,44 @@ export function Breadcrumb() {
         <span key={i}>
           {i > 0 && <span className="sep">›</span>}
           <button className={i === path.length - 1 ? 'current' : ''} onClick={() => openPath(path.slice(0, i + 1))}>
-            {i === 0 ? p.module : view?.modules[p.module]?.auto ? view.modules[p.module].displayName : `${p.instance} (${p.module})`}
+            {i === 0
+              ? p.module
+              : !p.drawn && view?.modules[p.module]?.auto
+                ? view.modules[p.module].displayName
+                : `${p.instance} (${p.module})`}
           </button>
         </span>
       ))}
     </nav>
+  );
+}
+
+/** Modules drawn by hand. */
+export function Drawings() {
+  const drawn = useStore((s) => s.doc.drawn);
+  const path = useStore((s) => s.path);
+  const openPath = useStore((s) => s.openPath);
+  const newDrawing = useStore((s) => s.newDrawing);
+  const current = path.length === 1 && path[0].drawn ? path[0].module : undefined;
+  return (
+    <>
+      {drawn.length === 0 ? (
+        <p className="muted small">None yet.</p>
+      ) : (
+        <ul className="tree">
+          {drawn.map((d) => (
+            <li key={d}>
+              <button className={`tree-item ${d === current ? 'active' : ''}`} onClick={() => openPath([{ instance: d, module: d, drawn: true }])}>
+                {d}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button className="small add-drawing" onClick={() => newDrawing()}>
+        + New drawing
+      </button>
+    </>
   );
 }
 

@@ -18,7 +18,8 @@ import {
 } from './ir';
 import { ARITHMETIC, DEFAULT_RULES, type RuleId, applyRules } from './rules';
 
-export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'inout' | 'const' | 'join';
+/** text: a free note (no ports); split: a bus split into slices (drawn by hand). */
+export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'inout' | 'const' | 'join' | 'split' | 'text';
 export type Side = 'WEST' | 'EAST' | 'NORTH' | 'SOUTH';
 
 export interface DPort {
@@ -58,6 +59,7 @@ export interface DEndpoint {
 }
 
 export interface DEdge {
+  /** Stable ID: `<source port>><target port>` (with `#n` when the same pair repeats). */
   id: string;
   source: DEndpoint;
   target: DEndpoint;
@@ -69,6 +71,8 @@ export interface DEdge {
   label?: string;
   /** Name of the driving signal, for highlighting. */
   netName?: string;
+  /** Which bits of the source port the edge carries, when not all of them. */
+  bits?: { lo: number; width: number };
 }
 
 export interface Diagram {
@@ -129,6 +133,10 @@ const CELL_SYMBOL: Record<string, string> = {
   $mem_v2: 'MEM',
   'dc:decoder': 'DEC',
   'dc:and': '&',
+  'dc:nand': '&',
+  'dc:nor': '|',
+  'dc:buf': '',
+  'dc:mux': 'MUX',
 };
 
 export function cellSymbol(type: string): string {
@@ -360,7 +368,7 @@ export function buildDiagram(
       const cport: DPort = { id: `${cid}.out`, name: 'out', dir: 'out', side: 'EAST', width: r.bits.length };
       nodes.push({ id: cid, kind: 'const', label: formatConst(r.bits), ports: [cport], src: [] });
       edges.push({
-        id: `e${edges.length}`,
+        id: '',
         source: { node: cid, port: cport.id },
         target,
         width: r.bits.length,
@@ -373,13 +381,14 @@ export function buildDiagram(
     const fullSource = d.index === 0 && len === d.width;
     const name = runLabel(d, len, r.bits);
     edges.push({
-      id: `e${edges.length}`,
+      id: '',
       source: { node: d.node, port: d.port },
       target,
       width: len,
       fullSource,
       label: note ? [fullSource ? undefined : name, note].filter(Boolean).join(' ') : fullSource && fullSink ? undefined : name,
       netName: name,
+      ...(fullSource ? {} : { bits: { lo: d.index, width: len } }),
     });
   };
 
@@ -429,7 +438,7 @@ export function buildDiagram(
       nodes.push({ id: jid, kind: 'join', label: '{ }', ports: [...ports, out], src: [] });
       ordered.forEach((r, k) => connectRun(r, { node: jid, port: ports[k].id }, true));
       edges.push({
-        id: `e${edges.length}`,
+        id: '',
         source: { node: jid, port: out.id },
         target: { node: s.node, port: s.port },
         width: s.bits.length,
@@ -450,7 +459,7 @@ export function buildDiagram(
     }
     for (const { d, count } of extra.values()) {
       edges.push({
-        id: `e${edges.length}`,
+        id: '',
         source: { node: d.node, port: d.port },
         target: { node: s.node, port: s.port },
         width: count,
@@ -460,5 +469,16 @@ export function buildDiagram(
     }
   }
 
-  return { module: moduleName, nodes, edges };
+  return { module: moduleName, nodes, edges: withStableEdgeIds(edges) };
+}
+
+/** Give every edge an ID made of its end ports, so saved wire routes can be matched after a re-import. */
+export function withStableEdgeIds(edges: DEdge[]): DEdge[] {
+  const seen = new Map<string, number>();
+  return edges.map((e) => {
+    const base = `${e.source.port}>${e.target.port}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return { ...e, id: n === 0 ? base : `${base}#${n}` };
+  });
 }

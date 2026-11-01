@@ -37,6 +37,9 @@ export interface LEdge extends DEdge {
 
 export interface LayoutResult {
   module: string;
+  /** Top-left corner of the drawing (0 for ELK output; edited sheets can extend anywhere). */
+  x?: number;
+  y?: number;
   width: number;
   height: number;
   nodes: LNode[];
@@ -67,16 +70,19 @@ export const FONT = {
   op: 14,
 };
 
+/** Port pitch. Ports sit on multiples of GRID from the node's corner, so nodes placed on the grid get straight wires. */
 const ROW = 20;
+export const GRID = 10;
 
-interface Sized {
+export interface Sized {
   width: number;
   height: number;
   /** Port positions relative to the node. */
   ports: Record<string, Point>;
 }
 
-function sizeNode(n: DNode, measure: MeasureText): Sized {
+/** Size of a symbol and where its ports are, relative to its top-left corner. */
+export function sizeNode(n: DNode, measure: MeasureText): Sized {
   const west = n.ports.filter((p) => p.side === 'WEST');
   const east = n.ports.filter((p) => p.side === 'EAST');
   const south = n.ports.filter((p) => p.side === 'SOUTH');
@@ -89,9 +95,15 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
     return { width, height, ports };
   }
 
+  if (n.kind === 'text') {
+    const lines = n.label.split('\n');
+    const width = Math.ceil(Math.max(8, ...lines.map((l) => measure(l, FONT.pin))) + 4);
+    return { width, height: lines.length * 16 + 4, ports };
+  }
+
   if (n.kind === 'const') {
     const width = Math.ceil(measure(n.label, FONT.label) + 6);
-    const height = 16;
+    const height = 20;
     for (const p of n.ports) ports[p.id] = { x: width, y: height / 2 };
     return { width, height, ports };
   }
@@ -105,10 +117,20 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
     return { width, height, ports };
   }
 
+  if (n.kind === 'split') {
+    // The mirror of a join: one bus in on the left, its slices out on the right.
+    const height = Math.max(20, east.length * ROW);
+    const width = 6;
+    east.forEach((p, k) => (ports[p.id] = { x: width, y: ROW / 2 + k * ROW }));
+    west.forEach((p) => (ports[p.id] = { x: 0, y: height / 2 }));
+    return { width, height, ports };
+  }
+
   if (n.kind === 'instance') {
-    const header = 22 + (n.subLabel ? 14 : 0);
+    // Header and padding are multiples of the grid so the ports land on it.
+    const header = 30 + (n.subLabel ? 20 : 0);
     const rows = Math.max(west.length, east.length, 1);
-    const height = header + rows * ROW + 6;
+    const height = header + rows * ROW;
     const wl = Math.max(0, ...west.map((p) => measure(p.name, FONT.port)));
     const el = Math.max(0, ...east.map((p) => measure(p.name, FONT.port)));
     const width = Math.ceil(
@@ -130,7 +152,7 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
   }
 
   // Primitive cell: compact operator box; ports on a 20px pitch centred vertically.
-  const isMux = n.cellType === '$mux' || n.cellType === '$pmux' || n.cellType === '$bmux';
+  const isMux = isMuxType(n.cellType);
   const rows = Math.max(west.length, east.length, isMux ? 2 : 1);
   const height = Math.max(40, rows * ROW + (isMux ? 20 : 0));
   const width = Math.max(isMux ? 30 : 40, Math.ceil(measure(n.label, FONT.op) + 16));
@@ -147,6 +169,10 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
     ports[p.id] = { x, y: height - inset };
   });
   return { width, height, ports };
+}
+
+export function isMuxType(t: string | undefined): boolean {
+  return t === '$mux' || t === '$pmux' || t === '$bmux' || t === 'dc:mux';
 }
 
 export interface ElkLike {
@@ -269,14 +295,15 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
     return { id: elkNode.get(n.id)!, width: s.width, height: s.height, ports, layoutOptions };
   });
 
-  const edges: ElkExtendedEdge[] = d.edges.map((e) => ({
-    id: e.id,
+  const edgeOfElk = new Map<string, DEdge>();
+  const edges: ElkExtendedEdge[] = d.edges.map((e, i) => ({
+    id: `e${i}`,
     sources: [elkPort.get(e.source.port)!],
     targets: [elkPort.get(e.target.port)!],
     labels: e.label
       ? [
           {
-            id: `${e.id}.label`,
+            id: `e${i}.label`,
             text: e.label,
             width: Math.ceil(measure(e.label, FONT.label)) + 4,
             height: 13,
@@ -343,9 +370,9 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
     };
   });
 
-  const edgeById = new Map(d.edges.map((e) => [e.id, e]));
+  d.edges.forEach((e, i) => edgeOfElk.set(`e${i}`, e));
   const lEdges: LEdge[] = ((out.edges ?? []) as (ElkExtendedEdge & { junctionPoints?: Point[] })[]).map((e) => {
-    const base = edgeById.get(e.id)!;
+    const base = edgeOfElk.get(e.id)!;
     const points: Point[] = [];
     for (const sec of e.sections ?? []) {
       points.push(sec.startPoint, ...(sec.bendPoints ?? []), sec.endPoint);
