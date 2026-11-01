@@ -177,9 +177,40 @@ const isKind = (v: unknown): v is NodeKind => NODE_KINDS.includes(v as NodeKind)
 const isSide = (v: unknown): v is Side => SIDES.includes(v as Side);
 
 /**
+ * Bounds for the source ranges of a frozen symbol. The Inspector and the code
+ * panel visit every line of every range, so a hand-edited range such as lines
+ * 1 to 2e7 would freeze the page (or overflow a Set and unmount it), and a
+ * line number too large to count up from (1e300 + 1 is 1e300) would never end
+ * the loop. No line is past MAX_SRC_LINE, so a Set of lines always fits.
+ */
+const MAX_SRC_LINE = 10_000_000;
+/** Lines one symbol may point at in all: far more than any real Verilog cell spans. */
+const MAX_SRC_LINES = 100_000;
+
+/** A symbol's source ranges, made sane: whole numbers from 1, each ending at or after its start, within the bounds above. */
+function srcRanges(v: unknown): SrcRange[] {
+  const out: SrcRange[] = [];
+  let budget = MAX_SRC_LINES;
+  for (const s of Array.isArray(v) ? v : []) {
+    if (!isObj(s) || !isStr(s.file) || !isNum(s.startLine) || !isNum(s.startCol) || !isNum(s.endLine) || !isNum(s.endCol)) continue;
+    const startLine = Math.max(1, Math.floor(s.startLine));
+    // A range past the end of any real file marks nothing.
+    if (startLine > MAX_SRC_LINE) continue;
+    const span = Math.min(Math.max(0, Math.floor(s.endLine) - startLine), MAX_SRC_LINE - startLine, budget - 1);
+    if (span < 0) break;
+    budget -= span + 1;
+    const col = (c: number) => Math.max(1, Math.floor(c));
+    out.push({ file: s.file, startLine, startCol: col(s.startCol), endLine: startLine + span, endCol: col(s.endCol) });
+  }
+  return out;
+}
+
+/**
  * The frozen drawing node of a `raw` symbol, built only from fields of the
  * right type: the canvas, Inspector and code panel read them while rendering,
  * so one bad value in a hand-edited file would otherwise take the whole page down.
+ * Every field the symbol and the Verilog export read must be copied here, or a
+ * saved (or autosaved) drawing loses it.
  */
 function rawNode(id: string, r: unknown): DNode | undefined {
   if (!isObj(r) || !isKind(r.kind) || !isStr(r.label) || !Array.isArray(r.ports)) return undefined;
@@ -188,18 +219,19 @@ function rawNode(id: string, r: unknown): DNode | undefined {
     if (!isObj(q) || !isStr(q.name) || (q.dir !== 'in' && q.dir !== 'out') || !isSide(q.side) || !isNum(q.width)) continue;
     ports.push({ id: `${id}.${q.name}`, name: q.name, dir: q.dir, side: q.side, width: q.width, ...(q.inout === true ? { inout: true } : {}) });
   }
-  const src: SrcRange[] = [];
-  for (const s of Array.isArray(r.src) ? r.src : []) {
-    if (isObj(s) && isStr(s.file) && isNum(s.startLine) && isNum(s.startCol) && isNum(s.endLine) && isNum(s.endCol)) {
-      src.push({ file: s.file, startLine: s.startLine, startCol: s.startCol, endLine: s.endLine, endCol: s.endCol });
-    }
-  }
-  const node: DNode = { id, kind: r.kind, label: r.label, ports, src };
+  const node: DNode = { id, kind: r.kind, label: r.label, ports, src: srcRanges(r.src) };
   for (const k of ['subLabel', 'cellType', 'moduleName', 'instanceName', 'rule'] as const) if (isStr(r[k])) node[k] = r[k];
   if (isObj(r.attrs)) {
     const attrs: NonNullable<DNode['attrs']> = {};
     for (const [k, a] of Object.entries(r.attrs)) if (isStr(a) || isNum(a) || typeof a === 'boolean') attrs[k] = a;
     node.attrs = attrs;
+  }
+  // The cell's Yosys parameters (negedge clock, reset value, signed operands): without them the
+  // export writes the library default instead. Yosys writes them in binary, MSB first.
+  if (isObj(r.params)) {
+    const params: Record<string, string> = {};
+    for (const [k, p] of Object.entries(r.params)) if (isStr(p) && /^[01xz]+$/.test(p)) params[k] = p;
+    if (Object.keys(params).length) node.params = params;
   }
   return node;
 }

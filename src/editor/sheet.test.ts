@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { type Diagram, buildDiagram } from '../core/diagram';
+import { type DNode, type DPort, type Diagram, type Side, buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES } from '../core/rules';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
-import { approxMeasure, layoutDiagram, sizeNode } from '../layout/elk-layout';
+import { type MeasureText, approxMeasure, isMuxType, layoutDiagram, sizeNode } from '../layout/elk-layout';
 import { checkSheet } from './check';
 import { type SheetEdits, emptyEdits, parseSavedFile, type SavedFile } from './doc';
 import {
@@ -62,14 +62,89 @@ describe('symbol library', () => {
   });
 
   it('gives every library symbol a size and grid-aligned ports', () => {
-    for (const def of SYMBOLS) {
-      if (def.key === 'block') continue;
-      const n = symbolNode(newUserNode('u:1', def.key), noModules);
-      const s = sizeNode(n, approxMeasure);
-      expect(s.width).toBeGreaterThan(0);
-      for (const p of n.ports) {
-        // Ports on the left/right edge sit on the 10 px grid vertically, so straight wires are possible.
-        if (p.side === 'WEST' || p.side === 'EAST') expect(s.ports[p.id].y % 10, `${def.key}.${p.name}`).toBe(0);
+    // Text widths as a browser measures them: fractional, and not what approxMeasure says.
+    const fractional: MeasureText = (text, size, bold) => [...text].length * size * 0.5731 * (bold ? 1.07 : 1) + 0.29;
+    const iface: InterfaceOf = (m) =>
+      m === 'core'
+        ? {
+            label: 'core_with_a_long_name',
+            ports: [
+              { name: 'clk', dir: 'input', width: 1 },
+              { name: 'data_in', dir: 'input', width: 8 },
+              { name: 'q', dir: 'output', width: 8 },
+            ],
+          }
+        : undefined;
+    const variants: SymParams[] = [
+      {},
+      { width: 1 },
+      { width: 3 },
+      { width: 13 },
+      { width: 256 },
+      { inputs: 3, width: 7 },
+      { inputs: 8 },
+      { parts: 3, width: 5 },
+      { parts: 16, width: 1 },
+      { shift: 16 },
+      { value: "8'hFF" },
+      { value: "32'd1234567" },
+      { module: 'core' },
+    ];
+    const names = [undefined, 'a', 'clk_enable', 'Wide_Bus_Name[7:0]', 'u7'];
+    let checked = 0;
+    for (const measure of [approxMeasure, fractional]) {
+      for (const def of SYMBOLS) {
+        for (const params of variants) {
+          for (const name of names) {
+            const u = newUserNode('u:1', def.key, name === undefined ? {} : { name });
+            const n = symbolNode({ ...u, params: { ...u.params, ...params } }, iface);
+            const s = sizeNode(n, measure);
+            const what = `${def.key} ${JSON.stringify(params)} ${name ?? ''}`;
+            expect(s.width, what).toBeGreaterThan(0);
+            if (n.kind === 'text') continue;
+            // A symbol placed on the 10 px grid has every pin on it, so wires between pins run on the grid.
+            expect(s.width % 10, `${what} width`).toBe(0);
+            expect(s.height % 10, `${what} height`).toBe(0);
+            for (const p of n.ports) {
+              const at = s.ports[p.id];
+              expect(at.x % 10, `${what}: ${p.name}.x`).toBe(0);
+              // A MUX's select pin sits on its sloped bottom edge, between two grid lines.
+              if (p.side === 'SOUTH' && n.cellType && isMuxType(n.cellType)) expect(at.y > s.height - 10 && at.y <= s.height, `${what}: ${p.name}.y`).toBe(true);
+              else expect(at.y % 10, `${what}: ${p.name}.y`).toBe(0);
+              checked++;
+            }
+            // Bottom pins (CLK, EN, ARST, S) are apart, inside the edge, and centred on it.
+            const south = n.ports.filter((p) => p.side === 'SOUTH').map((p) => s.ports[p.id].x);
+            for (const [k, x] of south.entries()) {
+              expect(x > 0 && x < s.width, `${what}: bottom pin inside`).toBe(true);
+              if (k) expect(x - south[k - 1], `${what}: bottom pins apart`).toBeGreaterThanOrEqual(20);
+            }
+            if (south.length) expect(south[0] + south[south.length - 1], `${what}: bottom pins centred`).toBe(s.width);
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(1000);
+  });
+
+  it('puts the bottom and top pins of imported cells and instances on the grid', () => {
+    const fractional: MeasureText = (text, size) => text.length * size * 0.6173 + 0.41;
+    const port = (name: string, dir: 'in' | 'out', side: Side): DPort => ({ id: `n.${name}`, name, dir, side, width: 1 });
+    const nodes: DNode[] = [
+      // A register with an enable and an asynchronous reset has three pins at the bottom.
+      { id: 'n', kind: 'cell', label: 'DFF', cellType: '$adffe', src: [], ports: [port('D', 'in', 'WEST'), port('CLK', 'in', 'SOUTH'), port('EN', 'in', 'SOUTH'), port('ARST', 'in', 'SOUTH'), port('Q', 'out', 'EAST')] },
+      { id: 'n', kind: 'cell', label: 'MUX', cellType: '$pmux', src: [], ports: [port('A', 'in', 'WEST'), port('B', 'in', 'WEST'), port('C', 'in', 'WEST'), port('S', 'in', 'SOUTH'), port('Y', 'out', 'EAST')] },
+      { id: 'n', kind: 'instance', label: 'odd', src: [], ports: [port('a', 'in', 'WEST'), port('t1', 'in', 'NORTH'), port('t2', 'in', 'NORTH'), port('b1', 'in', 'SOUTH'), port('y', 'out', 'EAST')] },
+    ];
+    for (const n of nodes) {
+      for (const measure of [approxMeasure, fractional]) {
+        const s = sizeNode(n, measure);
+        for (const p of n.ports) {
+          expect(s.ports[p.id].x % 10, `${n.cellType ?? n.kind}.${p.name}.x`).toBe(0);
+          if (n.cellType !== '$pmux' || p.side !== 'SOUTH') expect(s.ports[p.id].y % 10, `${n.cellType ?? n.kind}.${p.name}.y`).toBe(0);
+        }
+        const xs = n.ports.filter((p) => p.side === 'SOUTH' || p.side === 'NORTH').map((p) => s.ports[p.id].x);
+        for (const x of xs) expect(x > 0 && x < s.width).toBe(true);
       }
     }
   });
@@ -290,6 +365,37 @@ describe('wires joined to a sliced wire', () => {
     expect(s.d.edges.find((x) => x.id === w)).toMatchObject({ source: edge.source, width: 2, bits: { lo: 2, width: 2 } });
     expect(diagramToVerilog(s.d, 't').code).toContain('assign y2 = a[3:2];');
   });
+
+  it('keep the zero bits of a scaled (×4) wire they tap or join', async () => {
+    const src = "module t(input [3:0] a, input [1:0] b, output [3:0] y);\n  assign y = a + {b, 2'b00};\nendmodule\n";
+    const base = buildDiagram(await design({ 't.v': src }), 't', DEFAULT_RULES);
+    const scaled = base.edges.find((x) => x.shift)!;
+    expect(scaled).toMatchObject({ width: 2, shift: 2, label: '×4' });
+    const s = new Drawing(noModules, base);
+    const tap = s.add('output', 'tap', { width: 4 });
+    const joined = s.add('output', 'joined', { width: 4 });
+    // Tapping the wire, and joining the adder input it feeds.
+    const w1 = s.wire(onWire(scaled.id), `${tap}.in`);
+    const w2 = s.wire(`${joined}.in`, scaled.target.port);
+    for (const id of [w1, w2]) expect(s.d.edges.find((x) => x.id === id), id).toMatchObject({ source: scaled.source, width: 2, shift: 2 });
+    expect(checkSheet(s.d).messages).toEqual([]);
+    const v = diagramToVerilog(s.d, 't');
+    expect(v.code).toContain("assign tap = {b, 2'd0};");
+    expect(v.code).toContain("assign joined = {b, 2'd0};");
+    // The scaled bits again are a duplicate; the plain bus is a different wire.
+    expect(resolveConnection(s.d, onWire(scaled.id), at(`${tap}.in`))).toEqual({ error: 'These pins are already connected.' });
+    expect(resolveConnection(s.d, at(scaled.source.port), at(`${tap}.in`))).not.toHaveProperty('error');
+
+    // A wire copied into a drawing keeps its zero bits in `shift`, and a hand-drawn `×4` label says the same.
+    const d = new Drawing();
+    const b = d.add('input', 'b', { width: 2 });
+    const add = d.add('add', undefined, { width: 4 });
+    const y = d.add('output', 'y', { width: 4 });
+    const w = d.wire(`${b}.out`, `${add}.B`);
+    d.e = { ...d.e, edges: d.e.edges.map((x) => (x.id === w ? { ...x, label: '×4' } : x)) };
+    d.wire(onWire(w), `${y}.in`);
+    expect(diagramToVerilog(d.d, 'm').code).toContain("assign y = {b, 2'd0};");
+  });
 });
 
 describe('inout ports of blocks', () => {
@@ -353,6 +459,29 @@ endmodule
     const base = buildDiagram(await design({ 't.v': v }, 'top'), 'top');
     expect(base.nodes.flatMap((n) => n.ports).filter((p) => p.inout)).toHaveLength(2);
     expect(checkSheet(base).messages).toEqual([]);
+  });
+});
+
+describe('sheet checks', () => {
+  it('say why a wire is flagged: a width mismatch, or another driver of its input', () => {
+    const s = new Drawing();
+    const [i1, i2] = ['in1', 'in2'].map((n) => s.add('input', n));
+    const wide = s.add('input', 'wide', { width: 4 });
+    const g = s.add('and');
+    s.wire(`${i1}.out`, `${g}.A`);
+    const w2 = s.wire(`${i2}.out`, `${g}.B`);
+    const w3 = s.wire(`${i1}.out`, `${g}.B`);
+    let issues = checkSheet(s.d);
+    expect([...issues.flagged].sort()).toEqual([w2, w3].sort());
+    for (const id of [w2, w3]) expect(issues.reasons?.get(id)).toBe('its input has another driver');
+    expect(issues.messages).toEqual(['1 input driven by more than one wire.']);
+    // A third wire, 4 bits wide, into the same 1-bit input is both.
+    const w4 = s.wire(`${wide}.out`, `${g}.B`);
+    issues = checkSheet(s.d);
+    expect(issues.reasons?.get(w4)).toBe('does not match the input it feeds, and its input has another driver');
+    expect(issues.reasons?.get(w2)).toBe('its input has another driver');
+    s.e = deleteItems(s.e, s.d, [w2, w3]);
+    expect(checkSheet(s.d).reasons?.get(w4)).toBe('does not match the input it feeds');
   });
 });
 
@@ -423,6 +552,41 @@ describe('changing parameters', () => {
     s.wire(`${c}.out`, `${g}.C`);
     s.e = setParams(s.e, g, { inputs: 2 });
     expect(into(s.d, g)).toEqual([`${a}>A`, `${b}>B`]);
+  });
+
+  it('never brings back a hidden wire onto an input that another wire drives', () => {
+    const s = new Drawing();
+    const [a, b, c] = ['a', 'b', 'c'].map((n) => s.add('input', n, { width: 4 }));
+    const d = s.add('input', 'd', { width: 8 });
+    const cat = s.add('concat', undefined, { parts: 3, width: 4 });
+    s.wire(`${a}.out`, `${cat}.[11:8]`);
+    s.wire(`${b}.out`, `${cat}.[7:4]`);
+    s.wire(`${c}.out`, `${cat}.[3:0]`);
+    // a's wire is hidden, still stored on [11:8]; then the parts are 8 bits and a new top part is wired.
+    s.e = setParams(s.e, cat, { parts: 2 });
+    s.e = setParams(s.e, cat, { width: 8 });
+    s.e = setParams(s.e, cat, { parts: 3 });
+    s.wire(`${d}.out`, `${cat}.[23:16]`);
+    // Back to 4 bits: d's wire moves to [11:8], where a's hidden wire was. Only d's is kept.
+    s.e = setParams(s.e, cat, { width: 4 });
+    expect(into(s.d, cat)).toEqual([`${b}>[7:4]`, `${c}>[3:0]`, `${d}>[11:8]`]);
+    expect(s.e.edges.some((x) => x.source.node === a)).toBe(false);
+    expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
+
+    // The same for a split's output: a hidden wire stays away from an input wired meanwhile.
+    const t = new Drawing();
+    const bus = t.add('input', 'bus', { width: 12 });
+    const x = t.add('input', 'x', { width: 4 });
+    const sp = t.add('split', undefined, { parts: 3, width: 4 });
+    const [y2, y1] = ['y2', 'y1'].map((n) => t.add('output', n, { width: 4 }));
+    t.wire(`${bus}.out`, `${sp}.in`);
+    t.wire(`${sp}.[11:8]`, `${y2}.in`);
+    t.wire(`${sp}.[7:4]`, `${y1}.in`);
+    t.e = setParams(t.e, sp, { parts: 2 });
+    t.wire(`${x}.out`, `${y2}.in`);
+    t.e = setParams(t.e, sp, { parts: 3 });
+    expect(t.d.edges.filter((w) => w.target.node === y2).map((w) => w.source.node)).toEqual([x]);
+    expect(checkSheet(t.d).messages.join(' ')).not.toContain('more than one wire');
   });
 });
 

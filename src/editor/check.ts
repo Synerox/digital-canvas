@@ -3,12 +3,17 @@
  * wires whose width does not match the input they feed, inputs fed by two
  * wires, and pins left unconnected.
  */
-import type { Diagram } from '../core/diagram';
+import type { DEdge, Diagram } from '../core/diagram';
 import { ARITHMETIC } from '../core/rules';
 
 export interface SheetIssues {
   /** Wires drawn in the warning colour. */
   flagged: Set<string>;
+  /**
+   * Why each flagged wire is flagged, as the wire panel words it: a width mismatch and a
+   * second driver on its input are told apart (a wire can have both).
+   */
+  reasons?: Map<string, string>;
   messages: string[];
   /** Input ports with no wire (drawn with an open circle while editing). */
   openPorts?: Set<string>;
@@ -24,8 +29,23 @@ function scaleBits(label: string | undefined): number {
   return Number.isInteger(k) && k > 0 && k < 31 ? k : 0;
 }
 
+/**
+ * Low zero bits a wire appends to what it carries, read as the export reads them: its `shift`
+ * when it has one (a rename of the `×4` label does not change it), otherwise its label.
+ */
+export function wireShift(e: Pick<DEdge, 'shift' | 'label'>): number {
+  if (e.shift !== undefined) return Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
+  return scaleBits(e.label);
+}
+
 export function checkSheet(d: Diagram): SheetIssues {
   const flagged = new Set<string>();
+  const reasons = new Map<string, string>();
+  const flag = (id: string, reason: string) => {
+    flagged.add(id);
+    const had = reasons.get(id);
+    reasons.set(id, had ? `${had}, and ${reason}` : reason);
+  };
   const messages: string[] = [];
   const port = new Map<string, { width: number; node: string; name: string; label: string; cellType?: string; inout: boolean }>();
   for (const n of d.nodes) {
@@ -42,12 +62,12 @@ export function checkSheet(d: Diagram): SheetIssues {
     if (!e.id.startsWith('w:')) continue;
     const t = port.get(e.target.port);
     if (!t) continue;
-    const width = e.width + (e.shift !== undefined ? e.shift : scaleBits(e.label));
+    const width = e.width + wireShift(e);
     // Arithmetic and compare operands are zero-extended (how Verilog widens them, and how
     // the import's "Hide zero extension" rule draws them), so a narrower wire is fine there.
     const extended = width < t.width && t.cellType !== undefined && ARITHMETIC.has(t.cellType);
     if (t.width !== width && !extended) {
-      flagged.add(e.id);
+      flag(e.id, 'does not match the input it feeds');
       if (mismatches++ < 3) messages.push(`A ${width}-bit wire feeds the ${t.width}-bit input ${t.name} of ${t.label || 'a symbol'}.`);
     }
   }
@@ -59,7 +79,7 @@ export function checkSheet(d: Diagram): SheetIssues {
     const drivers = ids.filter((id) => !port.get(sourceOf.get(id)!)?.inout);
     if (drivers.length < 2 || !drivers.some((id) => id.startsWith('w:'))) continue;
     doubles++;
-    for (const id of drivers) if (id.startsWith('w:')) flagged.add(id);
+    for (const id of drivers) if (id.startsWith('w:')) flag(id, 'its input has another driver');
   }
   if (doubles) messages.push(`${plural(doubles, 'input')} driven by more than one wire.`);
 
@@ -73,5 +93,5 @@ export function checkSheet(d: Diagram): SheetIssues {
   const missing = d.nodes.filter((n) => n.attrs?.missingModule);
   for (const n of missing.slice(0, 3)) messages.push(`Block ${n.subLabel ?? n.id} uses ${n.moduleName}, which no longer exists.`);
   if (missing.length > 3) messages.push(`${missing.length - 3} more blocks of missing modules.`);
-  return { flagged, messages, openPorts };
+  return { flagged, reasons, messages, openPorts };
 }

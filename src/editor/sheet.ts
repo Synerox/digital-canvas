@@ -7,6 +7,7 @@
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
 import type { LayoutResult, Point } from '../layout/elk-layout';
+import { wireShift } from './check';
 import { type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { type InterfaceOf, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
 
@@ -102,6 +103,8 @@ export interface Connection {
   reversed: boolean;
   /** The bits of the source the new wire carries, when not all of them (it joins a wire that carries a slice). */
   slice?: Slice;
+  /** Low zero bits the new wire appends, like the `×4` wire it joins. */
+  shift?: number;
 }
 
 const sameSlice = (a: Slice | undefined, b: Slice | undefined) => a?.lo === b?.lo && a?.width === b?.width;
@@ -109,18 +112,21 @@ const sameSlice = (a: Slice | undefined, b: Slice | undefined) => a?.lo === b?.l
 /**
  * Decide which end drives: an output port or a wire's net drives an input
  * port. A wire joined to an existing wire (or to an input that wire feeds)
- * carries the same bits as that wire, so a slice stays a slice.
+ * carries the same bits as that wire, so a slice stays a slice and a scaled
+ * (`×4`) wire stays scaled.
  */
 export function resolveConnection(d: Diagram, a: WireEnd, b: WireEnd): Connection | { error: string } {
   const portOf = new Map<string, { node: DNode; port: DPort }>();
   for (const n of d.nodes) for (const p of n.ports) portOf.set(p.id, { node: n, port: p });
   const edgeOf = new Map(d.edges.map((x) => [x.id, x]));
-  type Driver = { source: { node: string; port: string }; slice?: Slice };
+  type Driver = { source: { node: string; port: string }; slice?: Slice; shift?: number };
+  /** What an existing wire carries: its driver, and which of its bits, scaled as the wire is. */
+  const carried = (x: DEdge): Driver => ({ source: x.source, slice: x.bits, shift: wireShift(x) || undefined });
   /** Driver of an end, if it is a driving end. */
   const driver = (end: WireEnd): Driver | undefined => {
     if (end.kind === 'wire') {
       const x = edgeOf.get(end.edge);
-      return x && { source: x.source, slice: x.bits };
+      return x && carried(x);
     }
     const p = portOf.get(end.port);
     return p && p.port.dir === 'out' ? { source: { node: end.node, port: end.port } } : undefined;
@@ -137,6 +143,7 @@ export function resolveConnection(d: Diagram, a: WireEnd, b: WireEnd): Connectio
     target,
     reversed,
     ...(dr.slice ? { slice: dr.slice } : {}),
+    ...(dr.shift ? { shift: dr.shift } : {}),
   });
   if (a.kind === 'port' && b.kind === 'port' && a.node === b.node && a.port === b.port) return { error: 'Pick a different pin.' };
   const da = driver(a);
@@ -150,7 +157,7 @@ export function resolveConnection(d: Diagram, a: WireEnd, b: WireEnd): Connectio
     // Two inputs: join the undriven one to the other's driver, with the bits that wire carries.
     const into = (s: { port: string }): Driver | undefined => {
       const x = d.edges.find((y) => y.target.port === s.port);
-      return x && { source: x.source, slice: x.bits };
+      return x && carried(x);
     };
     const fa = into(sa);
     const fb = into(sb);
@@ -169,9 +176,10 @@ export function resolveConnection(d: Diagram, a: WireEnd, b: WireEnd): Connectio
     return { error: 'Connect an output to an input.' };
   }
   if (c.source.node === c.target.node && c.source.port === c.target.port) return { error: 'Pick a different pin.' };
-  if (d.edges.some((x) => x.source.port === c!.source.port && x.target.port === c!.target.port && sameSlice(x.bits, c!.slice))) {
-    return { error: 'These pins are already connected.' };
-  }
+  // The same bits, scaled the same way, between the same pins.
+  const same = (x: DEdge) =>
+    x.source.port === c!.source.port && x.target.port === c!.target.port && sameSlice(x.bits, c!.slice) && wireShift(x) === (c!.shift ?? 0);
+  if (d.edges.some(same)) return { error: 'These pins are already connected.' };
   return c;
 }
 
@@ -248,6 +256,7 @@ export function connect(e: SheetEdits, c: Connection, route?: Point[], label?: s
     target: c.target,
     ...(label ? { label } : {}),
     ...(c.slice ? { slice: { ...c.slice } } : {}),
+    ...(c.shift ? { shift: c.shift } : {}),
   };
   const routes = route && route.length >= 2 ? { ...e1.routes, [id]: { points: route, manual: true } } : e1.routes;
   return [id, { ...e1, edges: [...e1.edges, edge], routes }];
@@ -302,7 +311,9 @@ function portSuccessors(before: DNode, after: DNode): Map<string, string> {
  * Change a symbol's parameters. Port names can depend on them (a 2-input MUX
  * has A and B, a wider one I0..In; concatenation and split ports are named by
  * their bit ranges), so the wires on a port that goes away move to the port
- * that takes its place instead of being dropped.
+ * that takes its place instead of being dropped. A wire whose port went away
+ * with no successor is kept (hidden), and comes back with its port, unless the
+ * input it feeds is driven by another wire by then.
  */
 export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEdits {
   const old = e.nodes.find((n) => n.id === id);
@@ -312,15 +323,30 @@ export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEd
   // Blocks are left alone: their ports come from the module, not from parameters
   // (and the ports of another module are not the same signals by position).
   const noModules: InterfaceOf = () => undefined;
-  const moved = portSuccessors(symbolNode(old, noModules), symbolNode(u, noModules));
-  if (moved.size === 0) return { ...e, nodes };
+  const before = symbolNode(old, noModules);
+  const after = symbolNode(u, noModules);
+  const moved = portSuccessors(before, after);
+  // Ports that are back: the wires stored on them were hidden by an earlier change.
+  const beforeIds = new Set(before.ports.map((p) => p.id));
+  const back = new Set(after.ports.filter((p) => !beforeIds.has(p.id)).map((p) => p.id));
+  const returns = (x: UserEdge) => (x.source.node === id && back.has(x.source.port)) || (x.target.node === id && back.has(x.target.port));
+  const stale = e.edges.map(returns);
+  if (moved.size === 0 && !stale.includes(true)) return { ...e, nodes };
   const remap = (end: { node: string; port: string }) => (end.node === id && moved.has(end.port) ? { node: id, port: moved.get(end.port)! } : end);
-  const edges = e.edges.map((x) => {
+  const remapped = e.edges.map((x, i) => {
+    if (stale[i]) return x;
     const source = remap(x.source);
     const target = remap(x.target);
     return source === x.source && target === x.target ? x : { ...x, source, target };
   });
-  return { ...e, nodes, edges };
+  // A returning wire would be a second driver of an input that a wire moved onto (a slice
+  // port that is back under its old name) or that was wired while it was hidden: drop it.
+  const driven = new Set(remapped.filter((_, i) => !stale[i]).map((x) => x.target.port));
+  const edges = remapped.filter((x, i) => !stale[i] || !driven.has(x.target.port));
+  if (edges.length === remapped.length) return { ...e, nodes, edges };
+  const routes = { ...e.routes };
+  for (const x of remapped) if (!edges.includes(x)) delete routes[x.id];
+  return { ...e, nodes, edges, routes };
 }
 
 export function setSlice(e: SheetEdits, id: string, slice: { lo: number; width: number } | undefined): SheetEdits {
