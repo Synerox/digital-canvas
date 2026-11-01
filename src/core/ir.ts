@@ -260,6 +260,13 @@ export function buildHierarchy(design: IRDesign, moduleName = design.top, instan
   return { instance, module: moduleName, children };
 }
 
+/** Bits driven from outside the module: its input and inout port bits. */
+export function inputPortBits(m: IRModule): Set<number> {
+  const out = new Set<number>();
+  for (const p of m.ports) if (p.direction !== 'output') for (const b of p.bits) if (typeof b === 'number') out.add(b);
+  return out;
+}
+
 /** Width of a port or net in bits. */
 export function widthOf(x: { bits: Bit[] }): number {
   return x.bits.length;

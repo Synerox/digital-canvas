@@ -24,7 +24,7 @@
  * highlighting keep working; the block's own ID comes from its name.
  */
 import type { Bit, IRCell, IRDesign, IRModule, IRNet, IRPort, SrcRange } from './ir';
-import { sliceLabel } from './ir';
+import { inputPortBits, sliceLabel } from './ir';
 
 export interface PartitionOptions {
   /** Modules with fewer primitive cells are left as they are. */
@@ -54,8 +54,10 @@ const BLOCK_CLOSE = /\b(end|endcase|join|join_any|join_none|endfunction|endtask|
  * Paragraph number for every line (index 0 = line 1). A blank line starts a
  * new paragraph, except inside begin…end and similar blocks. always/initial
  * blocks are paragraphs of their own (an `else` on the next line still
- * belongs to them). Only the first branch of `ifdef/`else is counted, so
- * alternative headers such as two `always … begin` lines do not unbalance it.
+ * belongs to them). Each branch of `ifdef/`else starts from the state before
+ * the `ifdef, and the state after `endif is the first branch's, so alternative
+ * headers such as two `always … begin` lines do not unbalance the count.
+ * Which branch is active is unknown here, so every branch gets paragraphs.
  */
 export function paragraphs(text: string): number[] {
   const lines = text.split('\n');
@@ -68,9 +70,13 @@ export function paragraphs(text: string): number[] {
   let inProc = false;
   /** A procedural block just ended: the next code line starts a paragraph, unless it is its `else`. */
   let afterProc = false;
-  /** Preprocessor branches: true while the current branch is counted. */
-  const branches: boolean[] = [];
-  const counted = () => branches.every(Boolean);
+  /** Open preprocessor conditionals: the state at the `ifdef, and at the end of the first branch. */
+  interface Cond {
+    start: { depth: number; inProc: boolean; afterProc: boolean; para: number };
+    first?: { depth: number; inProc: boolean; afterProc: boolean };
+    maxPara: number;
+  }
+  const conds: Cond[] = [];
   for (const raw of lines) {
     // Strip comments (block comments may span lines) and strings (with \" escapes).
     let code = '';
@@ -100,15 +106,21 @@ export function paragraphs(text: string): number[] {
     const trimmed = code.trim();
     const directive = /^`(ifdef|ifndef|elsif|else|endif)\b/.exec(trimmed);
     if (directive) {
+      out.push(para);
       const d = directive[1];
-      if (d === 'ifdef' || d === 'ifndef') branches.push(true);
-      else if (d === 'endif') branches.pop();
-      else if (branches.length) branches[branches.length - 1] = false;
-      out.push(para);
-      continue;
-    }
-    if (!counted()) {
-      out.push(para);
+      const top = conds[conds.length - 1];
+      if (d === 'ifdef' || d === 'ifndef') {
+        conds.push({ start: { depth, inProc, afterProc, para }, maxPara: para });
+      } else if (top && d === 'endif') {
+        conds.pop();
+        if (top.first) ({ depth, inProc, afterProc } = top.first);
+        // Lines after the conditional must not share a paragraph number with a longer branch.
+        para = Math.max(top.maxPara, para);
+      } else if (top) {
+        top.first ??= { depth, inProc, afterProc };
+        top.maxPara = Math.max(top.maxPara, para);
+        ({ depth, inProc, afterProc, para } = top.start);
+      }
       continue;
     }
     if (/^(module|macromodule|endmodule)\b/.test(trimmed)) {
@@ -197,6 +209,116 @@ function stemName(names: string[]): string {
     if (keep.length) return keep.join('_');
   }
   return names[0];
+}
+
+/** Strongly connected components of `nodes` (edges from `next`), as a component index per node. */
+function components(nodes: number[], next: (x: number) => readonly number[]): Map<number, number> {
+  const comp = new Map<number, number>();
+  const index = new Map<number, number>();
+  const low = new Map<number, number>();
+  const stack: number[] = [];
+  const onStack = new Set<number>();
+  let counter = 0;
+  let n = 0;
+  const open = (x: number) => {
+    index.set(x, counter);
+    low.set(x, counter++);
+    stack.push(x);
+    onStack.add(x);
+  };
+  for (const root of nodes) {
+    if (index.has(root)) continue;
+    open(root);
+    const work: [number, number][] = [[root, 0]];
+    while (work.length) {
+      const top = work[work.length - 1];
+      const x = top[0];
+      const out = next(x);
+      if (top[1] < out.length) {
+        const y = out[top[1]++];
+        if (!index.has(y)) {
+          open(y);
+          work.push([y, 0]);
+        } else if (onStack.has(y)) {
+          low.set(x, Math.min(low.get(x)!, index.get(y)!));
+        }
+        continue;
+      }
+      work.pop();
+      if (work.length) {
+        const p = work[work.length - 1][0];
+        low.set(p, Math.min(low.get(p)!, low.get(x)!));
+      }
+      if (low.get(x) === index.get(x)) {
+        let y: number;
+        do {
+          y = stack.pop()!;
+          onStack.delete(y);
+          comp.set(y, n);
+        } while (y !== x);
+        n++;
+      }
+    }
+  }
+  return comp;
+}
+
+/**
+ * Size of the upstream cone (inside `units`) of each candidate that is not
+ * itself upstream of another candidate. A candidate upstream of another has a
+ * strictly smaller cone, so it can never be the largest and is left out; this
+ * keeps a long chain of exported stages linear instead of quadratic.
+ */
+function coneSizes(
+  units: number[],
+  candidates: number[],
+  producersOf: Map<number, number[]>,
+  size: (u: number) => number,
+): Map<number, number> {
+  const prod = (x: number) => producersOf.get(x) ?? [];
+  const comp = components(units, prod);
+  const candidateComps = new Set(candidates.map((u) => comp.get(u)));
+  // Everything strictly upstream of a candidate's component.
+  const upstream = new Set<number>();
+  const stack: number[] = [];
+  for (const x of units) {
+    if (!candidateComps.has(comp.get(x))) continue;
+    for (const y of prod(x)) {
+      if (comp.get(y) === comp.get(x) || upstream.has(y)) continue;
+      upstream.add(y);
+      stack.push(y);
+    }
+  }
+  while (stack.length) {
+    for (const y of prod(stack.pop()!)) {
+      if (upstream.has(y)) continue;
+      upstream.add(y);
+      stack.push(y);
+    }
+  }
+  const byComp = new Map<number, number>();
+  const sizes = new Map<number, number>();
+  for (const u of candidates) {
+    if (upstream.has(u)) continue;
+    let n = byComp.get(comp.get(u)!);
+    if (n === undefined) {
+      const seen = new Set<number>([u]);
+      const todo = [u];
+      n = 0;
+      while (todo.length) {
+        const x = todo.pop()!;
+        n += size(x);
+        for (const y of prod(x)) {
+          if (seen.has(y)) continue;
+          seen.add(y);
+          todo.push(y);
+        }
+      }
+      byComp.set(comp.get(u)!, n);
+    }
+    sizes.set(u, n);
+  }
+  return sizes;
 }
 
 // ---------------------------------------------------------------------------
@@ -548,8 +670,7 @@ export function partitionModule(
   // 6. Too many blocks: merge the smallest ones into their closest neighbour. Groups that
   //    exchange no signals (independent output cones) go with the group that reads the
   //    most of the same module inputs, or else the one written nearest.
-  const inputBitSet = new Set<number>();
-  for (const p of m.ports) if (p.direction !== 'output') for (const b of p.bits) if (typeof b === 'number') inputBitSet.add(b);
+  const inputBitSet = inputPortBits(m);
   const unitInputs: Set<number>[] = Array.from({ length: nUnits }, () => new Set());
   prims.forEach((c, i) => {
     for (const b of inputBits(c)) if (inputBitSet.has(b)) unitInputs[unitOfCell[i]].add(b);
@@ -626,7 +747,8 @@ export function partitionModule(
 
   // Names.
   const used = new Set<string>(m.cells.filter((c) => c.isInstance).map((c) => c.name));
-  const PRAGMA = /^(verilator|synopsys|synthesis|pragma|spyglass|lint_|translate_|cadence|xilinx|altera|coverage)\b/i;
+  const PRAGMA =
+    /^(?:verilator|synopsys|synthesis|pragma|spyglass|cadence|ambit)\b|^coverage\s+(?:on|off)\b|\b(?:lint_off|lint_on|translate_off|translate_on|full_case|parallel_case)\b/;
   /** A `//` comment written just above `line` (banners and pragmas skipped), with the line it is on. */
   const commentAbove = (line: number): { text: string; at: number } | undefined => {
     if (!Number.isFinite(line)) return undefined;
@@ -665,22 +787,10 @@ export function partitionModule(
         else producersIn.set(v, [y]);
       }
     }
-    const upstream = (u: number): number => {
-      const seen = new Set<number>([u]);
-      const stack = [u];
-      let n = 0;
-      while (stack.length) {
-        const x = stack.pop()!;
-        n += unitCells[x].length;
-        for (const y of producersIn.get(x) ?? []) {
-          if (seen.has(y)) continue;
-          seen.add(y);
-          stack.push(y);
-        }
-      }
-      return n;
-    };
-    const ranked = pickFrom.map((u) => ({ u, w: upstream(u) })).sort((x, y) => y.w - x.w || unitLine[x.u] - unitLine[y.u]);
+    const cone = coneSizes(g.units, pickFrom, producersIn, (u) => unitCells[u].length);
+    const ranked = pickFrom
+      .map((u) => ({ u, w: cone.get(u) ?? -1 }))
+      .sort((x, y) => y.w - x.w || unitLine[x.u] - unitLine[y.u]);
     const main = ranked[0]?.u;
     const candidates: string[] = [];
     // A comment names a block only when no other block starts under it.
@@ -875,11 +985,7 @@ export function buildAutoModules(
 
   // Bits the parent sees driven by something other than an auto block:
   // module inputs and the outputs of cells left in the parent (real instances).
-  const outsideDriven = new Set<number>();
-  for (const p of m.ports) {
-    if (p.direction === 'output') continue;
-    for (const b of p.bits) if (typeof b === 'number') outsideDriven.add(b);
-  }
+  const outsideDriven = inputPortBits(m);
   for (const c of m.cells) {
     if (blockOf.has(c.id)) continue;
     for (const [p, bits] of Object.entries(c.connections)) {

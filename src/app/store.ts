@@ -28,7 +28,8 @@ export const EXAMPLES: Record<ExampleName, { label: string; files: Record<string
   fruit: { label: 'Fruit Battle (single module)', files: { [FRUIT_FILE]: FRUIT_SOURCE } },
 };
 
-export type Status = 'idle' | 'loading' | 'elaborating' | 'layout' | 'ready' | 'error';
+/** too-large: the full circuit was held back by the size guard (see `bigFlat`). */
+export type Status = 'idle' | 'loading' | 'elaborating' | 'layout' | 'ready' | 'too-large' | 'error';
 
 /** Above this many cells the full circuit is only drawn after the user asks again. */
 export const FLAT_CELL_LIMIT = 250;
@@ -59,7 +60,7 @@ interface State {
   theme: ThemeName;
   rules: ReadonlySet<RuleId>;
   elapsedMs?: number;
-  /** Set when the full circuit of a module is too large to draw without asking first. */
+  /** The full circuit held back while status is 'too-large'. */
   bigFlat?: { module: string; cells: number };
 
   setFiles(files: Record<string, string>, replace: boolean): Promise<void>;
@@ -87,6 +88,9 @@ const flatAllowed = new Set<string>();
 /** Incremented by every rebuild/navigation, so a slow older call cannot overwrite a newer result. */
 let rebuildGen = 0;
 let navSeq = 0;
+
+/** Resolve after pending events (clicks, rendering) have been handled. */
+const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 /** True when a Yosys src file name refers to the uploaded file (Yosys may add directories). */
 export function sameFile(srcFile: string, file: string): boolean {
@@ -162,6 +166,7 @@ export const useStore = create<State>((set, get) => ({
     set({ moduleNames, topOverride });
     if (Object.keys(files).length === 0) {
       navSeq++;
+      cancelLayouts();
       set({
         design: undefined,
         blockDesign: undefined,
@@ -228,13 +233,24 @@ export const useStore = create<State>((set, get) => ({
     if (!layout && viewMode === 'flat' && !flatAllowed.has(module)) {
       const cells = flatCellCount(view, module);
       if (cells > FLAT_CELL_LIMIT) {
-        set({ layout: undefined, status: get().error ? 'error' : 'ready', bigFlat: { module, cells } });
+        set({ layout: undefined, status: 'too-large', bigFlat: { module, cells } });
         return;
       }
     }
+    const stale = () => seq !== navSeq || get().design !== design || get().rules !== rules || get().viewMode !== viewMode;
     if (!layout) {
+      // A full circuit can take a while to build: let the page draw the status first,
+      // and skip the work if the user has already moved on.
+      if (viewMode === 'flat') {
+        await nextTask();
+        if (stale()) return;
+      }
       const source = viewMode === 'flat' ? withFlattened(view, module) : view;
       const diagram = buildDiagram(source, module, rules);
+      if (viewMode === 'flat') {
+        await nextTask();
+        if (stale()) return;
+      }
       try {
         layout = await layoutDiagram(diagram, canvasMeasure(THEMES[theme].font));
       } catch (e) {
@@ -242,7 +258,7 @@ export const useStore = create<State>((set, get) => ({
         throw e;
       }
       // A newer navigation or rebuild happened while ELK was running.
-      if (seq !== navSeq || get().design !== design || get().rules !== rules || get().viewMode !== viewMode) return;
+      if (stale()) return;
       layoutCache.set(key, layout);
     }
     const m = view.modules[module];
@@ -252,7 +268,7 @@ export const useStore = create<State>((set, get) => ({
 
   async drawBigFlat() {
     const big = get().bigFlat;
-    if (!big) return;
+    if (!big || get().status !== 'too-large') return;
     flatAllowed.add(big.module);
     await get().openPath(get().path);
   },

@@ -7,7 +7,7 @@
  * constant bits (`assign y = 4'd5;`). The parent nets on such ports are then
  * the same signal, so they are merged (aliased) after inlining.
  */
-import type { Bit, IRCell, IRDesign, IRModule, IRNet } from './ir';
+import { type Bit, type IRCell, type IRDesign, type IRModule, type IRNet, inputPortBits } from './ir';
 
 const MAX_DEPTH = 32;
 
@@ -22,15 +22,20 @@ function maxBit(m: IRModule): number {
   return max;
 }
 
-/** Count the cells a flattened module would have, without building it. */
-export function flatCellCount(design: IRDesign, name: string, depth = 0): number {
-  const m = design.modules[name];
-  if (!m) return 0;
-  let n = 0;
-  for (const c of m.cells) {
-    n += c.isInstance && design.modules[c.type] && depth < MAX_DEPTH ? flatCellCount(design, c.type, depth + 1) : 1;
-  }
-  return n;
+/** Count the cells a flattened module would have, without building it (each module is counted once). */
+export function flatCellCount(design: IRDesign, name: string): number {
+  const memo = new Map<string, number>();
+  const count = (mod: string, depth: number): number => {
+    const known = memo.get(mod);
+    if (known !== undefined) return known;
+    let n = 0;
+    for (const c of design.modules[mod]?.cells ?? []) {
+      n += c.isInstance && design.modules[c.type] && depth < MAX_DEPTH ? count(c.type, depth + 1) : 1;
+    }
+    memo.set(mod, n);
+    return n;
+  };
+  return count(name, 0);
 }
 
 export function flattenModule(design: IRDesign, name: string): IRModule {
@@ -42,8 +47,7 @@ export function flattenModule(design: IRDesign, name: string): IRModule {
 
   // Union-find over parent bits. Constants win as representatives, then top-level
   // input bits, so a pin stays connected to the name the user sees.
-  const topInputs = new Set<number>();
-  for (const p of top.ports) if (p.direction !== 'output') for (const b of p.bits) if (typeof b === 'number') topInputs.add(b);
+  const topInputs = inputPortBits(top);
   const alias = new Map<number, Bit>();
   const resolve = (b: Bit): Bit => {
     let x = b;

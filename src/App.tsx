@@ -33,6 +33,7 @@ function StatusText() {
     case 'error':
       return <span className="status error-text">Yosys reported an error</span>;
     case 'ready':
+    case 'too-large':
       return <span className="status muted">Ready{elapsed ? ` in ${(elapsed / 1000).toFixed(1)} s` : ''}</span>;
     default:
       return null;
@@ -188,7 +189,7 @@ export default function App() {
             />
           ) : (
             <div className="canvas empty">
-              {s.bigFlat ? (
+              {s.status === 'too-large' && s.bigFlat ? (
                 <div className="notice-box">
                   <b>The full circuit has {s.bigFlat.cells.toLocaleString()} cells.</b>
                   <p className="muted">Drawing it can take a while. The block diagram shows the same circuit in smaller pieces.</p>

@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildDiagram, type Diagram } from './diagram';
 import { flatCellCount, flattenModule, withFlattened } from './flatten';
-import type { IRDesign } from './ir';
+import type { IRCell, IRDesign, IRModule } from './ir';
 import { paragraphs, partitionModule, siblingKeys, withAutoBlocks } from './partition';
 import { design } from './test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
@@ -173,6 +173,28 @@ endmodule`;
     expect(blocks.map((b) => b.label)).toEqual(['Adder tree', 'Compare']);
   }, T);
 
+  it('keeps headings that start with a tool name, and skips lint_off', async () => {
+    const src = `module m(input [7:0] a, b, c, output [7:0] y, output z);
+  // Coverage counters
+  wire [7:0] s1 = a + b;
+  wire [7:0] s2 = s1 + c;
+  wire [7:0] s3 = s2 + 8'd1;
+
+  // Compare
+  // lint_off WIDTH
+  wire g1 = a > b;
+  wire g2 = b > c;
+  wire g3 = g1 & g2;
+  wire g4 = g3 | (a == c);
+
+  assign y = s3;
+  assign z = g4;
+endmodule`;
+    const files = { 'm.v': src };
+    const blocks = partitionModule((await design(files)).modules.m, files, { minCells: 4 })!;
+    expect(blocks.map((b) => b.label)).toEqual(['Coverage counters', 'Compare']);
+  }, T);
+
   it('gives every block its own module when names collide', async () => {
     const src = `module \\top/x (input [7:0] p, output [7:0] q);
   assign q = p + 8'd1;
@@ -207,7 +229,7 @@ endmodule`;
 });
 
 describe('source paragraphs', () => {
-  it('counts only the active branch of `ifdef', () => {
+  it('keeps `ifdef alternatives from unbalancing begin/end', () => {
     const src = [
       '`ifdef ASYNC',
       'always @(posedge clk or negedge rst) begin',
@@ -225,6 +247,31 @@ describe('source paragraphs', () => {
     expect(p[5]).toBe(p[3]);
     expect(p[8]).not.toBe(p[6]);
     expect(p[10]).not.toBe(p[8]);
+  });
+
+  it('splits paragraphs inside every `ifdef branch', () => {
+    const src = [
+      '`ifdef SIM',
+      'assign m = 0;',
+      '`else',
+      'assign a = x;',
+      '',
+      'always @(posedge clk) q <= a;',
+      'assign b = q;',
+      '',
+      'assign c = b;',
+      '`endif',
+      'assign d = c;',
+      '',
+      'assign e = d;',
+    ].join('\n');
+    const p = paragraphs(src);
+    expect(p[5]).not.toBe(p[3]);
+    expect(p[6]).not.toBe(p[5]);
+    expect(p[8]).not.toBe(p[6]);
+    // Lines after `endif never share a paragraph number with the longer branch.
+    expect(p[12]).not.toBe(p[8]);
+    expect(p[12]).not.toBe(p[10]);
   });
 
   it('skips escaped quotes in strings', () => {
@@ -317,6 +364,27 @@ endmodule`;
     const a = await design({ [AUCTION_FILE]: AUCTION_SOURCE });
     expect(flatCellCount(a, a.top)).toBe(flattenModule(a, a.top).cells.length);
   }, T);
+
+  it('counts a deep, wide hierarchy without visiting every copy', () => {
+    // 8 instances per level, 8 levels: 8^8 = 16.7M leaf cells.
+    const cell = (type: string, i: number): IRCell => ({
+      id: `c${i}`,
+      name: `c${i}`,
+      hidden: false,
+      type,
+      isInstance: !type.startsWith('$'),
+      parameters: {},
+      directions: {},
+      connections: {},
+      src: [],
+    });
+    const mod = (name: string, cells: IRCell[]): IRModule => ({ name, displayName: name, isTop: false, ports: [], cells, nets: [], src: [] });
+    const modules: Record<string, IRModule> = { l0: mod('l0', [cell('$add', 0)]) };
+    for (let k = 1; k <= 8; k++) modules[`l${k}`] = mod(`l${k}`, Array.from({ length: 8 }, (_, i) => cell(`l${k - 1}`, i)));
+    const t0 = performance.now();
+    expect(flatCellCount({ top: 'l8', modules }, 'l8')).toBe(8 ** 8);
+    expect(performance.now() - t0).toBeLessThan(100);
+  });
 });
 
 describe('speed', () => {
