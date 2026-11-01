@@ -595,7 +595,10 @@ export function VerilogExportDialog({ onClose }: { onClose(): void }) {
       const r = await elaborate(out.check.files, out.check.top);
       const json = parseYosysJson(r.json);
       const m = json.modules[out.check.top];
-      setCheck({ ok: true, text: `Yosys elaborated ${out.name}: ${Object.keys(m?.ports ?? {}).length} ports, ${Object.keys(m?.cells ?? {}).length} cells.` });
+      const done = `Yosys elaborated ${out.name}: ${Object.keys(m?.ports ?? {}).length} ports, ${Object.keys(m?.cells ?? {}).length} cells.`;
+      // Code that elaborates can still leave outputs undriven (a cell with no Verilog form): not a pass.
+      const undriven = out.warnings.filter((w) => /left undriven/.test(w)).length;
+      setCheck(undriven ? { ok: false, text: `${done} But ${undriven === 1 ? 'one cell has' : `${undriven} cells have`} no Verilog form and ${undriven === 1 ? 'its outputs are' : 'their outputs are'} left undriven (see the warnings).` } : { ok: true, text: done });
     } catch (e) {
       setCheck({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {

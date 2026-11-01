@@ -7,7 +7,7 @@ import { type LayoutResult, approxMeasure, sizeNode } from '../layout/elk-layout
 import { DiagramGraphic } from '../render/DiagramGraphic';
 import { THEMES } from '../render/theme';
 import { SYMBOLS, type SymKey, type SymParams, type SymbolGroup, newUserNode, symbolNode } from '../editor/symbols';
-import { useStore } from './store';
+import { moduleTitle, useStore } from './store';
 import { ui } from './ui-events';
 
 const Icon = memo(function Icon({ sym, params }: { sym: SymKey; params?: SymParams }) {
@@ -104,7 +104,9 @@ export function Palette() {
       {GROUPS.map((g) => {
         const list =
           g === 'Hierarchy'
-            ? modules.filter(match).map((m) => item(`block:${m}`, 'block', m, `Block: an instance of ${m}`, { module: m }))
+            ? modules
+                .filter((m) => match(m) || match(moduleTitle(m)))
+                .map((m) => item(`block:${m}`, 'block', moduleTitle(m), `Block: an instance of ${moduleTitle(m)}`, { module: m }))
             : SYMBOLS.filter((s) => s.group === g && s.key !== 'block' && (match(s.title) || match(s.hint) || match(g))).map((s) =>
                 item(s.key, s.key, s.title, s.hint),
               );

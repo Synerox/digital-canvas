@@ -82,10 +82,12 @@ export function checkSheet(d: Diagram): SheetIssues {
     reasons.set(id, had ? `${had}, and ${reason}` : reason);
   };
   const messages: string[] = [];
-  const port = new Map<string, { width: number; node: string; name: string; label: string; cellType?: string; inout: boolean }>();
+  const port = new Map<string, { width: number; node: string; name: string; label: string; what: string; cellType?: string; inout: boolean }>();
   for (const n of d.nodes) {
     for (const p of n.ports) {
-      port.set(p.id, { width: p.width, node: n.id, name: p.name, label: n.subLabel ?? n.label, cellType: n.cellType, inout: !!p.inout });
+      // Named in words where the drawn label is only a mark: a split reads `}{`, a join `{ }`.
+      const what = n.kind === 'split' ? 'a split' : n.kind === 'join' ? 'a concatenation' : n.subLabel ?? (n.label || 'a symbol');
+      port.set(p.id, { width: p.width, node: n.id, name: p.name, label: n.subLabel ?? n.label, what, cellType: n.cellType, inout: !!p.inout });
     }
   }
   const into = new Map<string, string[]>();
@@ -105,7 +107,7 @@ export function checkSheet(d: Diagram): SheetIssues {
       flag(e.id, 'does not match the input it feeds');
       // A scaled wire is named as it is drawn (2 bits, `×4`), with the width it brings to the input.
       const wire = width === e.width ? `${width}-bit wire` : `${e.width}-bit wire ${scaleNote(wireShift(e))} (${width} bits)`;
-      if (mismatches++ < 3) messages.push(`A ${wire} feeds the ${t.width}-bit input ${t.name} of ${t.label || 'a symbol'}.`);
+      if (mismatches++ < 3) messages.push(`A ${wire} feeds the ${t.width}-bit input ${t.name} of ${t.what}.`);
     }
   }
   if (mismatches > 3) messages.push(`${mismatches - 3} more width mismatches.`);
