@@ -8,7 +8,7 @@
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
 import type { LayoutResult, Point } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
-import { type RouteRec, type SheetEdits, freeIdFloor } from './doc';
+import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
 import { type InterfaceOf, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
 import { verilogIdent } from './verilog-export';
@@ -733,4 +733,63 @@ export function toDrawing(d: Diagram, layout: LayoutResult, e: SheetEdits, iface
   // Hand-drawn symbols keep their u:<n> IDs, which can be above the wire count.
   out.next = freeIdFloor(out);
   return out;
+}
+
+/** How big a symbol is. */
+export interface Size {
+  width: number;
+  height: number;
+}
+
+/**
+ * Room for symbols that grew (`was` → `now`: sizes by symbol), with the layout
+ * kept. A wider symbol gets a column as wide as its growth put in at its old
+ * right edge: everything right of that edge moves right, wire routes and labels
+ * too. A point moves with its column, so routes keep their shapes, and the pins
+ * on the symbol's right edge move with that edge. A taller symbol (a longer
+ * header) grows upwards, so its pins stay where its wires end, when nothing is
+ * there; otherwise downwards, and what is below it in its column moves down.
+ * Stored routes that run through a grown symbol are dropped, to be routed again.
+ */
+export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: ReadonlyMap<string, Size>): SheetEdits {
+  const grown = [...now].filter(([id, s]) => e.pos[id] && was.has(id) && (s.width > was.get(id)!.width || s.height > was.get(id)!.height));
+  if (grown.length === 0) return e;
+  const cols = grown
+    .filter(([id, s]) => s.width > was.get(id)!.width)
+    .map(([id, s]) => ({ x: e.pos[id].x, right: e.pos[id].x + was.get(id)!.width, grow: s.width - was.get(id)!.width, shift: 0 }))
+    .sort((a, b) => a.right - b.right);
+  const shiftAt = (x: number) => cols.reduce((m, c) => (c.right <= x + 0.5 ? Math.max(m, c.shift) : m), 0);
+  // Right of a symbol, things move as far as its right edge does: as its left edge, plus its growth. Its left edge
+  // moves with the columns left of it, which come first.
+  for (const c of cols) c.shift = shiftAt(c.x) + c.grow;
+  const mx = <T extends Point>(p: T): T => ({ ...p, x: p.x + shiftAt(p.x) });
+  const pos = Object.fromEntries(Object.entries(e.pos).map(([id, p]) => [id, mx(p)]));
+  const routes = Object.fromEntries(
+    Object.entries(e.routes).map(([id, r]): [string, RouteRec] => [id, { ...r, points: r.points.map(mx), ...(r.label ? { label: mx(r.label) } : {}) }]),
+  );
+  const rect = (id: string) => ({ ...pos[id], ...(now.get(id) ?? was.get(id) ?? { width: 0, height: 0 }) });
+  const gap = 5;
+  const clear = (r: Box, id: string) =>
+    Object.keys(pos).every((k) => {
+      const q = rect(k);
+      return k === id || r.x >= q.x + q.width + gap || q.x >= r.x + r.width + gap || r.y >= q.y + q.height + gap || q.y >= r.y + r.height + gap;
+    });
+  for (const [id, s] of grown.sort(([a], [b]) => pos[a].y - pos[b].y)) {
+    const dh = s.height - was.get(id)!.height;
+    if (dh <= 0) continue;
+    if (clear({ ...rect(id), y: pos[id].y - dh }, id)) {
+      pos[id] = { ...pos[id], y: pos[id].y - dh };
+      continue;
+    }
+    // Downwards: what is below it in its column moves down as far (its wires are routed again).
+    const r = rect(id);
+    const bottom = r.y + was.get(id)!.height;
+    for (const k of Object.keys(pos)) {
+      const q = rect(k);
+      if (k !== id && q.y >= bottom - 0.5 && q.x < r.x + r.width && r.x < q.x + q.width) pos[k] = { ...pos[k], y: pos[k].y + dh };
+    }
+  }
+  const boxes = grown.map(([id]) => rect(id));
+  for (const [id, r] of Object.entries(routes)) if (boxes.some((b) => polylineHitsRect(r.points, b))) delete routes[id];
+  return { ...e, pos, routes };
 }

@@ -10,7 +10,7 @@ import { checkSheet, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
-import { moduleTitle, sameFile, sheetsUsing, useStore, viewModeOf } from './store';
+import { moduleTitle, sameFile, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
 import { ui } from './ui-events';
 
 /**
@@ -429,6 +429,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
           // A scaled wire says what it brings to its input, as the export writes it.
           `${edge.width} bit${edge.width === 1 ? '' : 's'}${wireShift(edge) ? ` ${scaleNote(wireShift(edge))} (${edge.width + wireShift(edge)} bits)` : ''}`,
           ...(s.issues.flagged.has(id) ? wireTrouble(s.netlist, id) : []),
+          ...(s.issues.flagged.has(id) && staleSlices(s.netlist, s.doc.sheets[s.sheet]).some((w) => w.edge === id) ? ['takes bits its source no longer has'] : []),
         ].join(' · ')}
       </p>
       <div className="prop-actions">

@@ -11,7 +11,7 @@ import { downloadBlob } from '../render/export';
 import { elaborate } from '../yosys/client';
 import { parseYosysJson } from '../core/yosys-json';
 import { declaredModules } from '../yosys/script';
-import { type PutAside, changeFiles, importedTop, moduleTitle, planImport as planFiles, useStore, withoutModuleDefinitions } from './store';
+import { type PutAside, changeFiles, importedTop, moduleTitle, planImport as planFiles, staleSlices, useStore, withoutModuleDefinitions } from './store';
 
 /** Close a dialog on Escape, before the canvas and the shortcuts see the key. */
 // oxlint-disable-next-line react/only-export-components
@@ -506,7 +506,8 @@ export function exportCurrent(): VerilogOut {
     const r = diagramToVerilog(named(d), as);
     defined.add(verilogIdent(as));
     parts.push(note ? `${note}\n${r.code}` : r.code);
-    later.push(...r.warnings.map((w) => `${moduleTitle(mod)}: ${w}`));
+    const stale = staleSlices(d, s.doc.drawn.includes(mod) ? s.doc.sheets[`d:${mod}`] : blocksSheet(mod)).map((w) => w.text);
+    later.push(...[...r.warnings, ...stale].map((w) => `${moduleTitle(mod)}: ${w}`));
   };
   /**
    * The block diagram and the full circuit are edited apart (a sheet of each, by module): say when
@@ -551,7 +552,7 @@ export function exportCurrent(): VerilogOut {
   subModules(onScreen);
   const sheet = named(onScreen);
   const top = diagramToVerilog(sheet, isMadeUp(module) ? name : module);
-  warnings.push(...top.warnings, ...later, ...otherView());
+  warnings.push(...top.warnings, ...staleSlices(onScreen, s.doc.sheets[s.sheet]).map((w) => w.text), ...later, ...otherView());
   const code = [...parts, top.code].join('\n');
   const own = { name, code, warnings, ...(redefined.length ? { redefined } : {}) };
   if (fromFiles.size === 0) return { ...own, check: { files: { [`${name}.v`]: code }, top: name } };

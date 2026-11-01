@@ -122,12 +122,12 @@ export default function App() {
     })();
   }, []);
 
-  // The browser keeps one copy of the work for all its tabs. When another tab writes it, this tab stops
-  // writing (it would overwrite that work unseen) and asks which to keep. A copy still waiting to be
-  // written goes when the page is closed or reloaded, or the last edit before that would be lost.
+  // The browser keeps one copy of the work for all its tabs. When another tab writes other work there,
+  // this tab stops writing (it would overwrite that work unseen) and asks which to keep. A copy still
+  // waiting to be written goes when the page is closed or reloaded, or the last edit before that would be lost.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key === AUTOSAVE_KEY && e.newValue !== null) useStore.getState().otherTabSaved();
+      if (e.key === AUTOSAVE_KEY && e.newValue !== null) useStore.getState().otherTabSaved(e.newValue);
     };
     const flush = () => useStore.getState().flushAutosave();
     window.addEventListener('storage', onStorage);
@@ -342,7 +342,12 @@ export default function App() {
           onChange={async (e) => {
             const files = await readFiles(e.target.files ?? []);
             e.target.value = '';
-            if (Object.keys(files).length) await s.setFiles(files, true);
+            if (Object.keys(files).length === 0) return;
+            // New versions of open files update those, and the other open files stay, as when they are dropped. Files
+            // of other names are another design, opened in place of the open files.
+            const st = useStore.getState();
+            if (Object.keys(files).some((f) => f in st.files || f in st.putAside)) await dropVerilog(files);
+            else await s.setFiles(files, true);
           }}
         />
         <input

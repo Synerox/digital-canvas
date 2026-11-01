@@ -1,28 +1,45 @@
 import { useEffect, useMemo, useRef } from 'react';
-import type { HierarchyNode } from '../core/ir';
+import type { HierarchyNode, IRDesign } from '../core/ir';
 import { RULES } from '../core/rules';
+import { type EditDoc, type ViewMode, sheetKey } from '../editor/doc';
 import { type PathEntry, moduleTitle, sameFile, useStore } from './store';
+
+/**
+ * The name an instance has on its parent's sheet in this view: as it was renamed there (the
+ * block shows it, and the Verilog export writes it), or as the Verilog names it.
+ */
+function instanceName(view: IRDesign | undefined, doc: EditDoc, mode: ViewMode, parent: PathEntry, instance: string): string {
+  const cell = view?.modules[parent.module]?.cells.find((c) => c.isInstance && c.name === instance);
+  return (cell && doc.sheets[sheetKey(parent, mode)]?.labels[`cell:${cell.id}`]?.trim()) || instance;
+}
 
 export function HierarchyTree() {
   const hierarchy = useStore((s) => s.hierarchy);
   const path = useStore((s) => s.path);
   const openPath = useStore((s) => s.openPath);
+  const doc = useStore((s) => s.doc);
+  const mode = useStore((s) => s.viewMode);
+  const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
   if (!hierarchy) return <p className="muted small">No Verilog loaded.</p>;
   const current = path[0]?.drawn ? '' : path.map((p) => p.instance).join('/');
 
   const render = (n: HierarchyNode, prefix: PathEntry[]) => {
     const here = [...prefix, { instance: n.instance, module: n.module }];
     const key = here.map((p) => p.instance).join('/');
+    const name = prefix.length ? instanceName(view, doc, mode, prefix[prefix.length - 1], n.instance) : n.instance;
+    const was = name !== n.instance ? `${n.instance} in the Verilog` : undefined;
     return (
       <li key={key}>
         <button className={`tree-item ${key === current ? 'active' : ''}`} onClick={() => openPath(here)}>
           {prefix.length === 0 ? (
             <b>{moduleTitle(n.module)}</b>
           ) : n.module.startsWith(`${prefix[prefix.length - 1].module}/`) ? (
-            <span className="auto-block">{n.instance}</span>
+            <span className="auto-block" title={was}>
+              {name}
+            </span>
           ) : (
             <>
-              <span>{n.instance}</span> <span className="muted" title={n.module}>: {moduleTitle(n.module)}</span>
+              <span title={was}>{name}</span> <span className="muted" title={n.module}>: {moduleTitle(n.module)}</span>
             </>
           )}
         </button>
@@ -84,6 +101,8 @@ export function ViewToggle() {
 export function Breadcrumb() {
   const path = useStore((s) => s.path);
   const openPath = useStore((s) => s.openPath);
+  const doc = useStore((s) => s.doc);
+  const mode = useStore((s) => s.viewMode);
   const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
   if (path.length === 0) return null;
   return (
@@ -96,7 +115,7 @@ export function Breadcrumb() {
               ? moduleTitle(p.module)
               : !p.drawn && view?.modules[p.module]?.auto
                 ? view.modules[p.module].displayName
-                : `${p.instance} (${moduleTitle(p.module)})`}
+                : `${p.drawn ? p.instance : instanceName(view, doc, mode, path[i - 1], p.instance)} (${moduleTitle(p.module)})`}
           </button>
         </span>
       ))}

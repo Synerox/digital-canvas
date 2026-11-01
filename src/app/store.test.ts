@@ -89,6 +89,47 @@ const nodeOf = (pred: (n: { kind: string; label: string; instanceName?: string }
 const input = (name: string) => nodeOf((n) => n.kind === 'input' && n.label === name);
 
 const pin = (id: string, sym: 'input' | 'output' | 'inout', name: string): UserNode => ({ ...newUserNode(id, sym), name });
+
+/** A UART transmitter's state machine, which the block diagram cuts into a few automatic blocks. */
+const UART_FSM = `module uart_tx_fsm (
+  input  wire       clk,
+  input  wire       rst,
+  input  wire       start,
+  input  wire       tick,
+  input  wire [7:0] data,
+  output reg        tx,
+  output wire       busy
+);
+  localparam IDLE = 2'd0, START = 2'd1, DATA = 2'd2, STOP = 2'd3;
+  reg [1:0] state;
+  reg [2:0] bitidx;
+  reg [7:0] shreg;
+  always @(posedge clk) begin
+    if (rst) begin
+      state <= IDLE; bitidx <= 3'd0; shreg <= 8'd0;
+    end else begin
+      case (state)
+        IDLE:  if (start) begin shreg <= data; bitidx <= 3'd0; state <= START; end
+        START: if (tick) state <= DATA;
+        DATA:  if (tick) begin
+                 shreg <= {1'b0, shreg[7:1]};
+                 bitidx <= bitidx + 3'd1;
+                 if (bitidx == 3'd7) state <= STOP;
+               end
+        STOP:  if (tick) state <= IDLE;
+      endcase
+    end
+  end
+  always @(*) begin
+    case (state)
+      START:   tx = 1'b0;
+      DATA:    tx = shreg[0];
+      default: tx = 1'b1;
+    endcase
+  end
+  assign busy = (state != IDLE);
+endmodule
+`;
 const drawing = (nodes: UserNode[], edges: SheetEdits['edges'] = []): SheetEdits => ({ ...emptyEdits(), nodes, edges, next: 100 });
 
 describe('drawing interfaces (pins → block ports)', () => {
@@ -847,8 +888,9 @@ describe('store', () => {
       const n = writes;
       await st().restoreAutosave();
       expect(st().dirty).toBe(true);
-      // Let the copy that restoring schedules be written while there is storage.
-      await vi.waitFor(() => expect(writes).toBeGreaterThan(n));
+      // Opening the copy changes nothing in it, so it is not written again (other tabs would take that for new work: H1).
+      await new Promise((r) => setTimeout(r, 500));
+      expect(writes).toBe(n);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -869,7 +911,7 @@ describe('store', () => {
       st().renameItem('u:1', 'c');
       const other = JSON.stringify({ ...stored(), doc: { drawn: ['theirs'], sheets: { 'd:theirs': drawing([]) } } });
       store.set(AUTOSAVE_KEY, other);
-      st().otherTabSaved();
+      st().otherTabSaved(other);
       st().renameItem('u:1', 'd');
       st().flushAutosave();
       await new Promise((r) => setTimeout(r, 500));
@@ -880,13 +922,171 @@ describe('store', () => {
       expect(stored().doc.sheets['d:mine'].nodes[0].name).toBe('d');
       // Or the other tab's work is opened here, and this tab keeps the copy again.
       store.set(AUTOSAVE_KEY, other);
-      st().otherTabSaved();
+      st().otherTabSaved(other);
       await st().restoreAutosave();
       expect(st().doc.drawn).toEqual(['theirs']);
       expect(st().autosavePaused).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
+  }, 60_000);
+
+  it('goes on keeping its copy when another tab only opens the work or looks at other sheets (H1)', async () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v) });
+    try {
+      const stored = () => JSON.parse(store.get(AUTOSAVE_KEY) ?? '{}') as SavedFile;
+      const sheet = drawing([pin('u:1', 'input', 'a'), newUserNode('u:2', 'and')]);
+      await open({}, { doc: { drawn: ['mine'], sheets: { 'd:mine': sheet } }, path: [{ instance: 'mine', module: 'mine', drawn: true }] });
+      await vi.waitFor(() => expect(stored().doc?.drawn).toEqual(['mine']));
+      // The other tab opened the copy and looks at another view and sheet: it writes the same work, read back with
+      // the keys of its objects in another order.
+      const reorder = (v: unknown): unknown =>
+        Array.isArray(v) ? v.map(reorder) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).reverse().map(([k, x]) => [k, reorder(x)])) : v;
+      const theirs = JSON.stringify(reorder({ ...stored(), viewMode: 'flat', path: [{ instance: 'x', module: 'x' }] }));
+      store.set(AUTOSAVE_KEY, theirs);
+      st().otherTabSaved(theirs);
+      expect(st().autosavePaused).toBeFalsy();
+      // This tab's next edits still go to the copy.
+      st().renameItem('u:1', 'b');
+      st().flushAutosave();
+      expect(stored().doc.sheets['d:mine'].nodes[0].name).toBe('b');
+      // Other work from another tab still stops it.
+      const other = JSON.stringify({ ...stored(), doc: { drawn: ['theirs'], sheets: { 'd:theirs': drawing([]) } } });
+      store.set(AUTOSAVE_KEY, other);
+      st().otherTabSaved(other);
+      expect(st().autosavePaused).toBe(true);
+      st().keepThisTab();
+      expect(stored().doc.drawn).toEqual(['mine']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 60_000);
+
+  it('keeps the edits of a parameterized module when new code gives it other parameters (H7)', async () => {
+    const uart = (div: number, div2 = div) => `module baud_gen #(parameter DIV = 10) (input wire clk, input wire en, output wire tick);
+  reg [3:0] cnt;
+  always @(posedge clk) cnt <= (cnt == DIV - 1) ? 4'd0 : cnt + 4'd1;
+  assign tick = en && (cnt == DIV - 1);
+endmodule
+module uart_top (input wire clk, input wire en, output wire tick, output wire tick2);
+  baud_gen #(.DIV(${div})) u_baud (.clk(clk), .en(en), .tick(tick));
+  baud_gen #(.DIV(${div2})) u_baud2 (.clk(clk), .en(en), .tick(tick2));
+endmodule
+`;
+    await open({ 'uart.v': uart(10) });
+    await st().openPath([st().path[0], { instance: 'u_baud', module: st().design!.modules.uart_top.cells.find((c) => c.name === 'u_baud')!.type }]);
+    await settle();
+    const div10 = st().path[1].module;
+    expect(moduleTitle(div10)).toBe('baud_gen #(DIV=10)');
+    st().startPlacing({ sym: 'text' });
+    st().placeAt({ x: 0, y: -200 });
+    st().renameItem([...st().selection][0], 'Baud tick every DIV clocks');
+    const note = () => st().netlist!.nodes.find((n) => n.kind === 'text')?.label;
+    expect(note()).toBe('Baud tick every DIV clocks');
+    // Both instances get DIV=12: the sheet of the new copy has the edits, in the import's undo step.
+    await st().setFiles({ 'uart.v': uart(12) }, false, { newVersion: true });
+    await settle();
+    expect(moduleTitle(st().path[1].module)).toBe('baud_gen #(DIV=12)');
+    expect(note()).toBe('Baud tick every DIV clocks');
+    expect(Object.keys(st().doc.sheets).filter((k) => k.includes('baud_gen'))).toEqual([`v:blocks:${st().path[1].module}`]);
+    expect(st().notice).toMatch(/edits on baud_gen #\(DIV=10\) now apply to baud_gen #\(DIV=12\)/);
+    st().undo();
+    await settle();
+    expect(st().path[1].module).toBe(div10);
+    expect(note()).toBe('Baud tick every DIV clocks');
+    st().redo();
+    await settle();
+    expect(moduleTitle(st().path[1].module)).toBe('baud_gen #(DIV=12)');
+    expect(note()).toBe('Baud tick every DIV clocks');
+    // Code the design does not use opens as the top: the modules of the old top are only out of sight, nothing is said about them.
+    await st().setFiles({ 'other.v': 'module other (input a, output y); assign y = ~a; endmodule\n' }, false, { newVersion: true });
+    await settle();
+    expect(st().design!.top).toBe('other');
+    expect(st().notice).not.toMatch(/no longer show/);
+    await st().removeFile('other.v');
+    await settle();
+    await st().openPath([st().path[0], { instance: 'u_baud', module: st().design!.modules.uart_top.cells.find((c) => c.name === 'u_baud')!.type }]);
+    await settle();
+    expect(note()).toBe('Baud tick every DIV clocks');
+    // The instances part ways: whose module would the edits be? They stay, and the notice says they no longer show.
+    await st().setFiles({ 'uart.v': uart(14, 16) }, false, { newVersion: true });
+    await settle();
+    expect(note()).toBeUndefined();
+    expect(st().notice).toMatch(/edits on baud_gen #\(DIV=12\) no longer show/);
+  }, 60_000);
+
+  it('makes room for the wider blocks of a copy to a new drawing (H8)', async () => {
+    await open({ 'uart.v': UART_FSM });
+    await st().openPath([{ instance: 'uart_tx_fsm', module: 'uart_tx_fsm' }]);
+    await settle();
+    /** Symbols that overlap, and wires that run through a symbol, on the sheet on screen. */
+    const clashes = () => {
+      const ns = st().layout!.nodes;
+      const over = ns.flatMap((a, i) =>
+        ns.filter((b, j) => j > i && a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height).map((b) => `${a.id} × ${b.id}`),
+      );
+      const under = st().layout!.edges.flatMap((w) => ns.filter((n) => polylineHitsRect(w.points, n)).map((n) => `${w.id} under ${n.id}`));
+      return [...over, ...under];
+    };
+    expect(st().layout!.nodes.filter((n) => n.kind === 'instance').length).toBeGreaterThan(2);
+    expect(clashes()).toEqual([]);
+    const before = st().layout!;
+    await st().convertToDrawing();
+    await settle();
+    expect(st().sheet).toBe('d:uart_tx_fsm_drawing');
+    const blocks = st().layout!.nodes.filter((n) => n.kind === 'instance');
+    // The blocks are wider (their titles are their drawings' names), and nothing covers anything.
+    expect(blocks.some((b) => b.width > before.nodes.find((n) => n.id === b.id)!.width)).toBe(true);
+    expect(clashes()).toEqual([]);
+    // The layout is kept: every symbol is where it was or right of it, with its pins at the same heights (a block's header
+    // grows upwards), and the order left to right is the same.
+    for (const n of st().layout!.nodes) {
+      const was = before.nodes.find((x) => x.id === n.id)!;
+      expect(n.ports.map((q) => q.y)).toEqual(was.ports.map((q) => q.y));
+      expect(n.x).toBeGreaterThanOrEqual(was.x);
+    }
+    const order = (l: typeof before) => [...l.nodes].sort((a, b) => a.x - b.x || a.y - b.y).map((n) => n.id);
+    expect(order(st().layout!)).toEqual(order(before));
+    // No wire was routed again: they are the old routes, stretched.
+    const bends = (l: typeof before) => l.edges.map((w) => w.points.length).sort((a, b) => a - b);
+    expect(bends(st().layout!)).toEqual(bends(before));
+  }, 60_000);
+
+  it('says when a wire takes bits its source no longer has (G12d), and never places a symbol right over another (G12g)', async () => {
+    const d = { ...pin('u:1', 'input', 'd'), params: { width: 8 } };
+    const hi = { ...pin('u:2', 'output', 'hi'), params: { width: 4 } };
+    const wire = { id: 'w:3', source: { node: 'u:1', port: 'u:1.out' }, target: { node: 'u:2', port: 'u:2.in' }, slice: { lo: 4, width: 4 }, label: 'd[7:4]' };
+    const e: SheetEdits = { ...drawing([d, hi], [wire]), pos: { 'u:1': { x: 0, y: 0 }, 'u:2': { x: 200, y: 0 } } };
+    await open({}, { doc: { drawn: ['sl'], sheets: { 'd:sl': e } }, path: [{ instance: 'sl', module: 'sl', drawn: true }] });
+    expect(exportCurrent().code).toMatch(/assign hi = d\[7:4\];/);
+    expect(exportCurrent().warnings).toEqual([]);
+    st().setNotice(undefined);
+    st().setNodeParams('u:1', { width: 4 });
+    const said = 'The wire from d to hi takes bits 7:4, but d has 4 bits now: it carries all of d. Set its bits again, or widen d.';
+    expect(st().notice).toBe(said);
+    // The sheet says so as long as it lasts, and draws the wire in the warning colour.
+    expect(st().issues.messages).toContain(said);
+    expect(st().issues.flagged.has('w:3')).toBe(true);
+    expect(exportCurrent().warnings).toContain(said);
+    // Inside a block of another drawing too.
+    st().newDrawing('outer');
+    await settle();
+    st().startPlacing({ sym: 'block', params: { module: 'sl' } });
+    st().placeAt({ x: 0, y: 0 });
+    expect(exportCurrent().warnings).toContain(`sl: ${said}`);
+    // Two clicks on one spot: the second symbol goes a little down and right, not over the first.
+    st().startPlacing({ sym: 'and' });
+    st().placeAt({ x: 300, y: 300 }, true);
+    st().placeAt({ x: 300, y: 300 }, true);
+    st().placeAt({ x: 300, y: 300 });
+    const ands = st().layout!.nodes.filter((n) => n.kind !== 'instance');
+    expect(ands.length).toBe(3);
+    expect(ands.map((n) => [n.x - ands[0].x, n.y - ands[0].y])).toEqual([
+      [0, 0],
+      [20, 20],
+      [40, 40],
+    ]);
   }, 60_000);
 
   it('pastes and duplicates beside the original, not on top of it (N30)', async () => {

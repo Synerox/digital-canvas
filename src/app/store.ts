@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import { type DNode, type Diagram, type Side, buildDiagram } from '../core/diagram';
+import { type DNode, type DPort, type Diagram, type Side, buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES, RULES, type RuleId } from '../core/rules';
-import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy } from '../core/ir';
+import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy, displayModuleName } from '../core/ir';
 import { parseYosysJson } from '../core/yosys-json';
 import { flatCellCount, withFlattened } from '../core/flatten';
 import { withAutoBlocks } from '../core/partition';
@@ -41,6 +41,7 @@ import {
   deleteItems,
   effectiveDiagram,
   layoutToEdits,
+  makeRoom,
   moveNodes,
   newId,
   pasteClip,
@@ -111,6 +112,31 @@ function parsePutAside(text: string): PutAside {
     if (Object.keys(kept).length) out[file] = kept;
   }
   return out;
+}
+
+/** JSON with the keys of every object in order: equal data gives equal text, however it was built. */
+function stableJson(v: unknown): string {
+  return JSON.stringify(v, (_k, x: unknown) =>
+    x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x,
+  );
+}
+
+/**
+ * What a copy of the work in the browser holds, read as Open reads it: `work` is what a tab can
+ * lose (the files, the rules, the edits and the edits put aside), `view` where it looks (sheet,
+ * view, Top, theme) and whether it is saved to a file. Undefined for text that is not a copy.
+ */
+export function copyKeys(text: string): { work: string; view: string } | undefined {
+  try {
+    const f = parseSavedFile(text);
+    const saved = (JSON.parse(text) as { saved?: unknown }).saved === true;
+    return {
+      work: stableJson({ files: f.files, rules: [...f.rules].sort(), doc: compactDoc(f.doc), putAside: parsePutAside(text) }),
+      view: stableJson({ top: f.top, viewMode: f.viewMode, theme: f.theme, path: f.path, saved }),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface HistoryEntry {
@@ -271,8 +297,11 @@ interface State {
   /** Start from the browser's autosaved work, if any; returns false when there is none. */
   restoreAutosave(): Promise<boolean>;
   markSaved(): void;
-  /** Another tab wrote the browser's copy: stop overwriting it (see autosavePaused). */
-  otherTabSaved(): void;
+  /**
+   * Another tab wrote `text` to the browser's copy: stop overwriting it (see autosavePaused), unless
+   * it holds the work this tab last wrote or read there (that tab only opened it, or looked around).
+   */
+  otherTabSaved(text: string): void;
   /** Keep this tab's work in the browser's copy again, in place of the other tab's. */
   keepThisTab(): void;
   /** Write a copy that is waiting to be written now (the page is being closed or reloaded). */
@@ -289,6 +318,8 @@ let navSeq = 0;
 /** What Copy took, the box of the copied symbols, and the sheet they were copied from (see paste). */
 let clipboard: { clip: Clip; box: Box; sheet: string } | undefined;
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+/** What this tab last wrote to the browser's copy, or read from it (see copyKeys). */
+let copied: { work: string; view: string } | undefined;
 
 const measures = new Map<string, MeasureText>();
 /** Text measurement for a theme's font (one canvas per font). */
@@ -572,6 +603,109 @@ export function changeFiles(doc: EditDoc, putAside: PutAside, before: Record<str
   return { doc: sheets === doc.sheets ? doc : { drawn: doc.drawn, sheets }, putAside: aside, restored: [...restored] };
 }
 
+/** The module at each instance path of a design (`u_a/u_b`; the top's is ''). */
+function modulesByPath(design: IRDesign): Map<string, string> {
+  const out = new Map<string, string>();
+  const walk = (module: string, path: string, depth: number) => {
+    out.set(path, module);
+    if (depth >= 64) return;
+    for (const c of design.modules[module]?.cells ?? []) {
+      if (c.isInstance && design.modules[c.type]) walk(c.type, path ? `${path}/${c.name}` : c.name, depth + 1);
+    }
+  };
+  walk(design.top, '', 0);
+  return out;
+}
+
+export interface ParamodFollow {
+  doc: EditDoc;
+  /** Parameterized modules whose edits now belong to the module that took their place. */
+  moved: { from: string; to: string }[];
+  /** Parameterized modules with edits that the design no longer has, and that nothing took the place of. */
+  lost: string[];
+}
+
+/**
+ * Yosys names its copy of a parameterized module after the parameters
+ * (`$paramod\baud_gen\DIV=…`), and the edits of its sheets are keyed by that
+ * name. When new code gives the instances other parameters, the edits follow
+ * the module to its new name: to the module that is now at all the instances
+ * of the old one, if that is the same Verilog module, new in the design and
+ * has no edits of its own. The others are `lost` (they stay in the document:
+ * code with the old parameters shows them again). Nothing moves or is lost
+ * when the design has another top. Returns `doc` itself when nothing moves.
+ */
+export function followParamods(doc: EditDoc, before: IRDesign, after: IRDesign): ParamodFollow {
+  // Under another top, the modules of the old one are only out of sight (Top brings them back).
+  if (before.top !== after.top) return { doc, moved: [], lost: [] };
+  const edited = (m: string) => Object.keys(doc.sheets).some((k) => ofModules(k, [m]) && !isEmptyEdits(doc.sheets[k]));
+  const was = modulesByPath(before);
+  const now = modulesByPath(after);
+  const gone = Object.keys(before.modules).filter((m) => m.startsWith('$paramod') && !after.modules[m] && edited(m));
+  const target = new Map<string, string | undefined>();
+  for (const g of gone) {
+    const at = new Set(
+      [...was]
+        .filter(([, m]) => m === g)
+        .map(([p]) => now.get(p))
+        .filter((m): m is string => m !== undefined && !before.modules[m] && displayModuleName(m) === displayModuleName(g)),
+    );
+    const to = at.size === 1 ? [...at][0] : undefined;
+    target.set(g, to && !edited(to) ? to : undefined);
+  }
+  // Two old modules that end up as one: whose edits would it show?
+  const claims = (to: string) => [...target.values()].filter((t) => t === to).length;
+  const moved = gone.flatMap((g) => {
+    const to = target.get(g);
+    return to && claims(to) === 1 ? [{ from: g, to }] : [];
+  });
+  const lost = gone.filter((g) => !moved.some((m) => m.from === g));
+  if (moved.length === 0) return { doc, moved, lost };
+  const rename = new Map(moved.map((m) => [m.from, m.to]));
+  const keyOf = (k: string) => {
+    const m = /^(v:[a-z]+:)(.*)$/.exec(k);
+    if (!m) return k;
+    for (const [from, to] of rename) {
+      if (m[2] === from) return m[1] + to;
+      // Its automatic blocks (`<module>/<block>`) go along.
+      if (m[2].startsWith(`${from}/`)) return m[1] + to + m[2].slice(from.length);
+    }
+    return k;
+  };
+  const sheets: EditDoc['sheets'] = {};
+  const follow = (e: SheetEdits): SheetEdits =>
+    e.nodes.some((n) => n.sym === 'block' && rename.has(n.params.module ?? ''))
+      ? { ...e, nodes: e.nodes.map((n) => (n.sym === 'block' && rename.has(n.params.module ?? '') ? { ...n, params: { ...n.params, module: rename.get(n.params.module!) } } : n)) }
+      : e;
+  // The moved edits take the place of what the new module's sheets hold (nothing: it has no edits).
+  for (const [k, e] of Object.entries(doc.sheets)) if (keyOf(k) === k) sheets[k] = follow(e);
+  for (const [k, e] of Object.entries(doc.sheets)) if (keyOf(k) !== k) sheets[keyOf(k)] = follow(e);
+  return { doc: { drawn: doc.drawn, sheets }, moved, lost };
+}
+
+/**
+ * Wires drawn with a bit range that their source no longer has (it was made
+ * narrower since): the sheet draws them, and the Verilog export writes them,
+ * as carrying all of the source, which their labels (`d[7:4]`) hide.
+ */
+export function staleSlices(d: Diagram, e: SheetEdits | undefined): { edge: string; source: string; text: string }[] {
+  const own = (n: DNode) => (n.kind === 'input' || n.kind === 'output' || n.kind === 'inout' || n.kind === 'const' ? n.label : (n.subLabel ?? n.label));
+  /** A symbol with several outputs names the one the wire leaves. */
+  const nameOf = (n: DNode, port: DPort) => (n.ports.filter((p) => p.dir === 'out').length > 1 ? `${own(n)}.${port.name}` : own(n));
+  return (e?.edges ?? []).flatMap((u) => {
+    const from = d.nodes.find((n) => n.id === u.source.node);
+    const port = from?.ports.find((p) => p.id === u.source.port);
+    if (!u.slice || !from || !port || u.slice.lo + u.slice.width <= port.width) return [];
+    const to = d.nodes.find((n) => n.id === u.target.node);
+    const hi = u.slice.lo + u.slice.width - 1;
+    const name = nameOf(from, port);
+    const text =
+      `The wire from ${name}${to ? ` to ${own(to)}` : ''} takes ${hi === u.slice.lo ? `bit ${hi}` : `bits ${hi}:${u.slice.lo}`}, ` +
+      `but ${name} has ${port.width} bit${port.width === 1 ? '' : 's'} now: it carries all of ${name}. Set its bits again, or widen ${name}.`;
+    return [{ edge: u.id, source: from.id, text }];
+  });
+}
+
 /** Whether two sets of files are the same names with the same text. */
 export function sameFiles(a: Record<string, string>, b: Record<string, string>): boolean {
   return Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([f, text]) => b[f] === text);
@@ -799,7 +933,10 @@ export const useStore = create<State>((set, get) => {
     // run through a symbol placed now are routed again, as after a move.
     const moved = placed.length ? new Set([...(opts.moved ?? []), ...placed]) : opts.moved;
     const g = buildGeometry({ netlist, pos, routes, measure, fast: !!opts.fast, moved, previous: s.layout });
-    const issues = checkSheet(netlist);
+    let issues = checkSheet(netlist);
+    // A wire whose bit range its source no longer has carries all of it, which its label hides (see staleSlices).
+    const stale = staleSlices(netlist, e);
+    if (stale.length) issues = { ...issues, flagged: new Set([...issues.flagged, ...stale.map((w) => w.edge)]), messages: [...issues.messages, ...stale.map((w) => w.text)] };
     const selection = new Set([...s.selection].filter((id) => netlist.nodes.some((n) => n.id === id) || netlist.edges.some((x) => x.id === id)));
     const patch: Partial<State> = { netlist, layout: g.layout, issues, selection: selection.size === s.selection.size ? s.selection : selection };
     if (!opts.fast && (placed.length || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
@@ -809,13 +946,20 @@ export const useStore = create<State>((set, get) => {
     set(patch);
   };
 
-  const writeAutosave = () => {
+  /** `force`: write even what the copy holds already (it may be another tab's work: see keepThisTab). */
+  const writeAutosave = (force = false) => {
     clearTimeout(autosaveTimer);
     autosaveTimer = undefined;
     if (get().autosavePaused) return;
+    // Whether the work is saved to a file goes along (only here, not in saved files): see restoreAutosave.
+    const text = JSON.stringify({ ...get().savedFile(), ...(get().dirty ? {} : { saved: true }) });
+    const keys = copyKeys(text);
+    // Nothing changed since this tab read or wrote the copy (it was only opened): writing it again would tell other
+    // tabs it changed.
+    if (!force && keys && copied && keys.work === copied.work && keys.view === copied.view) return;
     try {
-      // Whether the work is saved to a file goes along (only here, not in saved files): see restoreAutosave.
-      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ ...get().savedFile(), ...(get().dirty ? {} : { saved: true }) }));
+      localStorage.setItem(AUTOSAVE_KEY, text);
+      copied = keys;
     } catch {
       set({ notice: 'Could not keep a copy in this browser (storage is full or blocked). Use File › Save drawing.' });
     }
@@ -1093,6 +1237,32 @@ export const useStore = create<State>((set, get) => {
     await openFiles(files, { clearTop: true });
   };
 
+  /**
+   * After a new version of the files is open: the edits of parameterized modules follow them to
+   * the names new parameters give them (see followParamods), in the import's undo step, and the
+   * notice says so, and whose edits no longer show. `before`: the design before the import, and
+   * the notice then (what the import said itself stays).
+   */
+  const followParamodEdits = async (before: IRDesign | undefined, files: Record<string, string>, noticeBefore: string | undefined) => {
+    const s = get();
+    if (!before || !s.design || s.design === before || s.files !== files) return;
+    const f = followParamods(s.doc, before, s.design);
+    if (f.moved.length === 0 && f.lost.length === 0) return;
+    const titles = (ms: string[]) => ms.map(moduleTitle).join(', ');
+    const said = [
+      s.notice !== noticeBefore ? s.notice : undefined,
+      ...f.moved.map((m) => `Your edits on ${moduleTitle(m.from)} now apply to ${moduleTitle(m.to)}, its new parameters.`),
+      f.lost.length
+        ? `Your edits on ${titles(f.lost)} no longer show: no instance uses ${f.lost.length === 1 ? 'it' : 'them'} with those parameters now. Undo brings back the old code with them.`
+        : undefined,
+    ];
+    set({ doc: f.doc, notice: said.filter(Boolean).join(' ') });
+    if (f.doc === s.doc) return;
+    scheduleAutosave();
+    // The sheet on screen was opened without them.
+    if (f.doc.sheets[s.sheet] !== s.doc.sheets[s.sheet]) await get().openPath(get().path);
+  };
+
   return {
     files: {},
     moduleNames: [],
@@ -1115,7 +1285,7 @@ export const useStore = create<State>((set, get) => {
     interfaceOf,
 
     async setFiles(files, replace, opts = {}) {
-      const { files: current, putAside } = get();
+      const { files: current, putAside, design, notice } = get();
       if (replace) {
         // Replacing all files keeps the edits only when it is a new version of the open design:
         // it reuses a file name (File › Open Verilog of the same files), or the name of a removed
@@ -1124,6 +1294,7 @@ export const useStore = create<State>((set, get) => {
         // Open files it leaves out come back with Undo; so do the old versions of the others.
         pushFiles(files);
         await openFiles(files, { clearTop: true });
+        await followParamodEdits(design, files, notice);
         return;
       }
       // With `newVersion`, the same design under other file names: the edits stay. Open files it
@@ -1132,6 +1303,7 @@ export const useStore = create<State>((set, get) => {
       const all = opts.newVersion ? planImport(current, files).files : { ...current, ...files };
       pushFiles(all);
       await openFiles(all, { imported: files });
+      await followParamodEdits(design, all, notice);
     },
 
     async removeFile(name) {
@@ -1448,7 +1620,11 @@ export const useStore = create<State>((set, get) => {
         }
         if (p.sym === 'text') node.name = 'Note';
         const size = sizeNode(symbolNode(node, interfaceOf), measureFor(get().theme));
-        const pos = { x: snap(at.x - size.width / 2), y: snap(at.y - size.height / 2) };
+        let pos = { x: snap(at.x - size.width / 2), y: snap(at.y - size.height / 2) };
+        // A second click on the same spot would put the new symbol exactly over the last one, hiding it: it goes a
+        // little down and to the right instead, where both show.
+        const over = (p: Point) => (get().layout?.nodes ?? []).some((n) => Math.abs(n.x - p.x) < 1 && Math.abs(n.y - p.y) < 1);
+        for (let i = 0; i < 100 && over(pos); i++) pos = { x: pos.x + 2 * GRID, y: pos.y + 2 * GRID };
         return addNodes(e1, [{ node, pos }]);
       });
       if (!newIdValue) return;
@@ -1553,7 +1729,13 @@ export const useStore = create<State>((set, get) => {
     },
 
     setNodeParams(id, params) {
+      const before = get().doc;
       editSheet((e) => setParams(e, id, params));
+      // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
+      const s = get();
+      if (s.doc === before || !s.netlist) return;
+      const stale = staleSlices(s.netlist, s.doc.sheets[s.sheet]).filter((w) => w.source === id);
+      if (stale.length) set({ notice: stale.map((w) => w.text).join(' ') });
     },
 
     setEdgeSlice(id, slice) {
@@ -1707,6 +1889,8 @@ export const useStore = create<State>((set, get) => {
         return m && blockDesign?.modules[m]?.auto ? m : undefined;
       };
       const subs = new Map<string, SheetEdits>();
+      /** Where each sheet's symbols were drawn: the copies keep their places. */
+      const layouts = new Map<SheetEdits, LayoutResult>([[main, s.layout]]);
       const queue = main.nodes.map(autoOf);
       while (queue.length) {
         const m = queue.shift();
@@ -1718,6 +1902,7 @@ export const useStore = create<State>((set, get) => {
         }
         const d = toDrawing(sheet.netlist, sheet.layout, sheet.edits, interfaceOf);
         subs.set(m, d);
+        layouts.set(d, sheet.layout);
         queue.push(...d.nodes.map(autoOf));
       }
       // The files changed meanwhile: these blocks are gone.
@@ -1785,6 +1970,17 @@ export const useStore = create<State>((set, get) => {
       const sheets: EditDoc['sheets'] = { ...now.doc.sheets, [`d:${name}`]: retarget(main) };
       for (const [m, d] of subs) sheets[`d:${names.get(m)}`] = retarget(d);
       const doc: EditDoc = { drawn: [...now.doc.drawn, name, ...names.values()], sheets };
+      // A block is titled with its drawing's name now, longer than the automatic block's, and named under it: it
+      // grows, and what is right of it moves right to make room, so no block covers another one or its pins and wires.
+      const iface: InterfaceOf = (n) => (doc.drawn.includes(n) ? { label: n, ports: drawingPorts(doc.sheets[`d:${n}`]) } : interfaceOf(n));
+      const measure = measureFor(now.theme);
+      const copies: [SheetEdits, string][] = [[main, `d:${name}`], ...[...subs].map(([m, d]): [SheetEdits, string] => [d, `d:${names.get(m)}`])];
+      for (const [d, key] of copies) {
+        const e = sheets[key];
+        const was = new Map(layouts.get(d)!.nodes.map((n) => [n.id, { width: n.width, height: n.height }]));
+        const grown = new Map(e.nodes.filter((u) => d.nodes.some((x) => x.id === u.id && autoOf(x))).map((u) => [u.id, sizeNode(symbolNode(u, iface), measure)]));
+        sheets[key] = makeRoom(e, was, grown);
+      }
       // Say what the copy is made of, and what still comes from the Verilog files.
       const drawings = new Set(doc.drawn);
       const linked = new Set<string>();
@@ -1832,8 +2028,10 @@ export const useStore = create<State>((set, get) => {
         const f = parseSavedFile(text);
         // Whether the work was saved to a file when the browser kept it (see scheduleAutosave).
         const saved = (JSON.parse(text) as { saved?: unknown }).saved === true;
-        // This tab shows the browser's copy now, whichever tab wrote it: it keeps it up to date again.
+        // This tab shows the browser's copy now, whichever tab wrote it: it keeps it up to date again,
+        // from here (opening it changes nothing to write).
         set({ autosavePaused: false });
+        copied = copyKeys(text);
         await applySaved(f, !saved, parsePutAside(text));
         return true;
       } catch {
@@ -1847,7 +2045,12 @@ export const useStore = create<State>((set, get) => {
       scheduleAutosave();
     },
 
-    otherTabSaved() {
+    otherTabSaved(text) {
+      // A tab that only opened this work, or opened other sheets of it, overwrites nothing of this tab's: its copy
+      // holds the work this tab last wrote or read (with keys in another order, maybe), so this tab's next edits
+      // can go on replacing it.
+      const keys = copyKeys(text);
+      if (keys && copied && keys.work === copied.work) return;
       clearTimeout(autosaveTimer);
       autosaveTimer = undefined;
       set({ autosavePaused: true });
@@ -1855,7 +2058,7 @@ export const useStore = create<State>((set, get) => {
 
     keepThisTab() {
       set({ autosavePaused: false });
-      if (typeof localStorage !== 'undefined') writeAutosave();
+      if (typeof localStorage !== 'undefined') writeAutosave(true);
     },
 
     flushAutosave() {
