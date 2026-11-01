@@ -4,14 +4,19 @@
  * change is one undo step.
  */
 import { useEffect, useRef, useState } from 'react';
+import type { Diagram } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
+import { checkSheet } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
-import { sheetsUsing, useStore } from './store';
+import { sameFile, sheetsUsing, useStore } from './store';
 import { ui } from './ui-events';
 
-/** A text field that commits on Enter or blur and resets on Escape. */
+/**
+ * A text field that commits on Enter or blur and resets on Escape. `onCommit`
+ * may refuse the text by returning why; the field then shows it, like `check`.
+ */
 function Field({
   value,
   onCommit,
@@ -21,7 +26,7 @@ function Field({
   check,
 }: {
   value: string;
-  onCommit(v: string): void;
+  onCommit(v: string): string | void;
   placeholder?: string;
   id?: string;
   inputRef?: React.Ref<HTMLInputElement>;
@@ -29,19 +34,20 @@ function Field({
 }) {
   const [text, setText] = useState(value);
   const [err, setErr] = useState<string>();
+  // Set by Escape: the blur that follows must not commit (it still sees the typed text).
+  const cancelled = useRef(false);
   useEffect(() => {
     setText(value);
     setErr(undefined);
   }, [value]);
   const commit = () => {
-    if (text === value) return;
-    const problem = check?.(text);
-    if (problem) {
-      setErr(problem);
+    if (cancelled.current) {
+      cancelled.current = false;
       return;
     }
-    setErr(undefined);
-    onCommit(text);
+    if (text === value) return;
+    const problem = check?.(text) ?? onCommit(text);
+    setErr(problem || undefined);
   };
   return (
     <>
@@ -55,10 +61,11 @@ function Field({
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
+          // Both end the edit by leaving the field, and its blur commits: once, so a change is one undo step.
           if (e.key === 'Enter') {
-            commit();
             (e.target as HTMLInputElement).blur();
           } else if (e.key === 'Escape') {
+            cancelled.current = true;
             setText(value);
             setErr(undefined);
             (e.target as HTMLInputElement).blur();
@@ -92,11 +99,36 @@ function parseSlice(text: string, srcWidth: number): { lo: number; width: number
   return { lo, width: hi - lo + 1 };
 }
 
-/** The source lines Source highlights for a symbol, each once and in order (an automatic block has many cells, often several per line). */
-function srcLines(src: readonly SrcRange[]): number[] {
+/**
+ * The source lines Source highlights for a symbol, each once and in order (an automatic block
+ * has many cells, often several per line). Only lines of open files count, so a range from a
+ * damaged drawing file (lines 1 to 10⁹) costs no more than the file is long.
+ */
+function srcLines(src: readonly SrcRange[], files: Record<string, string>): number[] {
   const lines = new Set<number>();
-  for (const r of src) for (let l = r.startLine; l <= Math.max(r.startLine, r.endLine); l++) lines.add(l);
+  /** Lines per file, numbered as Source numbers them. */
+  const count = new Map<string, number>();
+  for (const r of src) {
+    const file = Object.keys(files).find((f) => sameFile(r.file, f));
+    if (file === undefined) continue;
+    if (!count.has(file)) count.set(file, files[file].split('\n').length);
+    const last = Math.min(Math.max(r.startLine, r.endLine), count.get(file)!);
+    for (let l = Math.max(1, r.startLine); l <= last; l++) lines.add(l);
+  }
   return [...lines].sort((a, b) => a - b);
+}
+
+/** Why the checks flag a wire (see checkSheet), which keeps one set of flagged wires for all reasons. */
+function wireTrouble(d: Diagram, id: string): string[] {
+  const e = d.edges.find((x) => x.id === id);
+  const into = e && d.nodes.flatMap((n) => n.ports).find((p) => p.id === e.target.port);
+  if (!e || !into) return [];
+  // On its own, a wire can only be flagged for its width; with the other wires into its input, all
+  // made as wide as that input, only for driving it together with them.
+  const alone = checkSheet({ ...d, edges: [e] }).flagged.has(id);
+  const others = d.edges.filter((x) => x.target.port === e.target.port).map((x) => ({ ...x, width: into.width, shift: undefined, label: undefined }));
+  const doubled = checkSheet({ ...d, edges: others }).flagged.has(id);
+  return [...(alone ? ['does not match the input it feeds'] : []), ...(doubled ? ['its input has another driver'] : [])];
 }
 
 /** Sorted line numbers, runs written as ranges: `31, 33, 35–48`. */
@@ -145,10 +177,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
             <span>Module name</span>
             <Field
               value={module}
-              onCommit={(v) => {
-                const err = s.renameDrawing(module, v);
-                if (err) s.setNotice(err);
-              }}
+              onCommit={(v) => s.renameDrawing(module, v)}
               check={(v) => {
                 const want = v.trim();
                 if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(want)) return 'Use letters, digits and _.';
@@ -250,7 +279,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
         ? (node.subLabel ?? '')
         : node.label;
     const renamed = !user && edits?.labels[id] !== undefined;
-    const lines = srcLines(node.src);
+    const lines = srcLines(node.src, s.files);
     return (
       <div className="inspector">
         <h3>{title}</h3>
@@ -379,8 +408,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
         </label>
       )}
       <p className="small muted">
-        {edge.width} bit{edge.width === 1 ? '' : 's'}
-        {s.issues.flagged.has(id) ? ' · does not match the input it feeds' : ''}
+        {[`${edge.width} bit${edge.width === 1 ? '' : 's'}`, ...(s.issues.flagged.has(id) ? wireTrouble(s.netlist, id) : [])].join(' · ')}
       </p>
       <div className="prop-actions">
         {manual && <button onClick={() => s.setEdgeRoute(id, undefined)}>Route automatically</button>}

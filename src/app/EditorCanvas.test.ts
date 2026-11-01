@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LEdge, Point } from '../layout/elk-layout';
-import { sharedSegment } from './EditorCanvas';
+import { draftRoute, sharedSegment } from './EditorCanvas';
 
 const pts = (...xy: number[]): Point[] => xy.flatMap((v, i) => (i % 2 ? [] : [{ x: v, y: xy[i + 1] }]));
 
@@ -38,5 +38,22 @@ describe('sharedSegment', () => {
   it('ignores wires of other nets', () => {
     const other = wire('w:9', 'u:2.out', pts(127, 110, 150, 110, 150, 150, 320, 150));
     expect(sharedSegment([toXor, other], 'w:5', 1)).toBe(false);
+  });
+});
+
+describe('draftRoute', () => {
+  // An AND's output Y at (280,260), a bend above it, and an Output's input pin at (540,260).
+  const y = { x: 280, y: 260 };
+  const bend = { x: 280, y: 140 };
+  const pin = { x: 540, y: 260 };
+
+  it('enters the target pin the way the stored wire does, not sideways', () => {
+    const draft = draftRoute([y, bend, pin], 'EAST', 'WEST');
+    expect(draft).toEqual(pts(280, 260, 290, 260, 290, 140, 530, 140, 530, 260, 540, 260));
+  });
+
+  it('runs to the pointer while no pin is under it, and shows a plain elbow before the first bend', () => {
+    expect(draftRoute([y, bend, { x: 400, y: 200 }], 'EAST')).toEqual(pts(280, 260, 290, 260, 290, 140, 400, 140, 400, 200));
+    expect(draftRoute([y, pin], 'EAST', 'WEST')).toEqual(pts(280, 260, 540, 260));
   });
 });

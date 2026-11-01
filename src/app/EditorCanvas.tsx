@@ -105,6 +105,19 @@ export function sharedSegment(edges: readonly LEdge[], id: string, seg: number):
   return false;
 }
 
+/**
+ * The dashed draft of a wire being drawn through `points` (pin or wire, bends,
+ * pointer or target pin). With bends it has the shape connectEnds will store:
+ * out of the start pin first, and into the target pin the way it faces. A wire
+ * without bends is routed when it is made; until then a plain elbow shows where
+ * it goes.
+ */
+// Exported for the tests.
+// oxlint-disable-next-line react/only-export-components
+export function draftRoute(points: Point[], startSide?: Side, endSide?: Side): Point[] {
+  return points.length > 2 ? drawnRoute(points, startSide, endSide) : orthogonalize(points);
+}
+
 function Ghost({ at }: { at: Point }) {
   const placing = useStore((s) => s.placing);
   const themeName = useStore((s) => s.theme);
@@ -330,14 +343,13 @@ export function EditorCanvas() {
     if (ok || !m.dragging) cancelWire();
   };
 
-  const updateDraft = (w: Point) => {
+  /** Redraw the wire being drawn, to the pointer at `w`, or onto the pin `over` when it hovers one. */
+  const updateDraft = (w: Point, over?: string) => {
     const m = mode.current;
     if (m.kind !== 'wire') return;
-    const start = m.at;
-    const pts = [start, ...m.bends, { x: snap(w.x), y: snap(w.y) }];
-    // Same shape as the wire connectEnds will store: out of the pin first, then through the bends.
-    const side = m.from.kind === 'port' && m.bends.length ? portInfo(m.from.port)?.port.side : undefined;
-    setWireDraft(side ? drawnRoute(pts, side) : orthogonalize(pts));
+    const target = over && !(m.from.kind === 'port' && m.from.port === over) ? portInfo(over)?.port : undefined;
+    const startSide = m.from.kind === 'port' ? portInfo(m.from.port)?.port.side : undefined;
+    setWireDraft(draftRoute([m.at, ...m.bends, target ? { x: target.x, y: target.y } : { x: snap(w.x), y: snap(w.y) }], startSide, target?.side));
   };
 
   if (!layout) return null;
@@ -477,7 +489,7 @@ export function EditorCanvas() {
         if (m.kind === 'none' || m.kind === 'wire') {
           const hit = hitFrom(m.kind === 'wire' ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target);
           setHoverPort(hit.port?.port);
-          if (m.kind === 'wire') updateDraft(w);
+          if (m.kind === 'wire') updateDraft(w, hit.port?.port);
           return;
         }
         const far = (cx: number, cy: number, d = 3) => Math.abs(ev.clientX - cx) + Math.abs(ev.clientY - cy) > d;

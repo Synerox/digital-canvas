@@ -147,13 +147,15 @@ export function CodePanel() {
     for (const r of ranges) {
       if (!codeFile) continue;
       if (!sameFile(r.file, codeFile)) continue;
-      for (let l = r.startLine; l <= r.endLine; l++) set.add(l);
+      // Only the file's own lines: a damaged drawing file can give any range (lines 1 to 10⁹).
+      for (let l = Math.max(1, r.startLine); l <= Math.min(r.endLine, lines.length); l++) set.add(l);
     }
     return set;
-  }, [ranges, codeFile]);
+  }, [ranges, codeFile, lines]);
 
   useEffect(() => {
-    const first = Math.min(...marked);
+    let first = Infinity;
+    for (const l of marked) first = Math.min(first, l);
     if (!Number.isFinite(first) || !box.current) return;
     const el = box.current.querySelector(`[data-line="${first}"]`) as HTMLElement | null;
     el?.scrollIntoView({ block: 'center', behavior: 'smooth' });

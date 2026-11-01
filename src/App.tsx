@@ -68,6 +68,9 @@ function textInUse(t: EventTarget | null): Element | undefined {
   if (target?.closest('.canvas')) return undefined;
   const pane = target?.closest(TEXT_PANES);
   if (pane) return pane;
+  // Selected text counts only while nothing else has the focus. A click on a button (the hierarchy,
+  // the library, the toolbar) moves the focus but leaves the text selected: the keys are the drawing's again.
+  if (target && target !== document.body && target !== document.documentElement) return undefined;
   const sel = document.getSelection();
   if (!sel || sel.isCollapsed) return undefined;
   const at = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
@@ -132,20 +135,29 @@ export default function App() {
   // Keyboard shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (ownsKeys(e.target) || document.querySelector('.modal-backdrop')) return;
-      const st = useStore.getState();
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
       const take = () => {
         e.preventDefault();
         e.stopPropagation();
       };
+      const modal = !!document.querySelector('.modal-backdrop');
+      // Save and Open are the app's wherever the focus is: the browser's own (save or open the page) is never wanted.
+      if (mod && !e.altKey && (k === 's' || k === 'o')) {
+        take();
+        // A name being typed in the Inspector is committed first (its fields commit when they lose the focus), so the file has it.
+        if (!modal && ownsKeys(e.target) && e.target instanceof HTMLElement) e.target.blur();
+        if (k === 's') saveDrawing();
+        // Not from a dialog: the drawing would replace what the dialog is about.
+        else if (!modal) openDrawing();
+        return;
+      }
+      if (ownsKeys(e.target) || modal) return;
+      const st = useStore.getState();
       const text = textInUse(e.target);
       if (mod && !e.altKey) {
         if (k === 'z' && !e.shiftKey) return take(), st.undo();
         if ((k === 'z' && e.shiftKey) || k === 'y') return take(), st.redo();
-        if (k === 's') return take(), saveDrawing();
-        if (k === 'o') return take(), openDrawing();
         if (k === 'i') return take(), setShowImport(true);
         if (text) {
           // Select all selects the pane's text, not the whole page; copy and the rest are the browser's.

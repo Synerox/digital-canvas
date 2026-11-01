@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { LayoutResult } from '../layout/elk-layout';
 import { downloadBlob, exportSvg, svgToPng } from '../render/export';
 import { THEMES, type ThemeName } from '../render/theme';
+import { useEscape } from './Dialogs';
 
 interface Props {
   layout: LayoutResult;
@@ -16,6 +17,10 @@ export function ExportDialog({ layout, initialTheme, name, onClose }: Props) {
   const [message, setMessage] = useState<string>();
   const theme = THEMES[themeName];
   const svg = exportSvg(layout, theme);
+  const box = useRef<HTMLDivElement>(null);
+  useEscape(onClose);
+  // Focus moves into the dialog, off the button that opened it (Enter there would open it again).
+  useEffect(() => box.current?.focus(), []);
 
   useEffect(() => {
     let url: string | undefined;
@@ -54,10 +59,10 @@ export function ExportDialog({ layout, initialTheme, name, onClose }: Props) {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={`Export ${name}`} tabIndex={-1} ref={box} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <b>Export {name}</b>
-          <button className="icon" onClick={onClose}>
+          <button className="icon" onClick={onClose} aria-label="Close">
             ×
           </button>
         </div>
