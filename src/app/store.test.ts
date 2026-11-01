@@ -840,6 +840,23 @@ describe('store', () => {
     expect(st().doc.drawn).toEqual(['module_']);
   }, 60_000);
 
+  it('refuses to give a pin the name another pin has (F13)', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('pins');
+    await settle();
+    st().startPlacing({ sym: 'input' });
+    st().placeAt({ x: 0, y: 0 }, true);
+    st().placeAt({ x: 0, y: 100 }, false);
+    await settle();
+    const pins = st().netlist!.nodes.filter((n) => n.kind === 'input');
+    expect(pins.map((n) => n.label)).toEqual(['in1', 'in2']);
+    st().renameItem(pins[1].id, 'in1');
+    expect(st().notice).toMatch(/Another pin is named in1/);
+    expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['in1', 'in2']);
+    st().renameItem(pins[1].id, 'b');
+    expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['in1', 'b']);
+  }, 60_000);
+
   it('shows imported Verilog that the open design does not use (C19)', async () => {
     await open({ [AUCTION_FILE]: AUCTION_SOURCE });
     await st().setFiles({ 'pasted.v': HALF }, false);

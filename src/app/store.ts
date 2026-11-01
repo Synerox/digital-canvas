@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { type Diagram, type Side, buildDiagram } from '../core/diagram';
+import { type DNode, type Diagram, type Side, buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES, RULES, type RuleId } from '../core/rules';
 import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy } from '../core/ir';
 import { parseYosysJson } from '../core/yosys-json';
@@ -698,10 +698,10 @@ export const useStore = create<State>((set, get) => {
       routes = pinned.routes;
     } else if (netlist.nodes.some((n) => !pos[n.id])) {
       placed = netlist.nodes.filter((n) => !pos[n.id]).map((n) => n.id);
-      pos = placeMissing(netlist, pos, s.baseLayout, (n) => sizeNode(n, measure));
+      pos = placeMissing(netlist, pos, s.baseLayout, (n) => sizeNode(n, measure), routes);
     }
-    // placeMissing keeps symbols apart but not off wires: stored wires that run through a
-    // symbol placed now are routed again, as after a move.
+    // placeMissing keeps symbols apart and off nearby wires when it can; stored wires that still
+    // run through a symbol placed now are routed again, as after a move.
     const moved = placed.length ? new Set([...(opts.moved ?? []), ...placed]) : opts.moved;
     const g = buildGeometry({ netlist, pos, routes, measure, fast: !!opts.fast, moved, previous: s.layout });
     const issues = checkSheet(netlist);
@@ -798,7 +798,7 @@ export const useStore = create<State>((set, get) => {
       const elk = await elkOf(cacheKey, base);
       if (!elk) return undefined;
       if (!isPinned(e)) ({ pos, routes } = layoutToEdits(e, elk, 'none'));
-      else pos = placeMissing(netlist, pos, elk, (n) => sizeNode(n, measure));
+      else pos = placeMissing(netlist, pos, elk, (n) => sizeNode(n, measure), routes);
     }
     return { netlist, edits: e, layout: buildGeometry({ netlist, pos, routes, measure }).layout };
   };
@@ -1429,6 +1429,16 @@ export const useStore = create<State>((set, get) => {
     },
 
     renameItem(id, text) {
+      const d = get().netlist;
+      const isPin = (n: DNode) => n.kind === 'input' || n.kind === 'output' || n.kind === 'inout';
+      const n = d?.nodes.find((x) => x.id === id);
+      const want = text.trim() ? verilogIdent(text.trim()) : undefined;
+      // Two pins of one name would be two ports of one name: the export would rename the second.
+      const other = n && want && isPin(n) ? d!.nodes.find((x) => x.id !== id && isPin(x) && verilogIdent(x.label) === want) : undefined;
+      if (other) {
+        set({ notice: `Another pin is named ${other.label}; the Verilog would call this one ${want}_2. Pick another name.` });
+        return;
+      }
       editSheet((e) => rename(e, id, text));
     },
 
@@ -1500,8 +1510,9 @@ export const useStore = create<State>((set, get) => {
       const where = pasteSpot(from, s.layout.nodes);
       const at2 = { x: snap(where.x), y: snap(where.y) };
       let pasted: string[] = [];
-      editSheet((e) => {
-        const [next, ids] = pasteClip(e, clip, at2);
+      editSheet((e, d) => {
+        // The sheet's netlist, so imported pins and instances count when pasted names are made unique.
+        const [next, ids] = pasteClip(e, clip, at2, d);
         pasted = ids;
         return next;
       });

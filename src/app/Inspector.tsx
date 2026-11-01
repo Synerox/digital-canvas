@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Diagram } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
-import { checkSheet } from '../editor/check';
+import { checkSheet, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
@@ -408,7 +408,11 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
         </label>
       )}
       <p className="small muted">
-        {[`${edge.width} bit${edge.width === 1 ? '' : 's'}`, ...(s.issues.flagged.has(id) ? wireTrouble(s.netlist, id) : [])].join(' · ')}
+        {[
+          // A scaled wire says what it brings to its input, as the export writes it.
+          `${edge.width} bit${edge.width === 1 ? '' : 's'}${wireShift(edge) ? ` ${scaleNote(wireShift(edge))} (${edge.width + wireShift(edge)} bits)` : ''}`,
+          ...(s.issues.flagged.has(id) ? wireTrouble(s.netlist, id) : []),
+        ].join(' · ')}
       </p>
       <div className="prop-actions">
         {manual && <button onClick={() => s.setEdgeRoute(id, undefined)}>Route automatically</button>}
