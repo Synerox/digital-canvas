@@ -2,7 +2,6 @@
  * Layout: Diagram -> ELK layered graph -> absolute positions.
  * Signals flow left to right; inputs sit in the first layer, outputs in the last.
  */
-import ELK from 'elkjs/lib/elk.bundled.js';
 import type { ElkExtendedEdge, ElkNode, ElkPort } from 'elkjs/lib/elk-api';
 import type { DEdge, DNode, Diagram, Side } from '../core/diagram';
 
@@ -150,10 +149,97 @@ function sizeNode(n: DNode, measure: MeasureText): Sized {
   return { width, height, ports };
 }
 
-let elkInstance: InstanceType<typeof ELK> | undefined;
+export interface ElkLike {
+  layout(graph: ElkNode): Promise<ElkNode>;
+  terminateWorker?(): void;
+}
+
+/** Makes a worker ELK; it calls `failed` if the worker cannot load or crashes. */
+export type ElkFactory = (failed: () => void) => ElkLike;
+
+interface Job {
+  graph: ElkNode;
+  /** The ELK the job runs on now; results from any other one are ignored. */
+  elk?: ElkLike;
+  resolve(out: ElkNode): void;
+  reject(e: Error): void;
+}
+
+let elkInstance: ElkLike | undefined;
+let elkFactory: ElkFactory | undefined;
+/** Layouts still running, so they can be stopped or moved to another ELK. */
+const running = new Set<Job>();
+
+/** Thrown by layoutDiagram when cancelLayouts() stopped it. */
+export class LayoutCancelled extends Error {
+  constructor() {
+    super('Layout cancelled');
+  }
+}
+
+async function inProcessElk(): Promise<ElkLike> {
+  return new (await import('elkjs/lib/elk.bundled.js')).default();
+}
+
+function makeElk(factory: ElkFactory): ElkLike {
+  const elk: ElkLike = factory(() => workerFailed(elk));
+  return elk;
+}
+
+/** The worker could not load or crashed: run on the main thread from now on, and redo its layouts there. */
+function workerFailed(elk: ElkLike): void {
+  if (elkInstance !== elk) return;
+  elk.terminateWorker?.();
+  elkFactory = undefined;
+  elkInstance = undefined;
+  void getElk().then((fallback) => {
+    for (const job of running) if (job.elk === elk) start(job, fallback);
+  });
+}
+
+async function getElk(): Promise<ElkLike> {
+  // The in-process ELK is loaded only when no other one was set (tests, no workers).
+  return (elkInstance ??= await inProcessElk());
+}
+
+function start(job: Job, elk: ElkLike): void {
+  job.elk = elk;
+  elk.layout(job.graph).then(
+    (out) => {
+      if (job.elk !== elk || !running.delete(job)) return;
+      job.resolve(out);
+    },
+    (e: unknown) => {
+      if (job.elk !== elk || !running.delete(job)) return;
+      job.reject(e instanceof Error ? e : new Error(String(e)));
+    },
+  );
+}
+
+/**
+ * Use another ELK. The app passes a factory for an ELK that runs in a Web
+ * Worker, so a long layout does not freeze the page and can be stopped. With
+ * no factory the in-process ELK is used (tests do this).
+ */
+export function setElkFactory(factory: ElkFactory | undefined): void {
+  elkInstance = factory ? makeElk(factory) : undefined;
+  elkFactory = factory;
+}
+
+/**
+ * Stop every running layout (they reject with LayoutCancelled). Only a worker
+ * ELK can be stopped; with the in-process ELK this does nothing.
+ */
+export function cancelLayouts(): void {
+  if (running.size === 0 || !elkFactory || !elkInstance?.terminateWorker) return;
+  elkInstance.terminateWorker();
+  elkInstance = makeElk(elkFactory);
+  const jobs = [...running];
+  running.clear();
+  for (const job of jobs) job.reject(new LayoutCancelled());
+}
 
 export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMeasure): Promise<LayoutResult> {
-  const elk = (elkInstance ??= new ELK());
   const sized = new Map<string, Sized>();
   for (const n of d.nodes) sized.set(n.id, sizeNode(n, measure));
 
@@ -225,7 +311,12 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
     edges,
   };
 
-  const out = await elk.layout(graph);
+  const elk = await getElk();
+  const out = await new Promise<ElkNode>((resolve, reject) => {
+    const job: Job = { graph, resolve, reject };
+    running.add(job);
+    start(job, elk);
+  });
 
   const byId = new Map(d.nodes.map((n) => [n.id, n]));
   const nodes: LNode[] = (out.children ?? []).map((c) => {

@@ -3,11 +3,11 @@ import { buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES, type RuleId } from '../core/rules';
 import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy } from '../core/ir';
 import { parseYosysJson } from '../core/yosys-json';
-import { withFlattened } from '../core/flatten';
+import { flatCellCount, withFlattened } from '../core/flatten';
 import { withAutoBlocks } from '../core/partition';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
-import { type LayoutResult, layoutDiagram } from '../layout/elk-layout';
+import { LayoutCancelled, type LayoutResult, cancelLayouts, layoutDiagram } from '../layout/elk-layout';
 import { canvasMeasure } from '../render/export';
 import { THEMES, type ThemeName } from '../render/theme';
 import { YosysError, elaborate } from '../yosys/client';
@@ -28,7 +28,11 @@ export const EXAMPLES: Record<ExampleName, { label: string; files: Record<string
   fruit: { label: 'Fruit Battle (single module)', files: { [FRUIT_FILE]: FRUIT_SOURCE } },
 };
 
-export type Status = 'idle' | 'loading' | 'elaborating' | 'layout' | 'ready' | 'error';
+/** too-large: the full circuit was held back by the size guard (see `bigFlat`). */
+export type Status = 'idle' | 'loading' | 'elaborating' | 'layout' | 'ready' | 'too-large' | 'error';
+
+/** Above this many cells the full circuit is only drawn after the user asks again. */
+export const FLAT_CELL_LIMIT = 250;
 
 interface State {
   files: Record<string, string>;
@@ -56,6 +60,8 @@ interface State {
   theme: ThemeName;
   rules: ReadonlySet<RuleId>;
   elapsedMs?: number;
+  /** The full circuit held back while status is 'too-large'. */
+  bigFlat?: { module: string; cells: number };
 
   setFiles(files: Record<string, string>, replace: boolean): Promise<void>;
   removeFile(name: string): Promise<void>;
@@ -65,6 +71,8 @@ interface State {
   viewDesign(): IRDesign | undefined;
   rebuild(): Promise<void>;
   openPath(path: PathEntry[]): Promise<void>;
+  /** Draw the full circuit that `bigFlat` held back. */
+  drawBigFlat(): Promise<void>;
   enterInstance(instance: string, module: string): Promise<void>;
   select(nodeId: string | undefined): void;
   selectLine(file: string, line: number): void;
@@ -75,9 +83,14 @@ interface State {
 }
 
 const layoutCache = new Map<string, LayoutResult>();
+/** Modules whose large full circuit the user chose to draw (cleared on rebuild). */
+const flatAllowed = new Set<string>();
 /** Incremented by every rebuild/navigation, so a slow older call cannot overwrite a newer result. */
 let rebuildGen = 0;
 let navSeq = 0;
+
+/** Resolve after pending events (clicks, rendering) have been handled. */
+const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 /** True when a Yosys src file name refers to the uploaded file (Yosys may add directories). */
 export function sameFile(srcFile: string, file: string): boolean {
@@ -153,6 +166,7 @@ export const useStore = create<State>((set, get) => ({
     set({ moduleNames, topOverride });
     if (Object.keys(files).length === 0) {
       navSeq++;
+      cancelLayouts();
       set({
         design: undefined,
         blockDesign: undefined,
@@ -183,6 +197,7 @@ export const useStore = create<State>((set, get) => ({
       const view = get().viewMode === 'blocks' ? blockDesign : design;
       const hierarchy = buildHierarchy(view);
       layoutCache.clear();
+      flatAllowed.clear();
       // Keep the current drill-down path when it still exists in the new design.
       const old = get().path;
       const path: PathEntry[] = [{ instance: design.top, module: design.top }];
@@ -209,21 +224,53 @@ export const useStore = create<State>((set, get) => ({
     const view = get().viewDesign();
     if (!design || !view || path.length === 0) return;
     const seq = ++navSeq;
+    // This navigation replaces any layout still running (for example a large full circuit).
+    cancelLayouts();
     const module = path[path.length - 1].module;
-    set({ status: 'layout', path, selected: undefined, highlighted: new Set(), codeRanges: [] });
+    set({ status: 'layout', path, selected: undefined, highlighted: new Set(), codeRanges: [], bigFlat: undefined });
     const key = `${viewMode}:${module}`;
     let layout = layoutCache.get(key);
+    if (!layout && viewMode === 'flat' && !flatAllowed.has(module)) {
+      const cells = flatCellCount(view, module);
+      if (cells > FLAT_CELL_LIMIT) {
+        set({ layout: undefined, status: 'too-large', bigFlat: { module, cells } });
+        return;
+      }
+    }
+    const stale = () => seq !== navSeq || get().design !== design || get().rules !== rules || get().viewMode !== viewMode;
     if (!layout) {
+      // A full circuit can take a while to build: let the page draw the status first,
+      // and skip the work if the user has already moved on.
+      if (viewMode === 'flat') {
+        await nextTask();
+        if (stale()) return;
+      }
       const source = viewMode === 'flat' ? withFlattened(view, module) : view;
       const diagram = buildDiagram(source, module, rules);
-      layout = await layoutDiagram(diagram, canvasMeasure(THEMES[theme].font));
+      if (viewMode === 'flat') {
+        await nextTask();
+        if (stale()) return;
+      }
+      try {
+        layout = await layoutDiagram(diagram, canvasMeasure(THEMES[theme].font));
+      } catch (e) {
+        if (e instanceof LayoutCancelled) return;
+        throw e;
+      }
       // A newer navigation or rebuild happened while ELK was running.
-      if (seq !== navSeq || get().design !== design || get().rules !== rules || get().viewMode !== viewMode) return;
+      if (stale()) return;
       layoutCache.set(key, layout);
     }
     const m = view.modules[module];
     const file = findFile(get().files, m?.src[0]?.file);
     set({ layout, status: get().error ? 'error' : 'ready', codeFile: file ?? get().codeFile });
+  },
+
+  async drawBigFlat() {
+    const big = get().bigFlat;
+    if (!big || get().status !== 'too-large') return;
+    flatAllowed.add(big.module);
+    await get().openPath(get().path);
   },
 
   async enterInstance(instance, module) {

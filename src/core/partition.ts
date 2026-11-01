@@ -24,7 +24,7 @@
  * highlighting keep working; the block's own ID comes from its name.
  */
 import type { Bit, IRCell, IRDesign, IRModule, IRNet, IRPort, SrcRange } from './ir';
-import { sliceLabel } from './ir';
+import { inputPortBits, sliceLabel } from './ir';
 
 export interface PartitionOptions {
   /** Modules with fewer primitive cells are left as they are. */
@@ -52,7 +52,12 @@ const BLOCK_CLOSE = /\b(end|endcase|join|join_any|join_none|endfunction|endtask|
 
 /**
  * Paragraph number for every line (index 0 = line 1). A blank line starts a
- * new paragraph, except inside begin…end and similar blocks.
+ * new paragraph, except inside begin…end and similar blocks. always/initial
+ * blocks are paragraphs of their own (an `else` on the next line still
+ * belongs to them). Each branch of `ifdef/`else starts from the state before
+ * the `ifdef, and the state after `endif is the first branch's, so alternative
+ * headers such as two `always … begin` lines do not unbalance the count.
+ * Which branch is active is unknown here, so every branch gets paragraphs.
  */
 export function paragraphs(text: string): number[] {
   const lines = text.split('\n');
@@ -63,48 +68,82 @@ export function paragraphs(text: string): number[] {
   let blankRun = false;
   /** Inside a procedural block that has not reached depth > 0 yet or is still open. */
   let inProc = false;
+  /** A procedural block just ended: the next code line starts a paragraph, unless it is its `else`. */
   let afterProc = false;
+  /** Open preprocessor conditionals: the state at the `ifdef, and at the end of the first branch. */
+  interface Cond {
+    start: { depth: number; inProc: boolean; afterProc: boolean; para: number };
+    first?: { depth: number; inProc: boolean; afterProc: boolean };
+    maxPara: number;
+  }
+  const conds: Cond[] = [];
   for (const raw of lines) {
-    let line = raw;
-    // Strip comments (block comments may span lines) and strings.
+    // Strip comments (block comments may span lines) and strings (with \" escapes).
     let code = '';
     let i = 0;
-    while (i < line.length) {
+    while (i < raw.length) {
       if (inComment) {
-        const e = line.indexOf('*/', i);
+        const e = raw.indexOf('*/', i);
         if (e < 0) {
-          i = line.length;
+          i = raw.length;
         } else {
           inComment = false;
           i = e + 2;
         }
-      } else if (line.startsWith('//', i)) {
+      } else if (raw.startsWith('//', i)) {
         break;
-      } else if (line.startsWith('/*', i)) {
+      } else if (raw.startsWith('/*', i)) {
         inComment = true;
         i += 2;
-      } else if (line[i] === '"') {
-        const e = line.indexOf('"', i + 1);
-        i = e < 0 ? line.length : e + 1;
+      } else if (raw[i] === '"') {
+        i++;
+        while (i < raw.length && raw[i] !== '"') i += raw[i] === '\\' ? 2 : 1;
+        i++;
       } else {
-        code += line[i++];
+        code += raw[i++];
       }
     }
-    line = code;
-    const blank = raw.trim() === '';
-    const trimmed = line.trim();
-    if (blank) {
+    const trimmed = code.trim();
+    const directive = /^`(ifdef|ifndef|elsif|else|endif)\b/.exec(trimmed);
+    if (directive) {
+      out.push(para);
+      const d = directive[1];
+      const top = conds[conds.length - 1];
+      if (d === 'ifdef' || d === 'ifndef') {
+        conds.push({ start: { depth, inProc, afterProc, para }, maxPara: para });
+      } else if (top && d === 'endif') {
+        conds.pop();
+        if (top.first) ({ depth, inProc, afterProc } = top.first);
+        // Lines after the conditional must not share a paragraph number with a longer branch.
+        para = Math.max(top.maxPara, para);
+      } else if (top) {
+        top.first ??= { depth, inProc, afterProc };
+        top.maxPara = Math.max(top.maxPara, para);
+        ({ depth, inProc, afterProc, para } = top.start);
+      }
+      continue;
+    }
+    if (/^(module|macromodule|endmodule)\b/.test(trimmed)) {
+      depth = 0;
+      inProc = false;
+    }
+    if (raw.trim() === '') {
       if (depth <= 0 && !blankRun) para++;
       blankRun = true;
     } else if (trimmed !== '') {
-      // always/initial blocks are statements of their own: they start and end a paragraph.
-      if (depth <= 0 && (afterProc || /^(always\w*|initial)\b/.test(trimmed)) && !blankRun && out.length > 0) para++;
+      const continues = afterProc && depth <= 0 && /^else\b/.test(trimmed);
+      if (continues) {
+        inProc = true;
+      } else if (depth <= 0 && (afterProc || /^(always\w*|initial)\b/.test(trimmed)) && !blankRun && out.length > 0) {
+        para++;
+      }
       afterProc = false;
       blankRun = false;
     }
     out.push(para);
+    if (trimmed === '') continue;
     const before = depth;
-    depth += (line.match(BLOCK_OPEN) ?? []).length - (line.match(BLOCK_CLOSE) ?? []).length;
+    depth += (code.match(BLOCK_OPEN) ?? []).length - (code.match(BLOCK_CLOSE) ?? []).length;
     if (depth < 0) depth = 0;
     const ends = /;\s*$/.test(trimmed);
     if (before === 0 && /^(always\w*|initial)\b/.test(trimmed)) {
@@ -124,11 +163,16 @@ export function paragraphs(text: string): number[] {
 /**
  * Keys under which `name` is a parallel copy of another signal: one token is
  * replaced by a wildcard when it looks like a channel index (a single letter,
- * a number, or a word ending in a number or a capital letter).
+ * a number, or a word ending in a number or a capital letter), or one `[n]`
+ * index is replaced (array elements, generate-loop copies).
  */
 export function siblingKeys(name: string): string[] {
-  const tokens = name.split('_');
   const keys: string[] = [];
+  // Array elements and generate-loop copies: `acc[3]`, `lane[2].sum`.
+  for (const m of name.matchAll(/\[\d+\]/g)) {
+    keys.push(`${name.slice(0, m.index)}[#]${name.slice(m.index! + m[0].length)}`);
+  }
+  const tokens = name.split('_');
   tokens.forEach((t, i) => {
     let pattern: string | undefined;
     if (/^[A-Za-z]$/.test(t)) pattern = '#L';
@@ -145,6 +189,11 @@ export function siblingKeys(name: string): string[] {
 /** Common name for a set of sibling signals: `score_a`, `score_b` -> `score`. */
 function stemName(names: string[]): string {
   if (names.length < 2) return names[0] ?? '';
+  // `lane[0].sum`, `lane[1].sum` -> `lane[].sum`; `acc[0]`, `acc[1]` -> `acc`.
+  if (names.some((n) => /\[\d+\]/.test(n))) {
+    const generic = names.map((n) => n.replace(/\[\d+\]$/, '').replace(/\[\d+\]/g, '[]'));
+    if (generic.every((g) => g === generic[0])) return generic[0];
+  }
   const split = names.map((n) => n.split('_'));
   const len = split[0].length;
   if (split.every((s) => s.length === len)) {
@@ -160,6 +209,116 @@ function stemName(names: string[]): string {
     if (keep.length) return keep.join('_');
   }
   return names[0];
+}
+
+/** Strongly connected components of `nodes` (edges from `next`), as a component index per node. */
+function components(nodes: number[], next: (x: number) => readonly number[]): Map<number, number> {
+  const comp = new Map<number, number>();
+  const index = new Map<number, number>();
+  const low = new Map<number, number>();
+  const stack: number[] = [];
+  const onStack = new Set<number>();
+  let counter = 0;
+  let n = 0;
+  const open = (x: number) => {
+    index.set(x, counter);
+    low.set(x, counter++);
+    stack.push(x);
+    onStack.add(x);
+  };
+  for (const root of nodes) {
+    if (index.has(root)) continue;
+    open(root);
+    const work: [number, number][] = [[root, 0]];
+    while (work.length) {
+      const top = work[work.length - 1];
+      const x = top[0];
+      const out = next(x);
+      if (top[1] < out.length) {
+        const y = out[top[1]++];
+        if (!index.has(y)) {
+          open(y);
+          work.push([y, 0]);
+        } else if (onStack.has(y)) {
+          low.set(x, Math.min(low.get(x)!, index.get(y)!));
+        }
+        continue;
+      }
+      work.pop();
+      if (work.length) {
+        const p = work[work.length - 1][0];
+        low.set(p, Math.min(low.get(p)!, low.get(x)!));
+      }
+      if (low.get(x) === index.get(x)) {
+        let y: number;
+        do {
+          y = stack.pop()!;
+          onStack.delete(y);
+          comp.set(y, n);
+        } while (y !== x);
+        n++;
+      }
+    }
+  }
+  return comp;
+}
+
+/**
+ * Size of the upstream cone (inside `units`) of each candidate that is not
+ * itself upstream of another candidate. A candidate upstream of another has a
+ * strictly smaller cone, so it can never be the largest and is left out; this
+ * keeps a long chain of exported stages linear instead of quadratic.
+ */
+function coneSizes(
+  units: number[],
+  candidates: number[],
+  producersOf: Map<number, number[]>,
+  size: (u: number) => number,
+): Map<number, number> {
+  const prod = (x: number) => producersOf.get(x) ?? [];
+  const comp = components(units, prod);
+  const candidateComps = new Set(candidates.map((u) => comp.get(u)));
+  // Everything strictly upstream of a candidate's component.
+  const upstream = new Set<number>();
+  const stack: number[] = [];
+  for (const x of units) {
+    if (!candidateComps.has(comp.get(x))) continue;
+    for (const y of prod(x)) {
+      if (comp.get(y) === comp.get(x) || upstream.has(y)) continue;
+      upstream.add(y);
+      stack.push(y);
+    }
+  }
+  while (stack.length) {
+    for (const y of prod(stack.pop()!)) {
+      if (upstream.has(y)) continue;
+      upstream.add(y);
+      stack.push(y);
+    }
+  }
+  const byComp = new Map<number, number>();
+  const sizes = new Map<number, number>();
+  for (const u of candidates) {
+    if (upstream.has(u)) continue;
+    let n = byComp.get(comp.get(u)!);
+    if (n === undefined) {
+      const seen = new Set<number>([u]);
+      const todo = [u];
+      n = 0;
+      while (todo.length) {
+        const x = todo.pop()!;
+        n += size(x);
+        for (const y of prod(x)) {
+          if (seen.has(y)) continue;
+          seen.add(y);
+          todo.push(y);
+        }
+      }
+      byComp.set(comp.get(u)!, n);
+    }
+    sizes.set(u, n);
+  }
+  return sizes;
 }
 
 // ---------------------------------------------------------------------------
@@ -464,132 +623,207 @@ export function partitionModule(
     for (const [a, b] of pairs) join(a, b);
   }
 
+  /** Undirected neighbour weights between current groups. */
+  const neighbours = (g: Map<number, Map<number, number>>): Map<number, Map<number, number>> => {
+    const nb = new Map<number, Map<number, number>>();
+    const add = (x: number, y: number, k: number) => {
+      let m2 = nb.get(x);
+      if (!m2) nb.set(x, (m2 = new Map()));
+      m2.set(y, (m2.get(y) ?? 0) + k);
+    };
+    for (const [r, outs] of g) {
+      for (const [v, k] of outs) {
+        if (v < 0) continue;
+        add(r, v, k);
+        add(v, r, k);
+      }
+    }
+    return nb;
+  };
+
   // 5. Tiny groups (a couple of cells) join a connected neighbour written in the same place.
+  //    Several merges per round; a group touched this round waits for the next one.
   if (hasParagraphs) {
     const tiny = (r: number) => size(r) <= 3 || size(r) < 0.04 * prims.length;
     let changed = true;
     while (changed) {
       changed = false;
       const g = groupConsumers();
-      const rs = [...g.keys()].sort((a, b) => size(a) - size(b) || a - b);
+      const nb = neighbours(g);
+      const touched = new Set<number>();
+      const rs = [...g.keys()].sort((x, y) => size(x) - size(y) || x - y);
       for (const r of rs) {
-        if (dsu.find(r) !== r || !tiny(r)) continue;
+        if (touched.has(r) || !tiny(r)) continue;
         const pr = groupParas(r);
-        const weight = new Map<number, number>();
-        for (const [v, k] of g.get(r) ?? []) if (v >= 0) weight.set(v, (weight.get(v) ?? 0) + k);
-        for (const [o, outs] of g) if (o !== r && outs.has(r)) weight.set(o, (weight.get(o) ?? 0) + outs.get(r)!);
-        const best = [...weight.entries()]
-          .map(([v, k]) => ({ v: dsu.find(v), k, d: paraDistance(pr, groupParas(dsu.find(v))) }))
-          .filter((x) => x.d === 0)
-          .sort((a, b) => b.k - a.k || a.v - b.v)[0];
-        if (best && join(r, best.v)) {
+        const best = [...(nb.get(r) ?? [])]
+          .filter(([v]) => !touched.has(v) && paraDistance(pr, groupParas(v)) === 0)
+          .sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
+        if (best && join(r, best[0])) {
+          touched.add(r);
+          touched.add(best[0]);
           changed = true;
-          break;
         }
       }
     }
   }
 
-  // 6. Too many blocks: merge the smallest one into its closest neighbour.
+  // 6. Too many blocks: merge the smallest ones into their closest neighbour. Groups that
+  //    exchange no signals (independent output cones) go with the group that reads the
+  //    most of the same module inputs, or else the one written nearest.
+  const inputBitSet = inputPortBits(m);
+  const unitInputs: Set<number>[] = Array.from({ length: nUnits }, () => new Set());
+  prims.forEach((c, i) => {
+    for (const b of inputBits(c)) if (inputBitSet.has(b)) unitInputs[unitOfCell[i]].add(b);
+  });
   const roots = () => [...new Set(Array.from({ length: nUnits }, (_, u) => dsu.find(u)))];
-  let guard = nUnits;
-  while (roots().length > opt.maxBlocks && guard-- > 0) {
+  let count = roots().length;
+  while (count > opt.maxBlocks) {
     const g = groupConsumers();
-    const rs = roots().sort((a, b) => size(a) - size(b) || a - b);
+    const nb = neighbours(g);
+    const rs = [...g.keys()].sort((x, y) => size(x) - size(y) || x - y);
+    const reads = new Map<number, Set<number>>();
+    const firstLine = new Map<number, number>();
+    for (let u = 0; u < nUnits; u++) {
+      const r = dsu.find(u);
+      let set = reads.get(r);
+      if (!set) reads.set(r, (set = new Set()));
+      for (const b of unitInputs[u]) set.add(b);
+      firstLine.set(r, Math.min(firstLine.get(r) ?? Infinity, unitLine[u]));
+    }
+    const touched = new Set<number>();
     let merged = false;
     for (const r of rs) {
-      const weight = new Map<number, number>();
-      for (const [v, k] of g.get(r) ?? []) if (v >= 0) weight.set(v, (weight.get(v) ?? 0) + k);
-      for (const [o, outs] of g) if (o !== r && outs.has(r)) weight.set(o, (weight.get(o) ?? 0) + outs.get(r)!);
-      const best = [...weight.entries()].sort((a, b) => b[1] - a[1] || size(a[0]) - size(b[0]))[0];
-      if (best && join(r, best[0], true)) {
+      if (count <= opt.maxBlocks) break;
+      if (touched.has(r)) continue;
+      let target = [...(nb.get(r) ?? [])]
+        .filter(([v]) => !touched.has(v))
+        .sort((x, y) => y[1] - x[1] || size(x[0]) - size(y[0]) || x[0] - y[0])[0]?.[0];
+      if (target === undefined) {
+        const mine = reads.get(r)!;
+        const lr = firstLine.get(r)!;
+        let bestShared = -1;
+        let bestDist = Infinity;
+        for (const o of rs) {
+          if (o === r || touched.has(o)) continue;
+          let shared = 0;
+          for (const b of reads.get(o)!) if (mine.has(b)) shared++;
+          const dist = Math.abs((firstLine.get(o) ?? 0) - lr);
+          const dd = Number.isFinite(dist) ? dist : 1e9;
+          if (shared > bestShared || (shared === bestShared && dd < bestDist)) {
+            bestShared = shared;
+            bestDist = dd;
+            target = o;
+          }
+        }
+      }
+      if (target !== undefined && join(r, target, true)) {
+        touched.add(r);
+        touched.add(target);
+        count--;
         merged = true;
-        break;
       }
     }
     if (!merged) break;
   }
 
-  const finalRoots = roots();
-  if (finalRoots.length < 2) return undefined;
+  // Bucket units by group.
+  const byRoot = new Map<number, number[]>();
+  for (let u = 0; u < nUnits; u++) {
+    const r = dsu.find(u);
+    const l = byRoot.get(r);
+    if (l) l.push(u);
+    else byRoot.set(r, [u]);
+  }
+  // One block, or blocks of one or two cells on average, draw worse than the plain circuit.
+  if (byRoot.size < 2 || byRoot.size > prims.length / 2) return undefined;
 
   // Build blocks in source order.
-  const groups = finalRoots.map((r) => {
-    const units = Array.from({ length: nUnits }, (_, u) => u).filter((u) => dsu.find(u) === r);
-    const cells = units.flatMap((u) => unitCells[u]).sort((a, b) => a - b);
+  const groups = [...byRoot.values()].map((units) => {
+    const cells = units.flatMap((u) => unitCells[u]).sort((x, y) => x - y);
     const line = Math.min(...units.map((u) => unitLine[u]));
     return { units, cells, line };
   });
-  groups.sort((a, b) => a.line - b.line || a.cells[0] - b.cells[0]);
+  groups.sort((x, y) => x.line - y.line || x.cells[0] - y.cells[0]);
 
   // Names.
   const used = new Set<string>(m.cells.filter((c) => c.isInstance).map((c) => c.name));
-  const commentAbove = (line: number): string | undefined => {
+  const PRAGMA =
+    /^(?:verilator|synopsys|synthesis|pragma|spyglass|cadence|ambit)\b|^coverage\s+(?:on|off)\b|\b(?:lint_off|lint_on|translate_off|translate_on|full_case|parallel_case)\b/;
+  /** A `//` comment written just above `line` (banners and pragmas skipped), with the line it is on. */
+  const commentAbove = (line: number): { text: string; at: number } | undefined => {
     if (!Number.isFinite(line)) return undefined;
     const file = prims.find((c) => c.src[0]?.startLine === line)?.src[0]?.file;
     const text = file ? (sources[file] ?? Object.entries(sources).find(([k]) => file.endsWith('/' + k))?.[1]) : undefined;
     if (!text) return undefined;
     const lines = text.split('\n');
-    for (let l = line - 2; l >= 0; l--) {
+    for (let l = line - 2; l >= 0 && l >= line - 8; l--) {
       const t = lines[l].trim();
-      if (t === '') return undefined;
-      const c = /^\/\/+\s*(.+?)\s*$/.exec(t);
-      if (c) return c[1].replace(/[-=*#]+$/, '').trim().slice(0, 40) || undefined;
-      return undefined;
+      const c = /^\/\/+(.*)$/.exec(t);
+      if (!c) return undefined; // blank line or code: no heading
+      const words = c[1].replace(/^[-=*#~\s]+|[-=*#~\s]+$/g, '');
+      if (words === '') continue; // a banner rule
+      if (PRAGMA.test(words) || /[;{}]|<=|\bassign\b/.test(words)) continue; // pragma or commented-out code
+      return { text: words.slice(0, 40), at: l };
     }
     return undefined;
   };
-  return groups.map((g) => {
-    // Signals the block hands to the outside, with the size of their cone.
-    const exported = new Map<number, number>();
-    for (const u of g.units) {
-      const outsideUse = [...unitEdges.get(u)!.keys()].some((v) => v < 0 || dsu.find(v) !== dsu.find(g.units[0]));
-      if (outsideUse && unitNames[u] !== undefined) exported.set(u, unitCells[u].length);
-    }
-    const pickFrom = exported.size ? [...exported.keys()] : g.units.filter((u) => unitNames[u] !== undefined);
+  const comments = groups.map((g) => commentAbove(g.line));
+  const claims = new Map<number, number>();
+  for (const c of comments) if (c) claims.set(c.at, (claims.get(c.at) ?? 0) + 1);
+  return groups.map((g, gi) => {
+    const inGroup = new Set(g.units);
+    // Signals the block hands to the outside.
+    const exported = g.units.filter(
+      (u) => unitNames[u] !== undefined && [...unitEdges.get(u)!.keys()].some((v) => v < 0 || !inGroup.has(v)),
+    );
+    const pickFrom = exported.length ? exported : g.units.filter((u) => unitNames[u] !== undefined);
     // Main signal: the exported one with the largest upstream cone inside the block.
-    const upstream = (u: number): number => {
-      const seen = new Set<number>([u]);
-      const stack = [u];
-      while (stack.length) {
-        const x = stack.pop()!;
-        for (const y of g.units) {
-          if (seen.has(y)) continue;
-          if (unitEdges.get(y)!.has(x)) {
-            seen.add(y);
-            stack.push(y);
-          }
-        }
+    const producersIn = new Map<number, number[]>();
+    for (const y of g.units) {
+      for (const v of unitEdges.get(y)!.keys()) {
+        if (!inGroup.has(v)) continue;
+        const l = producersIn.get(v);
+        if (l) l.push(y);
+        else producersIn.set(v, [y]);
       }
-      let n = 0;
-      for (const y of seen) n += unitCells[y].length;
-      return n;
-    };
+    }
+    const cone = coneSizes(g.units, pickFrom, producersIn, (u) => unitCells[u].length);
     const ranked = pickFrom
-      .map((u) => ({ u, w: upstream(u) }))
-      .sort((a, b) => b.w - a.w || unitLine[a.u] - unitLine[b.u]);
+      .map((u) => ({ u, w: cone.get(u) ?? -1 }))
+      .sort((x, y) => y.w - x.w || unitLine[x.u] - unitLine[y.u]);
     const main = ranked[0]?.u;
-    let label = commentAbove(g.line);
-    if (!label && main !== undefined) {
+    const candidates: string[] = [];
+    // A comment names a block only when no other block starts under it.
+    const comment = comments[gi];
+    if (comment && claims.get(comment.at) === 1) candidates.push(comment.text);
+    if (main !== undefined) {
       const mainName = unitNames[main]!;
       const keys = new Set(siblingKeys(mainName));
       const sibs = ranked
         .map((r) => unitNames[r.u]!)
         .filter((n) => n === mainName || siblingKeys(n).some((k) => keys.has(k)));
-      label = stemName(sibs);
+      candidates.push(stemName(sibs), mainName);
     }
-    label = label || 'logic';
-    let unique = label;
-    for (let k = 2; used.has(unique); k++) unique = `${label}_${k}`;
-    used.add(unique);
-    return { label: unique, cellIds: g.cells.map((i) => prims[i].id) };
+    candidates.push('logic');
+    let label = candidates.find((c) => c && !used.has(c));
+    if (!label) {
+      const base = candidates.find(Boolean)!;
+      label = base;
+      for (let k = 2; used.has(label); k++) label = `${base}_${k}`;
+    }
+    used.add(label);
+    return { label, cellIds: g.cells.map((i) => prims[i].id) };
   });
 }
 
 // ---------------------------------------------------------------------------
 // Synthetic modules
 
-/** Choose public nets that cover `bits`, preferring ports and nets that cover many of them. */
+/**
+ * Choose public nets that cover `bits`: the net covering the most of them
+ * first, then the narrower net (so a block that reads `lo` is not given the
+ * wider output port `z = {hi, lo}`), then a module port name.
+ */
 function coverBits(
   bits: number[],
   netsOfBit: Map<number, IRNet[]>,
@@ -605,8 +839,8 @@ function coverBits(
     for (const [n, s] of score) {
       const better =
         s > bestS ||
-        (s === bestS && best && !portNames.has(best.name) && portNames.has(n.name)) ||
-        (s === bestS && best && portNames.has(best.name) === portNames.has(n.name) && n.bits.length < best.bits.length);
+        (s === bestS && best && n.bits.length < best.bits.length) ||
+        (s === bestS && best && n.bits.length === best.bits.length && !portNames.has(best.name) && portNames.has(n.name));
       if (better) {
         best = n;
         bestS = s;
@@ -749,8 +983,20 @@ export function buildAutoModules(
     }
   }
 
+  // Bits the parent sees driven by something other than an auto block:
+  // module inputs and the outputs of cells left in the parent (real instances).
+  const outsideDriven = inputPortBits(m);
+  for (const c of m.cells) {
+    if (blockOf.has(c.id)) continue;
+    for (const [p, bits] of Object.entries(c.connections)) {
+      if (c.directions[p] !== 'output') continue;
+      for (const b of bits) if (typeof b === 'number') outsideDriven.add(b);
+    }
+  }
+
   const children: IRModule[] = [];
   const instances: IRCell[] = [];
+  const chosen = new Set<string>();
   blocks.forEach((blk, i) => {
     const cells = blk.cellIds.map((id) => byId.get(id)!).filter(Boolean);
     const inBits: number[] = [];
@@ -785,10 +1031,13 @@ export function buildAutoModules(
     const assignedIn = new Set<number>();
     coverBits(inBits, netsOfBit, portNames).forEach((piece, k) => {
       let bits: Bit[] = piece.bits;
-      // Bring the whole bus in when none of it is computed here: the block diagram shows full buses.
+      // Bring the whole bus in when all of it comes from outside the blocks (a module input
+      // or a real instance): the block diagram then shows the full bus. A bus computed by
+      // another block is not widened, or the extra bits would look undriven (drawn as x) or
+      // add edges that do not exist.
       if (
         piece.net &&
-        piece.net.bits.every((b) => typeof b === 'number' && drivenBy.get(b) !== i && !assignedIn.has(b))
+        piece.net.bits.every((b) => typeof b === 'number' && outsideDriven.has(b) && !assignedIn.has(b))
       ) {
         bits = piece.net.bits;
       } else if (piece.net) {
@@ -808,7 +1057,8 @@ export function buildAutoModules(
 
     bundleSiblingPorts(ports, m.nets);
     let name = autoModuleName(m.name, blk.label);
-    for (let k = 2; taken.has(name); k++) name = autoModuleName(m.name, `${blk.label}_${k}`);
+    for (let k = 2; taken.has(name) || chosen.has(name); k++) name = autoModuleName(m.name, `${blk.label}_${k}`);
+    chosen.add(name);
     // Port names need a net of the same name (pins look up their source location there).
     // Bundles get a hidden net, so wires inside still carry the member names.
     const extraNets: IRNet[] = ports
