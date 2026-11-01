@@ -34,6 +34,17 @@ module top(input oe, input [3:0] d, output [3:0] q); wire [3:0] bus; sub u(.io(b
     expect(edgesInto(d, 'out:bus')).toHaveLength(2);
   }, T);
 
+  it('records which bits a second driver of a bus drives, not only in its label', async () => {
+    const src = `module m(input e1, e2, input [3:0] d1, d2, output [1:0] bus);
+  wire [3:0] t2 = e2 ? d2 : 4'bz;
+  assign bus = e1 ? d1[1:0] : 2'bz;
+  assign bus = t2[3:2];
+endmodule`;
+    const d = buildDiagram(await design({ 'm.v': src }), 'm');
+    const partial = edgesInto(d, 'out:bus').filter((e) => !e.fullSource);
+    expect(partial.map((e) => [e.label, e.bits])).toEqual([['t2[3:2]', { lo: 2, width: 2 }]]);
+  }, T);
+
   it('draws a memory as one block linking writes and reads', async () => {
     const src = `module m(input clk, we, input [1:0] wa, ra, input [7:0] wd, output [7:0] rd);
   reg [7:0] mem [0:3]; always @(posedge clk) if (we) mem[wa] <= wd; assign rd = mem[ra]; endmodule`;
@@ -92,6 +103,35 @@ module top(input clk, input [7:0] d, output [7:0] q); sub #(.W(8)) u(.CLK(clk), 
     expect(yosysArgs(files)[1]).toMatch(/^read_verilog -sv pkg\.sv /);
     expect(declaredModules(files)).toEqual(['a', 'top']);
   });
+});
+
+describe('stable cell IDs', () => {
+  const mux4 = (items: string[]) => ({
+    'mux4.v': `module mux4(input [3:0] d0, d1, d2, d3, input [1:0] sel, output reg [3:0] y);
+  always @* case (sel)
+${items.map((x) => `    ${x}`).join('\n')}
+  endcase
+endmodule
+`,
+  });
+  const consts = (d: ReturnType<typeof buildDiagram>) => new Map(d.nodes.filter((n) => n.kind === 'const').map((n) => [n.id, n.label]));
+
+  it('tells equal compares apart by their constant operands, so reordered case items keep their IDs', async () => {
+    const ordered = await design(mux4(["2'd0: y = d0;", "2'd1: y = d1;", "2'd2: y = d2;", 'default: y = d3;']));
+    const reordered = await design(mux4(["2'd2: y = d2;", "2'd1: y = d1;", "2'd0: y = d0;", 'default: y = d3;']));
+    // Yosys gives these compares no source text, so the ID is made of what they connect to.
+    const eqs = ordered.modules.mux4.cells.filter((c) => c.type === '$eq').map((c) => c.id);
+    expect(eqs.sort()).toEqual(["$eq{A=sel,B=2'd0,Y=}", "$eq{A=sel,B=2'd1,Y=}", "$eq{A=sel,B=2'd2,Y=}"]);
+    // Saved positions and deletions are keyed by these IDs: each must still name the same constant.
+    const before = consts(buildDiagram(ordered, 'mux4'));
+    expect([...before.values()].sort()).toEqual(["2'd0", "2'd1", "2'd2"]);
+    expect(consts(buildDiagram(reordered, 'mux4'))).toEqual(before);
+  }, T);
+
+  it('keeps the IDs of cells with source text or no constant operands', async () => {
+    const d = await design({ 'g.v': "module g(input [3:0] a, b, output [3:0] y, z); assign y = a & b; assign z = a + 4'd1; endmodule" });
+    expect(d.modules.g.cells.map((c) => c.id).sort()).toEqual(["$add{a + 4'd1}", '$and{a & b}']);
+  }, T);
 });
 
 describe('Yosys errors', () => {

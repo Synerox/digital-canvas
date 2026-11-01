@@ -4,7 +4,7 @@
  */
 import type { JSX } from 'react';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT, isMuxType } from '../layout/elk-layout';
+import { FONT, approxMeasure, isMuxType } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -23,13 +23,15 @@ export interface GraphicProps {
 
 const STROKE = 1.4;
 
+/** Register pins on the bottom edge that are written next to their pin (the clock has its triangle). */
+const REGISTER_PINS = new Set(['EN', 'ARST', 'SRST']);
+
 function pathOf(points: Point[]): string {
   return points.map((p, i) => `${i ? 'L' : 'M'}${p.x},${p.y}`).join(' ');
 }
 
-/** Point `dist` along a polyline from its start (or end when reversed). */
-function along(points: Point[], dist: number, fromEnd: boolean): Point {
-  const pts = fromEnd ? [...points].reverse() : points;
+/** Point `dist` along a polyline (already reversed when measured from its end), and the segment it is on. */
+function pointAt(pts: Point[], dist: number): { at: Point; horizontal: boolean; nearBend: boolean } {
   let left = dist;
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i - 1];
@@ -37,11 +39,16 @@ function along(points: Point[], dist: number, fromEnd: boolean): Point {
     const len = Math.hypot(b.x - a.x, b.y - a.y);
     if (len >= left || i === pts.length - 1) {
       const t = len === 0 ? 0 : Math.min(1, left / len);
-      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      const pos = t * len;
+      return {
+        at: { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t },
+        horizontal: Math.abs(b.x - a.x) >= Math.abs(b.y - a.y),
+        nearBend: (i > 1 && pos < 6) || (i < pts.length - 1 && len - pos < 6),
+      };
     }
     left -= len;
   }
-  return pts[0];
+  return { at: pts[0], horizontal: true, nearBend: false };
 }
 
 function firstSegmentLength(points: Point[], fromEnd: boolean): number {
@@ -50,15 +57,153 @@ function firstSegmentLength(points: Point[], fromEnd: boolean): number {
   return Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
 }
 
-function BusMark({ at, width, theme }: { at: Point; width: number; theme: Theme }) {
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const hits = (a: Box, b: Box) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+/** Where a piece of text is written: its baseline point and alignment. */
+interface TextSpot {
+  x: number;
+  y: number;
+  anchor: 'start' | 'end';
+}
+
+/** The box a line of text covers: approximate width (as the layout measures), cap height and a little descent. */
+function textBox(t: TextSpot, text: string, size: number): Box {
+  const w = approxMeasure(text, size);
+  return { x: t.anchor === 'start' ? t.x : t.x - w, y: t.y - size * 0.78, width: w, height: size * 0.88 };
+}
+
+/** A wire segment as a thin box. */
+function segmentBox(a: Point, b: Point): Box {
+  return { x: Math.min(a.x, b.x) - 0.5, y: Math.min(a.y, b.y) - 0.5, width: Math.abs(a.x - b.x) + 1, height: Math.abs(a.y - b.y) + 1 };
+}
+
+const MARK_FONT = 10;
+
+/** Where a bus mark's slash goes, and where its number is written. */
+interface MarkSpot {
+  at: Point;
+  text: TextSpot;
+}
+
+/**
+ * Where to draw the width mark of a bus wire: near its start (or its end), with its slash off
+ * `texts` (wire labels, bus slice names, other marks' numbers) and its number off those and off
+ * `solids` (symbols and wires). The usual spot comes first; then the number goes on the other
+ * side of the wire, then the mark moves further along it (never onto a bend). When nothing is
+ * clear, the usual spot.
+ */
+function placeBusMark(points: Point[], fromEnd: boolean, text: string, texts: readonly Box[], solids: readonly Box[]): MarkSpot {
+  const pts = fromEnd ? [...points].reverse() : points;
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  const usual = Math.min(12, firstSegmentLength(points, fromEnd) / 2);
+  const spots = (at: Point, horizontal: boolean): MarkSpot[] => [
+    { at, text: { x: at.x + 2, y: at.y - 7, anchor: 'start' } },
+    horizontal ? { at, text: { x: at.x + 2, y: at.y + 14, anchor: 'start' } } : { at, text: { x: at.x - 6, y: at.y + 4, anchor: 'end' } },
+  ];
+  // Only what is near the wire's end can be in the way.
+  const reach = Math.min(total, 130) + 30;
+  const o = pts[0];
+  const close = (b: Box) => b.x < o.x + reach && b.x + b.width > o.x - reach && b.y < o.y + reach && b.y + b.height > o.y - reach;
+  const nearTexts = texts.filter(close);
+  const nearAll = [...nearTexts, ...solids.filter(close)];
+  const dists = [usual];
+  for (let d = 20; d <= Math.min(total - 6, 120); d += 8) dists.push(d);
+  for (const [k, d] of dists.entries()) {
+    const p = pointAt(pts, d);
+    if (k > 0 && p.nearBend) continue;
+    const slash = { x: p.at.x - 4, y: p.at.y - 5, width: 8, height: 10 };
+    if (nearTexts.some((b) => hits(b, slash))) continue;
+    for (const s of spots(p.at, p.horizontal)) {
+      const box = textBox(s.text, text, MARK_FONT);
+      if (!nearAll.some((b) => hits(b, box))) return s;
+    }
+  }
+  return spots(pointAt(pts, usual).at, true)[0];
+}
+
+function BusMark({ spot, width, theme }: { spot: MarkSpot; width: number; theme: Theme }) {
+  const { at, text } = spot;
   return (
     <g>
       <line x1={at.x - 4} y1={at.y + 5} x2={at.x + 4} y2={at.y - 5} stroke={theme.wire} strokeWidth={STROKE} />
-      <text x={at.x + 2} y={at.y - 7} fontSize={10} fill={theme.ink} fontFamily={theme.font}>
+      <text x={text.x} y={text.y} fontSize={MARK_FONT} textAnchor={text.anchor} fill={theme.ink} fontFamily={theme.font}>
         {width}
       </text>
     </g>
   );
+}
+
+const SLICE_FONT = 9;
+
+/**
+ * Where the slice names of splits (`[7:4]` right of the bar, above its wire) and of concatenations
+ * (left of the bar, below its wire) go. When a wire (typically the name's own, turning just next to
+ * the bar) or another name runs through it, the name moves past its wire's bend, or else to the
+ * other side of its wire.
+ */
+function placeSliceNames(nodes: readonly LNode[], edges: readonly LEdge[], labeledPorts?: ReadonlySet<string>): Map<string, TextSpot> {
+  const out = new Map<string, TextSpot>();
+  const wires: Box[] = [];
+  for (const e of edges) for (let i = 1; i < e.points.length; i++) wires.push(segmentBox(e.points[i - 1], e.points[i]));
+  /** Where the wire of a port first leaves the port's row (points listed from the port). */
+  const bendX = (port: string, fromSource: boolean): number | undefined => {
+    for (const e of edges) {
+      if ((fromSource ? e.source.port : e.target.port) !== port) continue;
+      const pts = fromSource ? e.points : [...e.points].reverse();
+      if (pts.length >= 3 && Math.abs(pts[1].y - pts[0].y) < 0.5) return pts[1].x;
+    }
+    return undefined;
+  };
+  const placed: Box[] = [];
+  for (const n of nodes) {
+    if (n.kind !== 'split' && n.kind !== 'join') continue;
+    for (const q of n.ports) {
+      // Above or below the wire, within its 20px row: a name below one wire and the next name above the
+      // wire under it just touch, so the other side comes last.
+      const above = q.y - 3;
+      const below = q.y + 9;
+      // Past the bend only when the bend is what is in the way: a name far from its bar would belong to nothing.
+      const reach = approxMeasure(q.name, SLICE_FONT) + 6;
+      let spots: TextSpot[];
+      if (n.kind === 'split' && q.side === 'EAST') {
+        const x = n.x + n.width + 3;
+        const bend = bendX(q.id, true);
+        const past: TextSpot[] = bend !== undefined && bend > x && bend < x + reach ? [{ x: bend + 3, y: above, anchor: 'start' }] : [];
+        spots = [{ x, y: above, anchor: 'start' }, ...past, { x, y: below, anchor: 'start' }];
+      } else if (n.kind === 'join' && q.side === 'WEST' && !labeledPorts?.has(q.id)) {
+        const x = n.x - 3;
+        const bend = bendX(q.id, false);
+        const past: TextSpot[] = bend !== undefined && bend < x && bend > x - reach ? [{ x: bend - 3, y: below, anchor: 'end' }] : [];
+        spots = [{ x, y: below, anchor: 'end' }, ...past, { x, y: above, anchor: 'end' }];
+      } else {
+        continue;
+      }
+      const boxes = spots.map((s) => textBox(s, q.name, SLICE_FONT));
+      const k = boxes.findIndex((b) => !wires.some((w) => hits(w, b)) && !placed.some((p) => hits(p, b)));
+      const pick = k < 0 ? 0 : k;
+      out.set(q.id, spots[pick]);
+      placed.push(boxes[pick]);
+    }
+  }
+  return out;
+}
+
+/** Boxes the slice names cover, by port. */
+function sliceNameBoxes(nodes: readonly LNode[], names: ReadonlyMap<string, TextSpot>): Box[] {
+  const out: Box[] = [];
+  for (const n of nodes) for (const q of n.ports) {
+    const s = names.get(q.id);
+    if (s) out.push(textBox(s, q.name, SLICE_FONT));
+  }
+  return out;
 }
 
 function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; width: number } {
@@ -212,6 +357,9 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   }
   if (/dff|dlatch/.test(t)) {
     const clk = n.ports.find((q) => q.name === 'CLK');
+    // Enable and reset pins sit on the bottom edge like the clock: name them, or a register with an
+    // enable and one with a reset look the same. Written above the clock triangle's height.
+    const named = n.ports.filter((q) => q.side === 'SOUTH' && REGISTER_PINS.has(q.name));
     return (
       <g>
         <rect x={x} y={y} width={w} height={h} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />
@@ -224,6 +372,11 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
             strokeWidth={STROKE}
           />
         )}
+        {named.map((q) => (
+          <text key={q.id} x={q.x} y={y + h - 9} fontSize={7} textAnchor="middle" fill={theme.muted} fontFamily={theme.font}>
+            {q.name}
+          </text>
+        ))}
       </g>
     );
   }
@@ -236,7 +389,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   );
 }
 
-function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
+function NodeShape({ n, p, names }: { n: LNode; p: GraphicProps; names: ReadonlyMap<string, TextSpot> }) {
   const { theme } = p;
   const s = nodeStroke(n, p);
   const { x, y, width: w, height: h } = n;
@@ -283,38 +436,19 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
       );
       break;
     case 'join':
-      body = (
-        <g>
-          <rect x={x} y={y} width={w} height={h} fill={s.stroke} stroke={s.stroke} strokeWidth={1} />
-          {n.ports
-            .filter((q) => q.side === 'WEST' && !p.labeledPorts?.has(q.id))
-            .map((q) => (
-              <text
-                key={q.id}
-                x={x - 3}
-                y={q.y + 11}
-                fontSize={9}
-                textAnchor="end"
-                fill={theme.muted}
-                fontFamily={theme.font}
-              >
-                {q.name}
-              </text>
-            ))}
-        </g>
-      );
-      break;
     case 'split':
+      // Slice names: where placeSliceNames put them (a join's are left out when its wire has a label).
       body = (
         <g>
           <rect x={x} y={y} width={w} height={h} fill={s.stroke} stroke={s.stroke} strokeWidth={1} />
-          {n.ports
-            .filter((q) => q.side === 'EAST')
-            .map((q) => (
-              <text key={q.id} x={x + w + 3} y={q.y - 3} fontSize={9} fill={theme.muted} fontFamily={theme.font}>
+          {n.ports.map((q) => {
+            const t = names.get(q.id);
+            return t ? (
+              <text key={q.id} x={t.x} y={t.y} fontSize={SLICE_FONT} textAnchor={t.anchor} fill={theme.muted} fontFamily={theme.font}>
                 {q.name}
               </text>
-            ))}
+            ) : null;
+          })}
         </g>
       );
       break;
@@ -383,23 +517,45 @@ function NodeShape({ n, p }: { n: LNode; p: GraphicProps }) {
   return <g {...dataAttrs}>{body}</g>;
 }
 
-function Edges({ edges, theme, selection, flagged, interactive }: { edges: LEdge[]; theme: Theme; selection?: ReadonlySet<string>; flagged?: ReadonlySet<string>; interactive?: boolean }) {
+function Edges({
+  edges,
+  theme,
+  selection,
+  flagged,
+  interactive,
+  texts,
+  solids,
+}: {
+  edges: LEdge[];
+  theme: Theme;
+  selection?: ReadonlySet<string>;
+  flagged?: ReadonlySet<string>;
+  interactive?: boolean;
+  /** Text the width marks must not cover; each placed mark's number is added. */
+  texts: Box[];
+  /** Symbols and wire segments the numbers of width marks must not cover. */
+  solids: readonly Box[];
+}) {
   const marks: JSX.Element[] = [];
   const doneSources = new Set<string>();
   const junctionKeys = new Set<string>();
   const junctions: Point[] = [];
+  const mark = (e: LEdge, fromEnd: boolean) => {
+    const text = String(e.width);
+    const spot = placeBusMark(e.points, fromEnd, text, texts, solids);
+    texts.push(textBox(spot.text, text, MARK_FONT));
+    marks.push(<BusMark key={`m${e.id}`} spot={spot} width={e.width} theme={theme} />);
+  };
 
   for (const e of edges) {
     if (e.width > 1 && e.points.length >= 2) {
       if (e.fullSource) {
         if (!doneSources.has(e.source.port)) {
           doneSources.add(e.source.port);
-          const seg = firstSegmentLength(e.points, false);
-          marks.push(<BusMark key={`m${e.id}`} at={along(e.points, Math.min(12, seg / 2), false)} width={e.width} theme={theme} />);
+          mark(e, false);
         }
       } else {
-        const seg = firstSegmentLength(e.points, true);
-        marks.push(<BusMark key={`m${e.id}`} at={along(e.points, Math.min(12, seg / 2), true)} width={e.width} theme={theme} />);
+        mark(e, true);
       }
     }
     for (const j of e.junctions) {
@@ -459,11 +615,19 @@ function Edges({ edges, theme, selection, flagged, interactive }: { edges: LEdge
 
 export function DiagramGraphic(props: GraphicProps) {
   const p = { ...props, labeledPorts: new Set(props.layout.edges.filter((e) => e.label).map((e) => e.target.port)) };
+  const { nodes, edges } = p.layout;
+  const names = placeSliceNames(nodes, edges, p.labeledPorts);
+  // Width marks keep clear of wire labels and slice names, and their numbers of symbols, notes and wires too.
+  const texts: Box[] = [...edges.flatMap((e) => (e.label && e.labelBox ? [e.labelBox] : [])), ...sliceNameBoxes(nodes, names)];
+  const solids: Box[] = [
+    ...nodes.map((n) => ({ x: n.x, y: n.y, width: n.width, height: n.height })),
+    ...edges.flatMap((e) => e.points.slice(1).map((q, i) => segmentBox(e.points[i], q))),
+  ];
   return (
     <g>
-      <Edges edges={p.layout.edges} theme={p.theme} selection={p.selection} flagged={p.flagged} interactive={p.interactive} />
-      {p.layout.nodes.map((n) => (
-        <NodeShape key={n.id} n={n} p={p} />
+      <Edges edges={edges} theme={p.theme} selection={p.selection} flagged={p.flagged} interactive={p.interactive} texts={texts} solids={solids} />
+      {nodes.map((n) => (
+        <NodeShape key={n.id} n={n} p={p} names={names} />
       ))}
     </g>
   );

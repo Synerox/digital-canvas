@@ -191,8 +191,14 @@ function buildModule(
       const touched = Object.keys(c.connections)
         .sort()
         .map((p) => {
+          const bits = c.connections[p];
+          // A constant operand tells apart cells that read the same signals, such as the `sel == 2'd0`,
+          // `sel == 2'd1`… compares of a case statement (Yosys gives them no source text). Without it
+          // they differ only by Yosys' cell order, so after the case items are reordered an edit
+          // saved for one of them would move or hide another.
+          if (bits.length > 0 && bits.every((b) => typeof b !== 'number')) return `${p}=${formatConst(bits)}`;
           const names = new Set<string>();
-          for (const b of c.connections[p]) if (typeof b === 'number' && bitName.has(b)) names.add(bitName.get(b)!);
+          for (const b of bits) if (typeof b === 'number' && bitName.has(b)) names.add(bitName.get(b)!);
           return `${p}=${[...names].join('+')}`;
         })
         .join(',');

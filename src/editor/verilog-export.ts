@@ -4,9 +4,10 @@
  *
  * - Every driver port that feeds at least one wire becomes a net (a `reg` for
  *   register outputs). Input pins drive the net of their own name.
- * - Every input port reads the net of its incoming wire, cut to the slice
- *   written on the wire (`a[3:0]`) and resized to the port's width, so
- *   concatenations and part-selects always see the widths the drawing shows.
+ * - Every input port reads the net of its incoming wire, cut to the bits the
+ *   wire carries (DEdge.bits, DEdge.shift; never its label text) and resized
+ *   to the port's width, so concatenations and part-selects always see the
+ *   widths the drawing shows.
  * - Cells become `assign` statements or `always` blocks, blocks become module
  *   instances, and output pins are assigned from their driver. Clock, enable and
  *   reset polarities, reset values and signed operands of imported cells
@@ -20,6 +21,8 @@
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
 import { formatConst } from '../core/ir';
+import { AUTO_SEPARATOR } from '../core/partition';
+import { ARITHMETIC } from '../core/rules';
 
 export interface VerilogExport {
   /** The Verilog text of one module. */
@@ -193,7 +196,7 @@ function oneLine(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Literals and wire labels.
+// Literals and what a wire carries.
 
 interface Literal {
   /** LSB first, already at the literal's own width (32 bits or more when unsized). */
@@ -251,30 +254,26 @@ function parseLiteral(text: string): Literal | undefined {
   return { bits: padTo(bits, size ?? Math.max(32, bits.length), fill), sized: size !== undefined, signed: m[2] !== '' };
 }
 
-/** The bit range written on a wire, e.g. `a[3:0]` or `[7]` (the name part is only decoration). */
-function labelRange(label: string | undefined): { hi: number; lo: number } | undefined {
-  const m = label ? /^\s*(?:[A-Za-z_][\w$]*\s*)?\[\s*(\d+)\s*(?::\s*(\d+)\s*)?\]/.exec(label) : null;
-  if (!m) return undefined;
-  const hi = Number(m[1]);
-  return { hi, lo: m[2] === undefined ? hi : Number(m[2]) };
-}
+/*
+ * A wire's label is only text: the user may rename any wire to anything (`b[1:0]`, `a ×4`), and
+ * that must never change the logic. What a wire carries comes from the drawing's data alone: the
+ * bits of its driver (DEdge.bits, all of them when fullSource) and the low zero bits the import's
+ * "scale" rule appends (DEdge.shift).
+ */
 
-/** Low zero bits implied by a `×2ⁿ` note on a wire (written by the import's "scale" rule). */
-function labelScale(label: string | undefined): number {
-  const m = label ? /×\s*(\d+)/.exec(label) : null;
-  if (!m) return 0;
-  const k = Math.log2(Number(m[1]));
-  return Number.isInteger(k) && k > 0 && k < 31 ? k : 0;
+/** Low zero bits appended to what a wire carries (`{x, 2'b00}` has shift 2). */
+function edgeShift(e: DEdge): number {
+  return e.shift !== undefined && Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
 }
 
 /**
- * Low zero bits appended to what a wire carries. The import records them in `shift`, which a
- * rename of the `×4` label does not touch; only a wire without it (drawn by hand, or copied
- * from an import into a drawing) reads them from its label.
+ * The bits of a `width`-bit driver a wire carries, when they are not all of them; undefined
+ * for the whole driver, or when the drawing records no usable range.
  */
-function edgeShift(e: DEdge): number {
-  if (e.shift !== undefined) return Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
-  return labelScale(e.label);
+function edgeBits(e: DEdge, width: number): { lo: number; width: number } | undefined {
+  const b = e.bits;
+  if (!b || !Number.isInteger(b.lo) || !Number.isInteger(b.width) || b.lo < 0 || b.width < 1 || b.lo + b.width > width) return undefined;
+  return b.width < width ? b : undefined;
 }
 
 /** A split port name such as `[7:4]` or `[3]`. */
@@ -372,6 +371,15 @@ function isPin(n: DNode): boolean {
   return n.kind === 'input' || n.kind === 'output' || n.kind === 'inout';
 }
 
+/**
+ * A module name the user never typed: an automatic block (`top/crop_points`) or a module
+ * Yosys derived (`$paramod\sub\W=…`). It is written as a legal name without a warning,
+ * which would only suggest that something in the user's design is wrong.
+ */
+function isMadeUpModule(name: string): boolean {
+  return name.includes(AUTO_SEPARATOR) || name.startsWith('$');
+}
+
 /** Instances, and cells whose type is a module rather than a Yosys primitive (e.g. blackbox cells). */
 function isInstanceNode(n: DNode): boolean {
   return n.kind === 'instance' || (n.kind === 'cell' && !!n.cellType && !isPrimitive(n.cellType));
@@ -449,10 +457,11 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
   };
 
   const modName = verilogIdent(moduleName);
-  if (modName !== moduleName) warn(`Module name '${moduleName}' is not a legal Verilog name; it is written as ${modName}`);
+  if (modName !== moduleName && !isMadeUpModule(moduleName)) warn(`Module name '${moduleName}' is not a legal Verilog name; it is written as ${modName}`);
 
   const pinName = new Map<string, string>();
-  for (const n of nodes) if (isPin(n)) pinName.set(n.id, takeNamed(n.label, 'Pin'));
+  // The pins of an automatic block are named by the import (`mix[1:0]`); only a name the user typed is worth a warning.
+  for (const n of nodes) if (isPin(n)) pinName.set(n.id, takeNamed(n.label, 'Pin', n.attrs?.autoName === n.label));
   const instName = new Map<string, string>();
   for (const n of nodes) {
     if (!isInstanceNode(n)) continue;
@@ -596,9 +605,11 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     nets.set(x.k, net);
     if (x.bus) x.bus.net = net;
   };
-  /** A wire that carries its whole driver unchanged (no slice or scale written on it). */
-  const isPlainWire = (w: Wire) =>
-    !labelRange(w.edge.label) && !edgeShift(w.edge) && (w.edge.fullSource || w.edge.width >= w.fromPort.width);
+  /** A wire that carries its whole driver unchanged (no slice or scale). */
+  const isPlainWire = (w: Wire) => {
+    const width = Math.max(1, w.fromPort.width);
+    return !edgeShift(w.edge) && !edgeBits(w.edge, width) && (w.edge.fullSource || w.edge.width >= width);
+  };
 
   // 1. A name the user wrote on one of its wires.
   for (const x of pending) {
@@ -685,27 +696,16 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     return netVec(net.name, net.width);
   };
 
-  /** The value a wire delivers, before it is fitted to the port: the driver net, or the slice written on the wire. */
+  /** The value a wire delivers, before it is fitted to the port: the driver net, or the bits of it the wire carries. */
   const wireVec = (w: Wire): Vec => {
     let v = sourceVec(w.from, w.fromPort);
     const width = vecWidth(v);
     const e = w.edge;
-    const r = labelRange(e.label);
-    const partial = !e.fullSource && e.width >= 1 && e.width < width;
-    // The bits the wire carries, when the drawing records them, win over a slice written in the label
-    // (the label may have been renamed to anything).
-    const b = e.bits;
-    if (b && b.lo >= 0 && b.width >= 1 && b.lo + b.width <= width) {
-      if (b.width < width) v = slice(v, b.lo, b.width);
-    } else if (r && r.hi - r.lo + 1 !== width) {
-      if (r.lo <= r.hi && r.hi < width) {
-        v = slice(v, r.lo, r.hi - r.lo + 1);
-      } else {
-        warn(`The slice '${e.label}' on the wire from ${source(w.from, w.fromPort)} is outside its ${bitsText(width)}; it is ignored`);
-        if (partial) v = slice(v, 0, e.width);
-      }
-    } else if (partial && !r) {
-      warn(`The wire from ${source(w.from, w.fromPort)} to ${where(w.to, w.toPort)} carries ${e.width} of ${width} bits but names no slice; the low bits are used`);
+    const b = edgeBits(e, width);
+    if (b) {
+      v = slice(v, b.lo, b.width);
+    } else if (!e.fullSource && e.width >= 1 && e.width < width) {
+      warn(`The wire from ${source(w.from, w.fromPort)} to ${where(w.to, w.toPort)} carries ${e.width} of ${width} bits but records no bit range; the low bits are used`);
       v = slice(v, 0, e.width);
     }
     const k = edgeShift(e);
@@ -727,9 +727,16 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     const v = wireVec(w);
     const have = vecWidth(v);
     if (have === width) return v;
-    warn(
-      `Width mismatch: ${at} is ${bitsText(width)} but its wire from ${source(w.from, w.fromPort)} carries ${bitsText(have)}; ${have < width ? 'zero-extended' : 'the high bits are dropped'}`,
-    );
+    // Verilog zero-extends the operands of unsigned arithmetic and compares, and the import's "Hide zero
+    // extension" rule draws `{2'b00, x}` there as a narrower wire: no mistake to warn about (as in checkSheet).
+    // A signed operator would sign-extend instead, so there the padding is worth a warning.
+    const signed = paramFlag(n, 'A_SIGNED', false) && paramFlag(n, 'B_SIGNED', false);
+    const widened = have < width && n.kind === 'cell' && ARITHMETIC.has(n.cellType ?? '') && !signed;
+    if (!widened) {
+      warn(
+        `Width mismatch: ${at} is ${bitsText(width)} but its wire from ${source(w.from, w.fromPort)} carries ${bitsText(have)}; ${have < width ? 'zero-extended' : 'the high bits are dropped'}`,
+      );
+    }
     return slice(v, 0, width);
   };
 
@@ -997,7 +1004,7 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     }
     if (n.attrs?.missingModule) warn(`Module '${mod}' of instance ${inst} does not exist (deleted or renamed); the instance is written without connections`);
     const modIdent = verilogIdent(mod);
-    if (modIdent !== mod) warn(`Module '${mod}' of instance ${inst} is not a legal Verilog name; it is written as ${modIdent}`);
+    if (modIdent !== mod && !isMadeUpModule(mod)) warn(`Module '${mod}' of instance ${inst} is not a legal Verilog name; it is written as ${modIdent}`);
     const conns = n.ports.map((p) => {
       const pn = verilogIdent(p.name);
       if (p.dir === 'out') return `.${pn}(${netOf(n, p)?.name ?? ''})`;

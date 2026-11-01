@@ -80,7 +80,10 @@ export interface DEdge {
   width: number;
   /** True when the edge carries the whole driver port (bus mark goes near the source). */
   fullSource: boolean;
-  /** Slice text such as `z[1:0]` when only part of a signal is used. */
+  /**
+   * Slice text such as `z[1:0]` when only part of a signal is used. Display only: the user may
+   * rename it to anything, so what the edge carries is in `fullSource`, `bits` and `shift`.
+   */
   label?: string;
   /** Name of the driving signal, for highlighting. */
   netName?: string;
@@ -292,7 +295,8 @@ export function buildDiagram(
       sinks.push({ node: id, port: inp.id, bits: p.bits, range: { offset: p.offset, upto: p.upto } });
     }
     const net = m.nets.find((x) => x.name === p.name && !x.hidden);
-    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [] });
+    // The ports of an automatic block are named by the app (`mix[1:0]`, `in0`), not by the user.
+    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [], ...(m.auto ? { attrs: { autoName: p.name } } : {}) });
   }
   nodes.push(...pinNodes);
 
@@ -500,13 +504,16 @@ export function buildDiagram(
       }
     }
     for (const { d, count } of extra.values()) {
+      const full = count === d.width;
       edges.push({
         id: '',
         source: { node: d.node, port: d.port },
         target: { node: s.node, port: s.port },
         width: count,
-        fullSource: count === d.width,
-        label: count === d.width ? undefined : runLabel(d, count, d.bits),
+        fullSource: full,
+        label: full ? undefined : runLabel(d, count, d.bits),
+        // The same bits the label names: the export reads them here, never from the label.
+        ...(full || d.index + count > d.width ? {} : { bits: { lo: d.index, width: count } }),
       });
     }
   }

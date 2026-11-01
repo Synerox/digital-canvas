@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { runYosys } from '@yowasp/yosys';
 import { type DEdge, type DNode, type DPort, type Diagram, buildDiagram } from '../core/diagram';
 import type { IRDesign } from '../core/ir';
+import { withAutoBlocks } from '../core/partition';
 import { DEFAULT_RULES, type RuleId } from '../core/rules';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
@@ -339,17 +340,24 @@ describe('diagramToVerilog', () => {
     await expectEquivalent({ 's.v': gold }, { 's.v': code }, 'swap');
   }, 60_000);
 
-  it('reads slices written on wires', async () => {
+  it('reads the slices wires carry from their bits, never from their labels', async () => {
     const s = new Sheet();
     const bus = s.add('input', 'bus', { width: 8 });
     const nib = s.add('output', 'nib', { width: 4 });
     const bit = s.add('output', 'bit3');
-    s.wire(bus, 'out', nib, 'in', 'bus[7:4]');
-    s.wire(bus, 'out', bit, 'in', '[3]');
+    const all = s.add('output', 'all', { width: 8 });
+    // The labels say one thing and the bits another: the bits count.
+    s.wire(bus, 'out', nib, 'in', 'bus[3:0]');
+    Object.assign(s.edges[0], { width: 4, fullSource: false, bits: { lo: 4, width: 4 } });
+    s.wire(bus, 'out', bit, 'in', '[5]');
+    Object.assign(s.edges[1], { width: 1, fullSource: false, bits: { lo: 3, width: 1 } });
+    // A label that looks like a slice or a scale, on a wire that carries the whole bus, changes nothing.
+    s.wire(bus, 'out', all, 'in', 'bus[1:0] ×4');
     const { code, warnings } = diagramToVerilog(s.diagram('slices'), 'slices');
     expect(warnings).toEqual([]);
     expect(code).toContain('assign nib = bus[7:4];');
     expect(code).toContain('assign bit3 = bus[3];');
+    expect(code).toContain('assign all = bus;');
     await design({ 'slices.v': code });
   }, 60_000);
 
@@ -454,20 +462,25 @@ describe('diagramToVerilog', () => {
     s.add('output', 'nothing');
     s.add('block', 'u_none');
     s.add('text', 'just a note');
+    const v = s.add('output', 'v', { width: 8 });
     s.wire(a, 'out', g, 'A');
     s.wire(g, 'Y', y, 'in');
     s.wire(a, 'out', add, 'A');
     s.wire(a, 'out', add, 'B');
     s.wire(add, 'Y', w, 'in');
+    s.wire(a, 'out', v, 'in');
     const { code, warnings } = diagramToVerilog(s.diagram('broken'), 'broken');
     expect(warnings).toContainEqual(expect.stringMatching(/^Input B of and1 \(\$and\) is not connected/));
-    expect(warnings).toContainEqual(expect.stringMatching(/^Width mismatch: input A of add1 \(\$add\) is 8 bits but its wire from input 'a' carries 4 bits/));
+    expect(warnings).toContainEqual(expect.stringMatching(/^Width mismatch: output 'v' is 8 bits but its wire from input 'a' carries 4 bits; zero-extended/));
     expect(warnings).toContainEqual(expect.stringMatching(/^Output 'nothing' is not driven/));
     expect(warnings).toContainEqual(expect.stringMatching(/^Instance u_none .* has no module/));
+    // Verilog zero-extends the operands of an adder: a narrower wire there is no mistake (the sheet check agrees).
+    expect(warnings.filter((x) => x.includes('add1'))).toEqual([]);
     expect(code).toContain("assign y = a & 4'd0;");
     expect(code).toContain("assign w = {4'd0, a} + {4'd0, a};");
+    expect(code).toContain("assign v = {4'd0, a};");
     const ir = await design({ 'broken.v': code });
-    expect(portNames(ir, 'broken')).toEqual(['a', 'y', 'w', 'nothing']);
+    expect(portNames(ir, 'broken')).toEqual(['a', 'y', 'w', 'nothing', 'v']);
   }, 60_000);
 
   it('keeps going on open clocks, constant resets, bad constants and reversed wires', async () => {
@@ -675,12 +688,62 @@ describe('edits of imported sheets', () => {
       expect(code).toContain("{b, 2'd0}");
       await expectEquivalent(files, { 'sc.v': code }, 'sc');
     }
-    // A hand-drawn (or copied) wire has no recorded shift: its ×4 label still counts.
+    // A drawn (or copied) wire scales by its recorded shift, whatever its label says.
     const s = new Sheet();
     const b = s.add('input', 'b', { width: 4 });
     const y = s.add('output', 'y', { width: 6 });
-    s.wire(b, 'out', y, 'in', '×4');
-    expect(diagramToVerilog(s.diagram('drawn'), 'drawn').code).toContain("assign y = {b, 2'd0};");
+    const z = s.add('output', 'z', { width: 6 });
+    s.wire(b, 'out', y, 'in', 'b_scaled');
+    s.edges[0].shift = 2;
+    s.wire(b, 'out', z, 'in', '×4');
+    const { code } = diagramToVerilog(s.diagram('drawn'), 'drawn');
+    expect(code).toContain("assign y = {b, 2'd0};");
+    expect(code).toContain("assign z = {2'd0, b};");
+  }, 60_000);
+
+  it('keeps a deleted case constant deleted, not another one, after the case items change', async () => {
+    const mux4 = (items: string[]) => ({
+      'mux4.v': `module mux4(input [3:0] d0, d1, d2, d3, input [1:0] sel, output reg [3:0] y);
+  always @* case (sel)
+${items.map((x) => `    ${x}`).join('\n')}
+  endcase
+endmodule
+`,
+    });
+    const first = buildDiagram(await design(mux4(["2'd0: y = d0;", "2'd1: y = d1;", "2'd2: y = d2;", 'default: y = d3;'])), 'mux4');
+    const two = first.nodes.find((n) => n.kind === 'const' && n.label === "2'd2")!;
+    const edits = { ...emptyEdits(), hidden: [two.id] };
+    const files = mux4(["2'd0: y = d0;", "2'd1: y = d1;", "2'd3: y = d3;", 'default: y = d2;']);
+    const next = buildDiagram(await design(files), 'mux4');
+    const d = effectiveDiagram('mux4', next, edits, () => undefined);
+    // The 2'd3 compare is a different cell: its constant stays, and so does the function.
+    expect(d.nodes.filter((n) => n.kind === 'const').map((n) => n.label).sort()).toEqual(["2'd0", "2'd1", "2'd3"]);
+    const { code, warnings } = diagramToVerilog(d, 'mux4');
+    expect(warnings).toEqual([]);
+    expect(code).toContain("sel == 2'd3");
+    await expectEquivalent(files, { 'mux4.v': code }, 'mux4');
+  }, 60_000);
+
+  it('never reads a slice or a scale from a renamed imported wire', async () => {
+    const sc = { 'sc.v': "module sc(input [3:0] a, b, output [5:0] y); assign y = a + {b, 2'b00}; endmodule" };
+    const base = buildDiagram(await design(sc), 'sc', DEFAULT_RULES);
+    const scaled = base.edges.find((e) => e.shift === 2)!;
+    const plain = base.edges.find((e) => e.source.node === 'in:a')!;
+    let e = rename(emptyEdits(), scaled.id, 'b[1:0]');
+    e = rename(e, plain.id, 'a ×4');
+    const out = diagramToVerilog(effectiveDiagram('sc', base, e, () => undefined), 'sc');
+    expect(out.warnings).toEqual([]);
+    expect(out.code).toContain("assign y = a + {b, 2'd0};");
+    await expectEquivalent(sc, { 'sc.v': out.code }, 'sc');
+
+    const and = { 'g.v': 'module g(input [3:0] a, b, output [3:0] y); assign y = a & b; endmodule' };
+    const gate = buildDiagram(await design(and), 'g', DEFAULT_RULES);
+    const wire = gate.edges.find((x) => x.source.node === 'in:a')!;
+    for (const text of ['a[1:0]', 'low[1:0]', '[2]', '×2', 'a ×8']) {
+      const r = diagramToVerilog(effectiveDiagram('g', gate, rename(emptyEdits(), wire.id, text), () => undefined), 'g');
+      expect(r.warnings, text).toEqual([]);
+      expect(r.code, text).toContain('assign y = a & b;');
+    }
   }, 60_000);
 
   it('names a renamed imported instance by its new name', async () => {
@@ -849,8 +912,8 @@ describe('round trip through the drawing', () => {
     for (const m of Object.keys(before.modules)) {
       const r = diagramToVerilog(buildDiagram(before, m, rules), m);
       out[`${m}.v`] = r.code;
-      // Hidden zero padding (default rules) shows up as width warnings; nothing else should.
-      expect(r.warnings.filter((w) => !w.startsWith('Width mismatch'))).toEqual([]);
+      // Hidden zero padding (default rules) is how Verilog widens operands: nothing to warn about.
+      expect(r.warnings).toEqual([]);
     }
     const after = await design(out, 'auction_top');
     expect(Object.keys(after.modules).sort()).toEqual(Object.keys(before.modules).sort());
@@ -860,4 +923,47 @@ describe('round trip through the drawing', () => {
     }
     await expectEquivalent(files, out, 'auction_top');
   }, 120_000);
+
+  it('writes the Fruit Battle block diagram without warnings about names the app made up', async () => {
+    const files = { [FRUIT_FILE]: FRUIT_SOURCE };
+    const blocks = withAutoBlocks(await design(files), files);
+    const out: Record<string, string> = {};
+    for (const [m, mod] of Object.entries(blocks.modules)) {
+      const d = buildDiagram(blocks, m, DEFAULT_RULES);
+      // As the export writes a block for its parent, and as it writes the block's own sheet.
+      for (const as of mod.auto ? [verilogIdent(m), m] : [m]) {
+        const r = diagramToVerilog(d, as);
+        expect(r.warnings, `${m} as ${as}`).toEqual([]);
+        out[`${verilogIdent(m)}.v`] = r.code;
+      }
+    }
+    expect(out['top.v']).toContain('top_crop_points crop_points (');
+    await expectEquivalent(files, out, 'top');
+  }, 120_000);
+
+  it('warns about the pin names of an automatic block only once the user renames them', () => {
+    const port = (name: string, direction: 'input' | 'output', bits: number[]) => ({ name, direction, bits, offset: 0, upto: false });
+    const blocks: IRDesign = {
+      top: 'top/blk',
+      modules: {
+        'top/blk': {
+          name: 'top/blk',
+          displayName: 'blk',
+          isTop: false,
+          ports: [port('mix[1:0]', 'input', [2, 3]), port('y', 'output', [2, 3])],
+          cells: [],
+          nets: [],
+          src: [],
+          auto: { parent: 'top' },
+        },
+      },
+    };
+    const base = buildDiagram(blocks, 'top/blk');
+    const quiet = diagramToVerilog(base, 'top/blk');
+    expect(quiet.warnings).toEqual([]);
+    expect(quiet.code).toContain('module top_blk (');
+    expect(quiet.code).toContain('assign y = mix_1_0;');
+    const renamed = effectiveDiagram('top/blk', base, rename(emptyEdits(), 'in:mix[1:0]', 'low bits'), () => undefined);
+    expect(diagramToVerilog(renamed, 'top/blk').warnings).toEqual(["Pin 'low bits' is not a legal Verilog name; it is written as low_bits"]);
+  });
 });
