@@ -253,6 +253,8 @@ const rulesKey = (rules: ReadonlySet<RuleId>) => RULES.map((r) => (rules.has(r.i
 function uniqueModuleName(want: string, taken: Set<string>): string {
   let base = want.replace(/[^A-Za-z0-9_$]/g, '_');
   if (!/^[A-Za-z_]/.test(base)) base = `m_${base}`;
+  // Never a Verilog keyword: the export would have to write the module under another name.
+  base = verilogIdent(base);
   if (!taken.has(base)) return base;
   for (let i = 2; ; i++) if (!taken.has(`${base}_${i}`)) return `${base}_${i}`;
 }
@@ -1236,6 +1238,7 @@ export const useStore = create<State>((set, get) => {
       const want = to.trim();
       if (!want || want === from || !s.doc.drawn.includes(from)) return undefined;
       if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(want)) return 'Use letters, digits and _ (a Verilog module name).';
+      if (verilogIdent(want) !== want) return `${want} is a Verilog keyword.`;
       if (s.doc.drawn.includes(want) || s.design?.modules[want] || s.moduleNames.includes(want)) return `A module named ${want} already exists.`;
       const path = renamePathDrawing(s.path, from, want);
       pushDoc(renameDrawingIn(s.doc, from, want), { path, sheet: sheetKey(path[path.length - 1], s.viewMode) });

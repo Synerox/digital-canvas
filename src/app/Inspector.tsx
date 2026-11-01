@@ -8,7 +8,7 @@ import type { SrcRange } from '../core/ir';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
-import { useStore } from './store';
+import { sheetsUsing, useStore } from './store';
 import { ui } from './ui-events';
 
 /** A text field that commits on Enter or blur and resets on Escape. */
@@ -189,7 +189,9 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
             <button
               className="danger"
               onClick={() => {
-                if (confirm(`Delete the drawing ${module}? (You can undo this.)`)) s.deleteDrawing(module);
+                const users = sheetsUsing(s.doc, module);
+                const used = users.length ? ` It is used as a block on ${users.join(', ')}; those blocks will lose their pins.` : '';
+                if (confirm(`Delete the drawing ${module}?${used} (You can undo this.)`)) s.deleteDrawing(module);
               }}
             >
               Delete drawing

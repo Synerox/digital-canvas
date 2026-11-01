@@ -364,12 +364,14 @@ export function buildDiagram(
   type Run =
     | { kind: 'const'; lo: number; bits: Bit[] }
     | { kind: 'net'; lo: number; bits: Bit[]; driver: Driver };
-  const runsOf = (bits: Bit[], selfPort: string): Run[] => {
+  const runsOf = (bits: Bit[], selfPort: string, selfNode: string): Run[] => {
     const runs: Run[] = [];
+    // An inout pin drives its own net through its other port: that is not a wire into it.
+    const isSelf = (d: { node: string; port: string }) => d.port === selfPort || (selfNode.startsWith('io:') && d.node === selfNode);
     const driverOf = (b: Bit) => {
       if (typeof b !== 'number') return undefined;
       const d = drivers.get(b);
-      return d && d.port !== selfPort ? d : undefined;
+      return d && !isSelf(d) ? d : undefined;
     };
     let i = 0;
     while (i < bits.length) {
@@ -379,7 +381,7 @@ export function buildDiagram(
         while (j < bits.length && !driverOf(bits[j])) j++;
         const piece = bits.slice(i, j);
         // A pin that only drives itself (an unused inout) is not a constant.
-        if (!piece.every((b) => typeof b === 'number' && drivers.get(b)?.port === selfPort)) {
+        if (!piece.every((b) => typeof b === 'number' && drivers.has(b) && isSelf(drivers.get(b)!))) {
           runs.push({ kind: 'const', lo: i, bits: piece.map((x) => (typeof x === 'number' ? 'x' : x)) as Bit[] });
         }
       } else {
@@ -444,7 +446,7 @@ export function buildDiagram(
   };
 
   for (const s of sinks) {
-    let runs = runsOf(s.bits, s.port);
+    let runs = runsOf(s.bits, s.port, s.node);
     let zeroExtended = false;
     const arithmetic = s.cellType !== undefined && ARITHMETIC.has(s.cellType);
     if (arithmetic && runs.length > 1 && rules.has('zero-extend')) {

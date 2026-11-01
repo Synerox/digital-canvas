@@ -308,6 +308,15 @@ describe('store', () => {
     expect(st().sheet).toBe('v:blocks:bid_check');
   }, 60_000);
 
+  it('never gives a drawing a Verilog keyword as its name (C31)', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('module');
+    await settle();
+    expect(st().doc.drawn).toEqual(['module_']);
+    expect(st().renameDrawing('module_', 'always')).toMatch(/keyword/);
+    expect(st().doc.drawn).toEqual(['module_']);
+  }, 60_000);
+
   it('shows imported Verilog that the open design does not use (C19)', async () => {
     await open({ [AUCTION_FILE]: AUCTION_SOURCE });
     await st().setFiles({ 'pasted.v': HALF }, false);

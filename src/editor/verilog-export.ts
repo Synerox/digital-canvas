@@ -995,6 +995,7 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
       warn(`${capitalize(describe(n))} has no module; it is left out`);
       return;
     }
+    if (n.attrs?.missingModule) warn(`Module '${mod}' of instance ${inst} does not exist (deleted or renamed); the instance is written without connections`);
     const modIdent = verilogIdent(mod);
     if (modIdent !== mod) warn(`Module '${mod}' of instance ${inst} is not a legal Verilog name; it is written as ${modIdent}`);
     const conns = n.ports.map((p) => {

@@ -85,6 +85,8 @@ export interface UserEdge {
   label?: string;
   /** The wire carries only these bits of its source (LSB index and count). */
   slice?: { lo: number; width: number };
+  /** Low zero bits appended to what the wire carries (an imported `×4` wire has 2), whatever its label says. */
+  shift?: number;
 }
 
 export interface ModulePort {
@@ -310,6 +312,8 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
         instanceName: name || id,
         ports,
         src: [],
+        // The module was deleted or renamed away: the block keeps its place but has no pins.
+        ...(module && !info ? { attrs: { missingModule: true } } : {}),
       };
     }
     case 'raw': {

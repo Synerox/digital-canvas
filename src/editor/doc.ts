@@ -214,6 +214,7 @@ function userEdge(v: unknown): UserEdge | undefined {
   if (isObj(v.slice) && isNum(v.slice.lo) && isNum(v.slice.width) && v.slice.lo >= 0 && v.slice.width >= 1) {
     out.slice = { lo: Math.floor(v.slice.lo), width: Math.floor(v.slice.width) };
   }
+  if (isNum(v.shift) && Number.isInteger(v.shift) && v.shift > 0 && v.shift < 31) out.shift = v.shift;
   return out;
 }
 

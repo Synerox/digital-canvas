@@ -477,6 +477,65 @@ describe('Copy to new drawing', () => {
   });
 });
 
+describe('Copy to new drawing keeps what the library symbols cannot say', () => {
+  it('keeps negedge, reset-value and signed cells as frozen copies with their parameters', async () => {
+    const src = `module t(input clk, input rst, input signed [3:0] a, input signed [3:0] b, output reg [3:0] q, output lt);
+  always @(negedge clk or posedge rst) if (rst) q <= 4'd5; else q <= a;
+  assign lt = a < b;
+endmodule
+`;
+    const base = buildDiagram(await design({ 't.v': src }), 't');
+    const drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
+    const withParams = base.nodes.filter((n) => n.params);
+    expect(withParams.length).toBeGreaterThanOrEqual(2);
+    for (const n of withParams) {
+      const u = drawing.nodes.find((x) => x.raw?.cellType === n.cellType);
+      expect(u?.sym, n.cellType).toBe('raw');
+      expect(u?.raw?.params).toEqual(n.params);
+    }
+    const { code } = diagramToVerilog(effectiveDiagram('t', undefined, drawing, noModules), 't');
+    expect(code).toContain('negedge');
+    expect(code).toContain('$signed');
+  });
+
+  it('keeps the zero bits of scaled wires when they are copied and renamed', async () => {
+    const base = buildDiagram(await design({ [AUCTION_FILE]: AUCTION_SOURCE }), 'score_calc', DEFAULT_RULES);
+    const scaled = base.edges.filter((x) => x.shift);
+    expect(scaled.length).toBeGreaterThan(0);
+    let drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
+    expect(drawing.edges.filter((x) => x.shift).length).toBe(scaled.length);
+    // A renamed label no longer says ×4, but the wire still carries the low zero bits.
+    drawing = { ...drawing, edges: drawing.edges.map((x) => (x.shift ? { ...x, label: 'renamed' } : x)) };
+    const before = diagramToVerilog(base, 'score_calc').code;
+    const after = diagramToVerilog(effectiveDiagram('score_calc', undefined, drawing, noModules), 'score_calc').code;
+    // Appended low zero bits are written as the last part of a concatenation: `{x, 2'd0}`.
+    const zeros = (code: string) => (code.match(/, \d+'d0\}/g) ?? []).length;
+    expect(zeros(after)).toBe(zeros(before));
+    expect(zeros(after)).toBeGreaterThan(0);
+  });
+
+  it('reports a block whose module is gone', () => {
+    let e = emptyEdits();
+    e = addNodes(e, [{ node: newUserNode('u:1', 'block', { name: 'x', params: { module: 'gone' } }), pos: { x: 0, y: 0 } }]);
+    const d = effectiveDiagram('m', undefined, e, noModules);
+    expect(d.nodes[0].attrs?.missingModule).toBe(true);
+    expect(checkSheet(d).messages.join(' ')).toContain('gone, which no longer exists');
+    expect(diagramToVerilog(d, 'm').warnings.join(' ')).toContain("Module 'gone' of instance");
+  });
+
+  it('does not draw an inout pin wired to itself', async () => {
+    const src = `module u(inout [3:0] io);
+endmodule
+module top(inout [3:0] b);
+  u z(.io(b));
+endmodule
+`;
+    const d = buildDiagram(await design({ 't.v': src }, 'top'), 'top');
+    expect(d.edges.filter((x) => x.source.node === x.target.node)).toEqual([]);
+    expect(d.edges.map((x) => x.target.port)).toContain('cell:z.io');
+  });
+});
+
 describe('saved files', () => {
   it('round-trips through JSON and rejects other files', () => {
     let e = emptyEdits();

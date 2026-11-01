@@ -80,6 +80,7 @@ export function effectiveDiagram(module: string, base: Diagram | undefined, e: S
       label: u.label || undefined,
       netName: u.label || undefined,
       ...(full ? {} : { bits: sl }),
+      ...(u.shift ? { shift: u.shift } : {}),
     });
   }
   return { module, nodes, edges };
@@ -494,7 +495,9 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       break;
     case 'cell': {
       const sym = n.cellType ? CELL_TO_SYM[n.cellType] : undefined;
-      if (!sym || n.attrs?.invertB) break;
+      // Cells with non-default parameters (negedge clock, reset value, signed operands) have no
+      // library symbol that says so: keep them as frozen copies, which keep the parameters.
+      if (!sym || n.attrs?.invertB || n.params) break;
       const ins = n.ports.filter((p) => p.dir === 'in' && p.side === 'WEST');
       const params: SymParams = {};
       if (sym === 'decoder') params.width = width('A');
@@ -546,6 +549,7 @@ export function copyNodes(d: Diagram, e: SheetEdits, layout: LayoutResult, ids: 
       target: { ...x.target },
       ...(x.label ? { label: x.label } : {}),
       ...(x.bits ? { slice: { ...x.bits } } : {}),
+      ...(x.shift ? { shift: x.shift } : {}),
     });
     const l = ledge.get(x.id);
     if (l && l.points.length >= 2) {
@@ -589,6 +593,7 @@ export function pasteClip(e: SheetEdits, clip: Clip, at: Point): [SheetEdits, st
       target: { node: t, port: remapPort(x.target.port, x.target.node, t) },
       ...(x.label ? { label: x.label } : {}),
       ...(x.slice ? { slice: { ...x.slice } } : {}),
+      ...(x.shift ? { shift: x.shift } : {}),
     });
     const r = clip.routes[x.id];
     if (r) {

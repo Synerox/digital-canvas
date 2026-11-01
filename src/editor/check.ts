@@ -42,7 +42,7 @@ export function checkSheet(d: Diagram): SheetIssues {
     if (!e.id.startsWith('w:')) continue;
     const t = port.get(e.target.port);
     if (!t) continue;
-    const width = e.width + scaleBits(e.label);
+    const width = e.width + (e.shift !== undefined ? e.shift : scaleBits(e.label));
     // Arithmetic and compare operands are zero-extended (how Verilog widens them, and how
     // the import's "Hide zero extension" rule draws them), so a narrower wire is fine there.
     const extended = width < t.width && t.cellType !== undefined && ARITHMETIC.has(t.cellType);
@@ -70,5 +70,8 @@ export function checkSheet(d: Diagram): SheetIssues {
     for (const p of n.ports) if (p.dir === 'in' && !p.inout && n.kind !== 'inout' && !into.has(p.id)) openPorts.add(p.id);
   }
   if (openPorts.size) messages.push(`${plural(openPorts.size, 'input')} not connected.`);
+  const missing = d.nodes.filter((n) => n.attrs?.missingModule);
+  for (const n of missing.slice(0, 3)) messages.push(`Block ${n.subLabel ?? n.id} uses ${n.moduleName}, which no longer exists.`);
+  if (missing.length > 3) messages.push(`${missing.length - 3} more blocks of missing modules.`);
   return { flagged, messages, openPorts };
 }

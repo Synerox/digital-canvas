@@ -11,7 +11,7 @@ import { THEMES } from '../render/theme';
 import type { WireEnd } from '../editor/sheet';
 import { orthogonalize } from '../editor/router';
 import { symbolNode, newUserNode } from '../editor/symbols';
-import { measureFor, useStore } from './store';
+import { drawnRoute, measureFor, useStore } from './store';
 import { ui } from './ui-events';
 
 interface View {
@@ -335,7 +335,9 @@ export function EditorCanvas() {
     if (m.kind !== 'wire') return;
     const start = m.at;
     const pts = [start, ...m.bends, { x: snap(w.x), y: snap(w.y) }];
-    setWireDraft(orthogonalize(pts));
+    // Same shape as the wire connectEnds will store: out of the pin first, then through the bends.
+    const side = m.from.kind === 'port' && m.bends.length ? portInfo(m.from.port)?.port.side : undefined;
+    setWireDraft(side ? drawnRoute(pts, side) : orthogonalize(pts));
   };
 
   if (!layout) return null;
