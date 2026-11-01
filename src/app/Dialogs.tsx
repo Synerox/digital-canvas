@@ -3,8 +3,9 @@
  * check), and the shortcut sheet.
  */
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { diagramToVerilog } from '../editor/verilog-export';
-import { isDrawnKey } from '../editor/doc';
+import { type Diagram, buildDiagram } from '../core/diagram';
+import { diagramToVerilog, verilogIdent } from '../editor/verilog-export';
+import { emptyEdits, sheetKey } from '../editor/doc';
 import { effectiveDiagram } from '../editor/sheet';
 import { downloadBlob } from '../render/export';
 import { elaborate } from '../yosys/client';
@@ -46,22 +47,31 @@ export function ImportDialog({ onClose }: { onClose(): void }) {
   const fileInput = useRef<HTMLInputElement>(null);
   useEscape(onClose);
 
-  // Code that declares the same modules as an open file is a new version of that file:
-  // it replaces the file, and the edits made on its sheets are kept.
+  // Code that declares the same modules as open files is a new version of them: it replaces
+  // them (whatever its own file name), and the edits made on their sheets are kept.
   const deferred = useDeferredValue(code);
   const sameAs = useMemo(() => {
     const mods = new Set(declaredModules({ 'x.v': deferred }));
-    if (mods.size === 0) return undefined;
-    return Object.keys(files).find((f) => declaredModules({ [f]: files[f] }).some((m) => mods.has(m)));
+    if (mods.size === 0) return [];
+    return Object.keys(files).filter((f) => declaredModules({ [f]: files[f] }).some((m) => mods.has(m)));
   }, [deferred, files]);
   const fname = (() => {
-    const n = name.trim() || sameAs || 'pasted.v';
+    const n = name.trim() || sameAs[0] || 'pasted.v';
     return /\.(v|sv|vh|svh)$/i.test(n) ? n : `${n}.v`;
   })();
+  /** Open files that the import takes the place of (both would declare the same modules). */
+  const replaced = replace ? [] : sameAs.filter((f) => f !== fname);
+  const changed = replace ? [] : [...(files[fname] !== undefined ? [fname] : []), ...replaced];
 
   const run = async () => {
     onClose();
-    await setFiles({ [fname]: code }, replace);
+    if (replaced.length === 0) {
+      await setFiles({ [fname]: code }, replace);
+      return;
+    }
+    const next = { ...files };
+    for (const f of replaced) delete next[f];
+    await setFiles({ ...next, [fname]: code }, true);
   };
 
   return (
@@ -86,9 +96,10 @@ export function ImportDialog({ onClose }: { onClose(): void }) {
           Paste or open Verilog / SystemVerilog. Yosys reads it in your browser (nothing is uploaded) and every module becomes a sheet you can edit:
           move, rename and delete symbols, and draw more. Importing changed code later keeps your edits.
         </p>
-        {!replace && files[fname] !== undefined && (
+        {changed.length > 0 && (
           <p className="small">
-            Updates <b>{fname}</b>. Your moves, renames, deletions and hand-drawn parts on its sheets are kept.
+            {replaced.length ? 'Replaces' : 'Updates'} <b>{changed.join(', ')}</b>. Your moves, renames, deletions and hand-drawn parts on its sheets are
+            kept.
           </p>
         )}
         <textarea
@@ -101,7 +112,7 @@ export function ImportDialog({ onClose }: { onClose(): void }) {
         />
         <div className="row">
           <label className="small">
-            File name <input value={name} placeholder={sameAs ?? 'pasted.v'} onChange={(e) => setName(e.target.value)} style={{ width: 140 }} />
+            File name <input value={name} placeholder={sameAs[0] ?? 'pasted.v'} onChange={(e) => setName(e.target.value)} style={{ width: 140 }} />
           </label>
           <label className="small radio">
             <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> Replace the current files
@@ -132,37 +143,88 @@ export function ImportDialog({ onClose }: { onClose(): void }) {
   );
 }
 
-/** Verilog for the sheet on screen, and for the drawings it instantiates. */
-function exportCurrent(): { name: string; code: string; warnings: string[] } {
+export interface VerilogOut {
+  /** The module as the code names it (the Yosys top, and the name of the downloaded file). */
+  name: string;
+  code: string;
+  warnings: string[];
+  /** What Yosys reads to check the code, and the module to elaborate. */
+  check: { files: Record<string, string>; top: string };
+}
+
+/**
+ * Verilog for the sheet on screen, and for the modules it instantiates that
+ * no Verilog file defines: drawings and automatic blocks. Modules from the
+ * user's files are instantiated by name; the check reads those files too.
+ */
+// Exported for the tests; the dialog below is its only user.
+// oxlint-disable-next-line react/only-export-components
+export function exportCurrent(): VerilogOut {
   const s = useStore.getState();
   const module = s.path[s.path.length - 1]?.module ?? 'top';
-  const name = module.replace(/[^A-Za-z0-9_$]/g, '_');
-  if (!s.netlist) return { name, code: '', warnings: ['Nothing to export.'] };
+  // Written as an instance writes it (`top/crop_points` → `top_crop_points`), so a parent's export fits this one.
+  const name = verilogIdent(module);
+  if (!s.netlist) return { name, code: '', warnings: ['Nothing to export.'], check: { files: {}, top: name } };
+  const declared = new Set(declaredModules(s.files));
   const parts: string[] = [];
   const warnings: string[] = [];
-  const done = new Set<string>();
-  const add = (mod: string, d: typeof s.netlist) => {
-    if (done.has(mod) || !d) return;
-    done.add(mod);
-    // Drawings used as blocks go first, so the file reads bottom-up.
+  /** Warnings about the sub-modules, listed after the sheet's own. */
+  const later: string[] = [];
+  const done = new Set<string>([module]);
+  /** Module names the code defines. */
+  const defined = new Set<string>([name]);
+  /** Instantiates a module that only the user's files define. */
+  let usesFiles = false;
+  const subModules = (d: Diagram) => {
     for (const n of d.nodes) {
-      if (n.kind === 'instance' && n.moduleName && s.doc.drawn.includes(n.moduleName) && !done.has(n.moduleName)) {
-        const e = s.doc.sheets[`d:${n.moduleName}`];
-        if (e) add(n.moduleName, effectiveDiagram(n.moduleName, undefined, e, s.interfaceOf));
+      const sub = n.kind === 'instance' ? n.moduleName : undefined;
+      if (!sub || done.has(sub)) continue;
+      if (s.doc.drawn.includes(sub)) {
+        add(sub, effectiveDiagram(sub, undefined, s.doc.sheets[`d:${sub}`] ?? emptyEdits(), s.interfaceOf), sub);
+      } else if (s.blockDesign?.modules[sub]?.auto) {
+        // An automatic block is cut out of a Verilog module by this app, so no file defines it: write it
+        // as its own sheet shows it, under the name the instance uses.
+        const base = buildDiagram(s.blockDesign, sub, s.rules);
+        const e = s.doc.sheets[sheetKey({ instance: sub, module: sub }, 'blocks')] ?? emptyEdits();
+        add(sub, effectiveDiagram(sub, base, e, s.interfaceOf), verilogIdent(sub));
+      } else if (declared.has(sub)) {
+        usesFiles = true;
+      } else {
+        done.add(sub);
+        warnings.push(`Module ${sub} (instance ${n.instanceName ?? n.subLabel ?? n.label}) is not defined by a drawing or your Verilog files`);
       }
     }
-    const r = diagramToVerilog(d, mod.replace(/^.*\//, '').replace(/[^A-Za-z0-9_$]/g, '_'));
-    parts.push(r.code);
-    warnings.push(...r.warnings.map((w) => (mod === module ? w : `${mod}: ${w}`)));
   };
-  add(module, s.netlist);
-  return { name, code: parts.join('\n'), warnings };
+  /** Sub-modules go first, so the file reads bottom-up. */
+  const add = (mod: string, d: Diagram, as: string) => {
+    done.add(mod);
+    subModules(d);
+    const r = diagramToVerilog(d, as);
+    defined.add(verilogIdent(as));
+    parts.push(r.code);
+    later.push(...r.warnings.map((w) => `${mod}: ${w}`));
+  };
+  subModules(s.netlist);
+  const top = diagramToVerilog(s.netlist, module);
+  warnings.push(...top.warnings, ...later);
+  const code = [...parts, top.code].join('\n');
+  if (!usesFiles) return { name, code, warnings, check: { files: { [`${name}.v`]: code }, top: name } };
+
+  // The modules it instantiates are in the user's files, and so is a Verilog sheet's own module:
+  // check a copy of this module under a name of its own, so that the two definitions do not clash.
+  const taken = new Set([...declared, ...defined, ...Object.keys(s.files)]);
+  const unused = (stem: string, ext = '') => {
+    let n = `${stem}${ext}`;
+    for (let i = 2; taken.has(n); i++) n = `${stem}_${i}${ext}`;
+    return n;
+  };
+  const checkTop = declared.has(name) ? unused(`${name}_export`) : name;
+  const checkCode = checkTop === name ? code : [...parts, diagramToVerilog(s.netlist, checkTop).code].join('\n');
+  return { name, code, warnings, check: { files: { ...s.files, [unused(name, '.v')]: checkCode }, top: checkTop } };
 }
 
 export function VerilogExportDialog({ onClose }: { onClose(): void }) {
   const out = useMemo(() => exportCurrent(), []);
-  const sheet = useStore((s) => s.sheet);
-  const files = useStore((s) => s.files);
   const [check, setCheck] = useState<{ ok: boolean; text: string }>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>();
@@ -172,12 +234,9 @@ export function VerilogExportDialog({ onClose }: { onClose(): void }) {
     setBusy(true);
     setCheck(undefined);
     try {
-      // Blocks may instantiate Verilog modules: elaborate with the user's files too.
-      const fname = `${out.name}_drawing.v`;
-      const usesVerilog = isDrawnKey(sheet) && Object.keys(files).length > 0;
-      const r = await elaborate({ ...(usesVerilog ? files : {}), [fname]: out.code }, out.name);
+      const r = await elaborate(out.check.files, out.check.top);
       const json = parseYosysJson(r.json);
-      const m = json.modules[out.name];
+      const m = json.modules[out.check.top];
       setCheck({ ok: true, text: `Yosys elaborated ${out.name}: ${Object.keys(m?.ports ?? {}).length} ports, ${Object.keys(m?.cells ?? {}).length} cells.` });
     } catch (e) {
       setCheck({ ok: false, text: e instanceof Error ? e.message : String(e) });

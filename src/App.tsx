@@ -50,9 +50,28 @@ function StatusText() {
 
 /** True when the key press belongs to a text field or an open menu. */
 function ownsKeys(t: EventTarget | null): boolean {
-  const el = (t as Element | null)?.closest?.('input, textarea, select, [role=menu]');
+  const el = (t as Element | null)?.closest?.('input, textarea, select, [role=menu], [contenteditable]:not([contenteditable="false"])');
   if (!el) return false;
   return !(el.tagName === 'INPUT' && ['checkbox', 'radio', 'button', 'range', 'file'].includes((el as HTMLInputElement).type));
+}
+
+/** The panes that show text to read and copy (Source, Yosys log). */
+const TEXT_PANES = '.code, .log pre';
+
+/**
+ * The text pane the user works in, when not the drawing: the pane that has
+ * the focus, or the one where text is selected. Copy, select all and the
+ * editing keys then act on that text, not on the selected symbols.
+ */
+function textInUse(t: EventTarget | null): Element | undefined {
+  const target = t instanceof Element ? t : undefined;
+  if (target?.closest('.canvas')) return undefined;
+  const pane = target?.closest(TEXT_PANES);
+  if (pane) return pane;
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed) return undefined;
+  const at = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
+  return at?.closest(TEXT_PANES) ?? document.body;
 }
 
 function saveDrawing() {
@@ -121,12 +140,21 @@ export default function App() {
         e.preventDefault();
         e.stopPropagation();
       };
+      const text = textInUse(e.target);
       if (mod && !e.altKey) {
         if (k === 'z' && !e.shiftKey) return take(), st.undo();
         if ((k === 'z' && e.shiftKey) || k === 'y') return take(), st.redo();
         if (k === 's') return take(), saveDrawing();
         if (k === 'o') return take(), openDrawing();
         if (k === 'i') return take(), setShowImport(true);
+        if (text) {
+          // Select all selects the pane's text, not the whole page; copy and the rest are the browser's.
+          if (k === 'a' && text !== document.body) {
+            take();
+            document.getSelection()?.selectAllChildren(text);
+          }
+          return;
+        }
         if (k === 'a') return take(), st.selectAll();
         if (k === 'c') return st.copy() ? take() : undefined;
         if (k === 'x') return take(), st.cut();
@@ -135,7 +163,6 @@ export default function App() {
         return;
       }
       if (e.altKey) return;
-      if (e.key === 'Delete' || e.key === 'Backspace') return st.selection.size ? (take(), st.deleteSelection()) : undefined;
       if (e.key === 'Escape') {
         if (st.placing) st.startPlacing(undefined);
         else st.select([]);
@@ -143,6 +170,9 @@ export default function App() {
       }
       if (k === 'f') return take(), ui.dispatchEvent(new Event('fit'));
       if (k === 'i') return take(), ui.dispatchEvent(new Event('focus-library'));
+      // The keys below change the drawing: not while the user reads or selects text in a pane.
+      if (text) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') return st.selection.size ? (take(), st.deleteSelection()) : undefined;
       if (k === 'l') return take(), void st.autoLayout();
       if ((e.key === 'Enter' || e.key === 'F2') && st.selection.size === 1) {
         take();

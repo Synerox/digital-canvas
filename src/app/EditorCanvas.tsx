@@ -5,7 +5,7 @@
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Side } from '../core/diagram';
-import { GRID, type LayoutResult, type Point, sizeNode } from '../layout/elk-layout';
+import { GRID, type LEdge, type LayoutResult, type Point, sizeNode } from '../layout/elk-layout';
 import { DiagramGraphic } from '../render/DiagramGraphic';
 import { THEMES } from '../render/theme';
 import type { WireEnd } from '../editor/sheet';
@@ -26,7 +26,7 @@ type Mode =
   | { kind: 'press-node'; start: Point; cx: number; cy: number; ids: Set<string>; moved: boolean; clicked: string; additive: boolean; dx: number; dy: number }
   | { kind: 'press-empty'; start: Point; cx: number; cy: number; additive: boolean; moved: boolean }
   | { kind: 'press-port'; end: WireEnd; at: Point; side: Side; cx: number; cy: number }
-  | { kind: 'press-edge'; id: string; start: Point; cx: number; cy: number; seg: number; points: Point[]; moved: boolean; draft?: Point[] }
+  | { kind: 'press-edge'; id: string; start: Point; cx: number; cy: number; seg: number; points: Point[]; moved: boolean; draft?: Point[]; shared: boolean }
   | { kind: 'wire'; from: WireEnd; at: Point; side?: Side; bends: Point[]; dragging: boolean };
 
 const Graphic = memo(DiagramGraphic);
@@ -75,6 +75,36 @@ function nearestOnPolyline(points: Point[], p: Point): Point {
   return best;
 }
 
+/**
+ * Whether segment `seg` of a wire runs along another wire of the same net. The
+ * router lets branches share their trunk, and every wire keeps its own copy of
+ * it: moving the stretch in one wire alone would leave the other copy behind,
+ * a loop of doubled wire.
+ */
+// Exported for the tests.
+// oxlint-disable-next-line react/only-export-components
+export function sharedSegment(edges: readonly LEdge[], id: string, seg: number): boolean {
+  const e = edges.find((x) => x.id === id);
+  const a = e?.points[seg];
+  const b = e?.points[seg + 1];
+  if (!e || !a || !b) return false;
+  const flat = Math.abs(a.y - b.y) < 0.5;
+  const along = (p: Point) => (flat ? p.x : p.y);
+  const across = (p: Point) => (flat ? p.y : p.x);
+  const lo = Math.min(along(a), along(b));
+  const hi = Math.max(along(a), along(b));
+  for (const o of edges) {
+    if (o.id === id || o.source.port !== e.source.port) continue;
+    for (let i = 1; i < o.points.length; i++) {
+      const p = o.points[i - 1];
+      const q = o.points[i];
+      if (Math.abs(across(p) - across(a)) >= 0.5 || Math.abs(across(q) - across(a)) >= 0.5) continue;
+      if (Math.min(hi, Math.max(along(p), along(q))) - Math.max(lo, Math.min(along(p), along(q))) > 0.5) return true;
+    }
+  }
+  return false;
+}
+
 function Ghost({ at }: { at: Point }) {
   const placing = useStore((s) => s.placing);
   const themeName = useStore((s) => s.theme);
@@ -112,7 +142,6 @@ function Ghost({ at }: { at: Point }) {
 
 export function EditorCanvas() {
   const layout = useStore((s) => s.layout);
-  const sheet = useStore((s) => s.sheet);
   const themeName = useStore((s) => s.theme);
   const selection = useStore((s) => s.selection);
   const highlighted = useStore((s) => s.highlighted);
@@ -134,7 +163,8 @@ export function EditorCanvas() {
   // Shown in the cursor: what a press does now.
   const [gesture, setGesture] = useState<'none' | 'pan' | 'wire'>('none');
   const [spaceDown, setSpaceDown] = useState(false);
-  const fittedFor = useRef<string>('');
+  /** Set while a fit waits for the layout of a newly opened sheet (`stale`: the layout of the sheet before). */
+  const fitAfter = useRef<{ stale?: LayoutResult } | undefined>({});
   const hasLayout = layout !== undefined;
 
   const fit = useCallback(() => {
@@ -152,12 +182,26 @@ export function EditorCanvas() {
     setView({ k, x: (W - l.width * k) / 2 - lx * k, y: (H - l.height * k) / 2 - ly * k });
   }, []);
 
-  // Fit when a sheet is opened, not after every edit.
+  // Fit when another sheet appears, not after every edit. The store switches to the new sheet's key
+  // before that sheet's layout is ready (ELK runs in a worker): until then the layout on screen is
+  // still the previous sheet's, so the fit waits for a layout that is not that one.
+  useEffect(
+    () =>
+      useStore.subscribe((s, prev) => {
+        if (s.sheet === prev.sheet) return;
+        // A renamed drawing keeps its edits under the new key: the same sheet, so keep the view.
+        const e = s.doc.sheets[s.sheet];
+        if (e && e === prev.doc.sheets[prev.sheet]) return;
+        fitAfter.current = { stale: prev.layout };
+      }),
+    [],
+  );
   useEffect(() => {
-    if (!layout || fittedFor.current === sheet) return;
-    fittedFor.current = sheet;
+    const pending = fitAfter.current;
+    if (!layout || !pending || layout === pending.stale) return;
+    fitAfter.current = undefined;
     fit();
-  }, [layout, sheet, fit]);
+  }, [layout, fit]);
 
   useEffect(() => {
     const el = wrap.current;
@@ -331,6 +375,9 @@ export function EditorCanvas() {
       onPointerDown={(ev) => {
         const w = toWorld(ev.clientX, ev.clientY);
         (ev.currentTarget as HTMLElement).focus({ preventScroll: true });
+        // The canvas cannot be selected, so a press here would leave text selected in Source;
+        // drop it, so that Ctrl+C later copies symbols, not old text (see App's shortcuts).
+        document.getSelection()?.removeAllRanges();
         if (ev.button === 1 || ev.button === 2 || (ev.button === 0 && spaceDown)) {
           mode.current = { kind: 'pan', sx: ev.clientX, sy: ev.clientY, vx: view.x, vy: view.y };
           setGesture('pan');
@@ -403,7 +450,19 @@ export function EditorCanvas() {
               }
             }
           }
-          mode.current = { kind: 'press-edge', id: hit.edge, start: w, cx: ev.clientX, cy: ev.clientY, seg, points: e?.points ?? [], moved: false };
+          // A trunk that branches share is not dragged: one wire would leave the others' copy behind.
+          const shared = !!e && seg >= 0 && sharedSegment(s.layout?.edges ?? [], e.id, seg);
+          mode.current = {
+            kind: 'press-edge',
+            id: hit.edge,
+            start: w,
+            cx: ev.clientX,
+            cy: ev.clientY,
+            seg: shared ? -1 : seg,
+            points: e?.points ?? [],
+            moved: false,
+            shared,
+          };
           return;
         }
         mode.current = { kind: 'press-empty', start: w, cx: ev.clientX, cy: ev.clientY, additive, moved: false };
@@ -447,6 +506,10 @@ export function EditorCanvas() {
             return;
           }
           case 'press-edge': {
+            if (m.shared && !m.moved && far(m.cx, m.cy)) {
+              m.moved = true;
+              s.setNotice('Several wires of this net run along this stretch. Drag a stretch that belongs to one wire, or move the symbols.');
+            }
             if (m.seg < 0 || (!m.moved && !far(m.cx, m.cy))) return;
             m.moved = true;
             const a = m.points[m.seg];

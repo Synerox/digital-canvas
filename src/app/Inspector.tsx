@@ -4,8 +4,10 @@
  * change is one undo step.
  */
 import { useEffect, useRef, useState } from 'react';
+import type { SrcRange } from '../core/ir';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
+import { verilogIdent } from '../editor/verilog-export';
 import { useStore } from './store';
 import { ui } from './ui-events';
 
@@ -90,6 +92,25 @@ function parseSlice(text: string, srcWidth: number): { lo: number; width: number
   return { lo, width: hi - lo + 1 };
 }
 
+/** The source lines Source highlights for a symbol, each once and in order (an automatic block has many cells, often several per line). */
+function srcLines(src: readonly SrcRange[]): number[] {
+  const lines = new Set<number>();
+  for (const r of src) for (let l = r.startLine; l <= Math.max(r.startLine, r.endLine); l++) lines.add(l);
+  return [...lines].sort((a, b) => a - b);
+}
+
+/** Sorted line numbers, runs written as ranges: `31, 33, 35–48`. */
+function lineList(lines: number[]): string {
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; ) {
+    let j = i;
+    while (j + 1 < lines.length && lines[j + 1] === lines[j] + 1) j++;
+    out.push(j > i ? `${lines[i]}–${lines[j]}` : String(lines[i]));
+    i = j + 1;
+  }
+  return out.join(', ');
+}
+
 export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
   const s = useStore();
   const nameRef = useRef<HTMLInputElement>(null);
@@ -128,7 +149,12 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
                 const err = s.renameDrawing(module, v);
                 if (err) s.setNotice(err);
               }}
-              check={(v) => (/^[A-Za-z_][A-Za-z0-9_$]*$/.test(v.trim()) ? undefined : 'Use letters, digits and _.')}
+              check={(v) => {
+                const want = v.trim();
+                if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(want)) return 'Use letters, digits and _.';
+                // A keyword is no legal module name: the export would have to write the module under another one.
+                return verilogIdent(want) === want ? undefined : `${want} is a Verilog keyword.`;
+              }}
             />
           </label>
         ) : (
@@ -214,13 +240,15 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
               : node.kind === 'join'
                 ? 'Concatenation'
                 : node.kind;
-    const renameable = user ? !!def?.named || user.sym === 'raw' : ['instance', 'input', 'output', 'inout', 'const'].includes(node.kind);
+    // An imported constant's label is its value: only the Verilog changes it.
+    const renameable = user ? !!def?.named || user.sym === 'raw' : ['instance', 'input', 'output', 'inout'].includes(node.kind);
     const nameValue = user
       ? (user.name ?? '')
       : node.kind === 'instance'
         ? (node.subLabel ?? '')
         : node.label;
     const renamed = !user && edits?.labels[id] !== undefined;
+    const lines = srcLines(node.src);
     return (
       <div className="inspector">
         <h3>{title}</h3>
@@ -298,8 +326,16 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
             </div>
           ))}
         </dl>
-        {node.src.length > 0 && <p className="small muted">Verilog line {node.src.map((r) => r.startLine).join(', ')} is highlighted in Source.</p>}
-        {!user && <p className="small muted">Imported from Verilog: change the Verilog to change what it is. You can move, rename or delete it here.</p>}
+        {lines.length > 0 && (
+          <p className="small muted">
+            Verilog {lines.length === 1 ? `line ${lines[0]} is` : `lines ${lineList(lines)} are`} highlighted in Source.
+          </p>
+        )}
+        {!user && (
+          <p className="small muted">
+            Imported from Verilog: change the Verilog to change what it is. You can {renameable ? 'move, rename' : 'move'} or delete it here.
+          </p>
+        )}
         <div className="prop-actions">
           <button className="danger" onClick={() => s.deleteSelection()}>
             Delete

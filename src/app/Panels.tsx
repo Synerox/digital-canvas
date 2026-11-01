@@ -161,7 +161,8 @@ export function CodePanel() {
 
   if (!codeFile || text === undefined) return <div className="code empty muted small">No source file.</div>;
   return (
-    <div className="code" ref={box}>
+    // Focusable, so that copy and select all act on the code while the user works in it (see App).
+    <div className="code" ref={box} tabIndex={-1}>
       {lines.map((l, i) => (
         <div
           key={i}
@@ -189,7 +190,7 @@ export function LogPanel({ onClose }: { onClose(): void }) {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
-      <pre>{log || 'No output yet.'}</pre>
+      <pre tabIndex={-1}>{log || 'No output yet.'}</pre>
     </div>
   );
 }
