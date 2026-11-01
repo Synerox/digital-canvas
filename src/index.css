@@ -90,3 +90,8 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .rules li { margin: 2px 0; }
 .rules label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
 .error-banner { padding: 6px 10px; background: #fff5f5; border-bottom: 1px solid #f1c0c0; color: #8a1f1f; font-size: 12px; }
+.view-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; flex: none; }
+.view-toggle button { border: none; border-radius: 0; background: none; padding: 3px 10px; color: var(--muted); }
+.view-toggle button + button { border-left: 1px solid var(--line); }
+.view-toggle button.on { background: var(--accent); color: #fff; }
+.tree .auto-block { font-style: italic; }

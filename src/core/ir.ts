@@ -68,6 +68,8 @@ export interface IRModule {
   cells: IRCell[];
   nets: IRNet[];
   src: SrcRange[];
+  /** Set for blocks found by automatic partitioning: the module they were cut from. */
+  auto?: { parent: string };
 }
 
 export interface IRDesign {

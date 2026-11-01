@@ -285,8 +285,9 @@ export function buildDiagram(
         ? {
             id,
             kind: 'instance',
-            label: displayModuleName(c.type),
+            label: design.modules[c.type]?.displayName ?? displayModuleName(c.type),
             subLabel: c.hidden ? undefined : c.name,
+            attrs: c.attrs,
             cellType: c.type,
             moduleName: c.type,
             instanceName: c.name,

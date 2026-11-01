@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Canvas } from './app/Canvas';
 import { ExportDialog } from './app/ExportDialog';
-import { Breadcrumb, CodePanel, FileList, HierarchyTree, LogPanel, RulePanel, TopSelector } from './app/Panels';
-import { useStore } from './app/store';
+import { Breadcrumb, CodePanel, FileList, HierarchyTree, LogPanel, RulePanel, TopSelector, ViewToggle } from './app/Panels';
+import { EXAMPLES, type ExampleName, useStore } from './app/store';
 import { THEMES, type ThemeName } from './render/theme';
 
 let exampleLoaded = false;
@@ -58,7 +58,7 @@ export default function App() {
 
   const openNode = (id: string) => {
     const n = s.layout?.nodes.find((x) => x.id === id);
-    if (n?.kind === 'instance' && n.moduleName && n.instanceName && s.design?.modules[n.moduleName]) {
+    if (n?.kind === 'instance' && n.moduleName && n.instanceName && s.viewDesign()?.modules[n.moduleName]) {
       void s.enterInstance(n.instanceName, n.moduleName);
     }
   };
@@ -104,7 +104,21 @@ export default function App() {
             if (Object.keys(files).length) await s.setFiles(files, true);
           }}
         />
-        <button onClick={() => s.loadExample()}>Load example</button>
+        <select
+          className="example-select"
+          value=""
+          title="Load an example design"
+          onChange={(e) => {
+            if (e.target.value) void s.loadExample(e.target.value as ExampleName);
+          }}
+        >
+          <option value="">Load example…</option>
+          {(Object.keys(EXAMPLES) as ExampleName[]).map((k) => (
+            <option key={k} value={k}>
+              {EXAMPLES[k].label}
+            </option>
+          ))}
+        </select>
         <TopSelector />
         <span className="spacer" />
         <StatusText />
@@ -139,18 +153,21 @@ export default function App() {
             <RulePanel />
           </section>
           <section className="help small muted">
-            <p>Double-click a block to open the sub-module. Click a symbol to find its Verilog line; click a code line to find its symbols.</p>
+            <p>Double-click a block to open the sub-module. Single modules are split into functional blocks automatically; use “Full circuit” to see everything on one sheet. Click a symbol to find its Verilog line; click a code line to find its symbols.</p>
             <p>Everything runs in your browser. Your Verilog is never uploaded.</p>
           </section>
         </aside>
 
         <section className="center">
           <div className="center-head">
+            <ViewToggle />
             <Breadcrumb />
             {selectedNode && (
               <span className="selection muted small">
                 {selectedNode.kind === 'instance'
-                  ? `${selectedNode.subLabel ?? ''} : ${selectedNode.label} (double-click to open)`
+                  ? selectedNode.attrs?.auto
+                    ? `Auto block ${selectedNode.label} (double-click to open)`
+                    : `${selectedNode.subLabel ?? ''} : ${selectedNode.label} (double-click to open)`
                   : selectedNode.cellType ?? selectedNode.label}
               </span>
             )}
