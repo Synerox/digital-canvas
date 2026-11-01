@@ -7,9 +7,11 @@
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
 import type { LayoutResult, Point } from '../layout/elk-layout';
-import { wireShift } from './check';
+import { scaleNote, wireShift } from './check';
 import { type RouteRec, type SheetEdits, freeIdFloor } from './doc';
+import { polylineHitsRect } from './router';
 import { type InterfaceOf, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
+import { verilogIdent } from './verilog-export';
 
 // ---------- effective netlist ----------
 
@@ -250,11 +252,14 @@ export function deleteItems(e: SheetEdits, d: Diagram, ids: Iterable<string>): S
 
 export function connect(e: SheetEdits, c: Connection, route?: Point[], label?: string): [string, SheetEdits] {
   const [id, e1] = newId(e, 'w');
+  // A wire that appends zero bits (it taps or joins a `×4` wire) says so as the imported one does:
+  // without the note it would read as the plain bus, while the export writes it scaled.
+  const text = label || (c.shift ? scaleNote(c.shift) : undefined);
   const edge: UserEdge = {
     id,
     source: c.source,
     target: c.target,
-    ...(label ? { label } : {}),
+    ...(text ? { label: text } : {}),
     ...(c.slice ? { slice: { ...c.slice } } : {}),
     ...(c.shift ? { shift: c.shift } : {}),
   };
@@ -382,16 +387,30 @@ export function layoutToEdits(e: SheetEdits, layout: LayoutResult, keep: 'none' 
 }
 
 /**
+ * Room placeMissing keeps between symbols: a pin's stub on each side (the router's straight piece at a
+ * pin reaches one or two grid steps past the outline, e.g. below a MUX's select or a register's clock)
+ * and a grid step between them, so a wire can pass and never runs along the other symbol's edge.
+ */
+const PLACE_CLEARANCE = 30;
+/** Room placeMissing keeps between a new symbol and a stored wire: a pin's stub and a grid step. */
+const PLACE_WIRE_CLEARANCE = 20;
+/** How far below the first spot clear of symbols placeMissing looks for one clear of wires too. */
+const PLACE_WIRE_SEARCH = 200;
+
+/**
  * Positions for symbols that have none yet (new in a re-import, or after a
  * drawing rule changed the netlist): each goes where ELK put it relative to
- * a neighbour that already has a position, then moves down until it does not
- * overlap anything.
+ * a neighbour that already has a position, then moves down until it keeps
+ * clear of the other symbols and, when it can nearby, of the stored wires in
+ * `routes` (a wire on its outline or a stub's length from it would read as
+ * connected to its pins).
  */
 export function placeMissing(
   d: Diagram,
   pos: Record<string, Point>,
   elk: LayoutResult | undefined,
   size: (n: DNode) => { width: number; height: number },
+  routes: Record<string, RouteRec> = {},
 ): Record<string, Point> {
   const missing = d.nodes.filter((n) => !pos[n.id]);
   if (missing.length === 0) return pos;
@@ -415,8 +434,14 @@ export function placeMissing(
     minY = Math.min(minY, r.y);
   }
   let fallbackY = minY;
+  const c = PLACE_CLEARANCE;
   const overlaps = (x: number, y: number, w: number, h: number) =>
-    rects.some((r) => x < r.x + r.w + 10 && x + w + 10 > r.x && y < r.y + r.h + 10 && y + h + 10 > r.y);
+    rects.some((r) => x < r.x + r.w + c && x + w + c > r.x && y < r.y + r.h + c && y + h + c > r.y);
+  // Stored wires between symbols that had a place: a wire of a symbol placed here has no route yet.
+  const wires = d.edges.filter((x) => pos[x.source.node] && pos[x.target.node] && (routes[x.id]?.points.length ?? 0) >= 2).map((x) => routes[x.id].points);
+  const cw = PLACE_WIRE_CLEARANCE;
+  const nearWire = (x: number, y: number, w: number, h: number) =>
+    wires.some((pts) => polylineHitsRect(pts, { x: x - cw, y: y - cw, width: w + 2 * cw, height: h + 2 * cw }));
   // Place nodes with placed neighbours first, so chains of new nodes follow each other.
   const queue = [...missing];
   let guard = queue.length * queue.length + 10;
@@ -446,10 +471,22 @@ export function placeMissing(
     }
     if (!p) {
       p = { x: maxX + 60, y: fallbackY };
-      fallbackY += s.height + 20;
+      fallbackY += s.height + PLACE_CLEARANCE;
     }
-    let tries = 0;
-    while (overlaps(p.x, p.y, s.width, s.height) && tries++ < 400) p = { x: p.x, y: p.y + 10 };
+    // The first spot below clear of symbols; then, a little further down, one clear of wires too. Past
+    // that the symbol stays at the first spot: a wire it lands on is routed again (see buildGeometry).
+    let free: Point | undefined;
+    for (let k = 0; k <= 400; k++) {
+      const q = { x: p.x, y: p.y + 10 * k };
+      if (free && q.y - free.y > PLACE_WIRE_SEARCH) break;
+      if (overlaps(q.x, q.y, s.width, s.height)) continue;
+      if (!nearWire(q.x, q.y, s.width, s.height)) {
+        free = q;
+        break;
+      }
+      free ??= q;
+    }
+    p = free ?? { x: p.x, y: p.y + 4000 };
     p = { x: Math.round(p.x), y: Math.round(p.y) };
     out[n.id] = p;
     rects.push({ x: p.x, y: p.y, w: s.width, h: s.height });
@@ -589,11 +626,39 @@ export function copyNodes(d: Diagram, e: SheetEdits, layout: LayoutResult, ids: 
   return { nodes, edges, routes };
 }
 
-/** Paste a clip with its top-left corner at `at`. Returns the new edits and the IDs of what was pasted. */
-export function pasteClip(e: SheetEdits, clip: Clip, at: Point): [SheetEdits, string[]] {
+/**
+ * The name the Verilog export gives a pin (its port) or a named block (its instance); undefined for
+ * other symbols, and for a block nobody named (it gets an automatic name).
+ */
+function verilogName(n: DNode): string | undefined {
+  if (n.kind === 'input' || n.kind === 'output' || n.kind === 'inout') return n.label;
+  return n.kind === 'instance' ? n.subLabel : undefined;
+}
+
+/** A name like `name` that is not taken: in1 → in2 (the next free number, as placement numbers pins), a → a2. */
+function freeName(name: string, taken: ReadonlySet<string>): string {
+  const m = /^(.*\D)(\d+)$/.exec(name);
+  const stem = m ? m[1] : name;
+  for (let k = m ? 1 : 2; ; k++) if (!taken.has(verilogIdent(`${stem}${k}`))) return `${stem}${k}`;
+}
+
+/**
+ * Paste a clip with its top-left corner at `at`. Returns the new edits and the IDs of what was pasted.
+ * A pasted pin or block whose name is already used on the sheet gets a free one, as placement gives
+ * (in1 → in2, a → a2): two pins drawn as `a` would read as one signal, but the Verilog writes two
+ * ports (a and a_2). `sheet` is the sheet's netlist, for the names of its imported symbols; without
+ * it only the symbols drawn by hand count.
+ */
+export function pasteClip(e: SheetEdits, clip: Clip, at: Point, sheet?: Diagram): [SheetEdits, string[]] {
   let cur = e;
   const map = new Map<string, string>();
   const items: { node: UserNode; pos: Point }[] = [];
+  const noModules: InterfaceOf = () => undefined;
+  const taken = new Set<string>();
+  for (const n of sheet?.nodes ?? e.nodes.map((u) => symbolNode(u, noModules))) {
+    const name = verilogName(n);
+    if (name !== undefined) taken.add(verilogIdent(name));
+  }
   for (const it of clip.nodes) {
     const [id, next] = newId(cur, 'u');
     cur = next;
@@ -601,6 +666,12 @@ export function pasteClip(e: SheetEdits, clip: Clip, at: Point): [SheetEdits, st
     const node: UserNode = structuredClone(it.node);
     node.id = id;
     if (node.raw) node.raw = { ...node.raw, id, ports: node.raw.ports.map((p) => ({ ...p, id: `${id}.${p.name}` })) };
+    const name = verilogName(symbolNode(node, noModules))?.trim();
+    if (name) {
+      const free = taken.has(verilogIdent(name)) ? freeName(name, taken) : name;
+      if (free !== name) node.name = free;
+      taken.add(verilogIdent(free));
+    }
     items.push({ node, pos: { x: it.pos.x + at.x, y: it.pos.y + at.y } });
   }
   cur = addNodes(cur, items);

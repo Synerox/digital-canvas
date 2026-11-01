@@ -3,8 +3,10 @@ import { type DNode, type DPort, type Diagram, type Side, buildDiagram } from '.
 import { DEFAULT_RULES } from '../core/rules';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
-import { type MeasureText, approxMeasure, isMuxType, layoutDiagram, sizeNode } from '../layout/elk-layout';
+import { type LayoutResult, type MeasureText, approxMeasure, isMuxType, layoutDiagram, sizeNode } from '../layout/elk-layout';
 import { checkSheet } from './check';
+import { buildGeometry } from './geometry';
+import { polylineHitsRect } from './router';
 import { type SheetEdits, emptyEdits, parseSavedFile, type SavedFile } from './doc';
 import {
   type WireEnd,
@@ -763,5 +765,163 @@ describe('saved files', () => {
       ],
       src: [src],
     });
+  });
+});
+
+describe('a wire that taps or joins a scaled (×4) wire', () => {
+  it('shows its zero bits as the imported one does, and is checked with them', async () => {
+    const src = "module t(input [3:0] a, input [1:0] b, output [3:0] y);\n  assign y = a + {b, 2'b00};\nendmodule\n";
+    const base = buildDiagram(await design({ 't.v': src }), 't', DEFAULT_RULES);
+    const scaled = base.edges.find((x) => x.shift)!;
+    const s = new Drawing(noModules, base);
+    const tap = s.add('output', 'tap', { width: 4 });
+    const joined = s.add('output', 'joined', { width: 4 });
+    const w1 = s.wire(onWire(scaled.id), `${tap}.in`);
+    const w2 = s.wire(`${joined}.in`, scaled.target.port);
+    // Without the note the new wire would read as b zero-extended, while the export writes {b, 2'd0}.
+    for (const id of [w1, w2]) expect(s.d.edges.find((x) => x.id === id), id).toMatchObject({ width: 2, shift: 2, label: scaled.label });
+    expect(checkSheet(s.d).messages).toEqual([]);
+
+    // Its width is judged with the zero bits: 2 bits ×4 are 4 bits, too wide for a 2-bit pin.
+    const narrow = s.add('output', 'narrow', { width: 2 });
+    const w3 = s.wire(onWire(scaled.id), `${narrow}.in`);
+    const issues = checkSheet(s.d);
+    expect([...issues.flagged]).toEqual([w3]);
+    expect(issues.messages).toEqual(['A 2-bit wire ×4 (4 bits) feeds the 2-bit input in of narrow.']);
+
+    // A label given with the wire wins; a plain wire gets none.
+    const named = s.add('output', 'named', { width: 4 });
+    const c = resolveConnection(s.d, onWire(scaled.id), at(`${named}.in`));
+    if ('error' in c) throw new Error(c.error);
+    const [w4, e4] = connect(s.e, c, undefined, 'b4');
+    expect(e4.edges.find((x) => x.id === w4)?.label).toBe('b4');
+    const plain = s.wire(at(scaled.source.port), `${s.add('output', 'plain', { width: 2 })}.in`);
+    expect(s.d.edges.find((x) => x.id === plain)?.label).toBeUndefined();
+  });
+});
+
+describe('repeated pin names', () => {
+  /** A layout of a drawing's symbols where they are stored, as the editor shows it. */
+  const shown = (s: Drawing) => buildGeometry({ netlist: s.d, pos: s.e.pos, routes: s.e.routes, measure: approxMeasure }).layout;
+  const pinLabels = (s: Drawing) => s.d.nodes.filter((n) => n.kind === 'input' || n.kind === 'output').map((n) => n.label);
+
+  it('are reported with the names the Verilog gives them', () => {
+    const s = new Drawing();
+    const a = s.add('input', 'a');
+    const y = s.add('output', 'y');
+    s.wire(`${a}.out`, `${y}.in`);
+    expect(checkSheet(s.d).messages).toEqual([]);
+    const a2 = s.add('input', 'a');
+    const y2 = s.add('output', 'y');
+    s.wire(`${a2}.out`, `${y2}.in`);
+    expect(diagramToVerilog(s.d, 'm').code).toContain('assign y_2 = a_2;');
+    expect(checkSheet(s.d).messages).toEqual([
+      'Two pins are named a; the Verilog calls the second a_2.',
+      'Two pins are named y; the Verilog calls the second y_2.',
+    ]);
+    // Names that only become the same in Verilog, three of a name, and a name the export has given away.
+    const t = new Drawing();
+    for (const n of ['a b', 'a_b', 'q', 'q', 'q', 'q_2']) t.add('input', n);
+    expect(checkSheet(t.d).messages).toEqual([
+      'Pins a b and a_b have the same Verilog name a_b; the Verilog calls the second a_b_2.',
+      '3 pins are named q; the Verilog calls the others q_2 and q_3.',
+      'Another pin is written as q_2, so the Verilog calls pin q_2 q_2_2.',
+    ]);
+  });
+
+  it('are not made by Duplicate or Paste: a pasted pin or block whose name is taken gets a free one', () => {
+    const iface: InterfaceOf = (m) => (m === 'child' ? { label: 'child', ports: [{ name: 'x', dir: 'input', width: 1 }] } : undefined);
+    const s = new Drawing(iface);
+    const a = s.add('input', 'a');
+    const y = s.add('output', 'y');
+    const in1 = s.add('input', 'in1');
+    s.add('input', 'in2');
+    const blk = s.add('block', 'u1', { module: 'child' });
+    s.wire(`${a}.out`, `${y}.in`);
+    s.wire(`${in1}.out`, `${blk}.x`);
+    // Select all, Duplicate.
+    const all = new Set(s.e.nodes.map((n) => n.id));
+    const clip = copyNodes(s.d, s.e, shown(s), all, iface)!;
+    let pasted: string[];
+    [s.e, pasted] = pasteClip(s.e, clip, { x: 0, y: 200 });
+    expect(pinLabels(s)).toEqual(['a', 'y', 'in1', 'in2', 'a2', 'y2', 'in3', 'in4']);
+    expect(s.d.nodes.filter((n) => n.kind === 'instance').map((n) => n.subLabel)).toEqual(['u1', 'u2']);
+    expect(checkSheet(s.d).messages).toEqual([]);
+    const v = diagramToVerilog(s.d, 'm');
+    expect(v.code).toContain('assign y2 = a2;');
+    expect(v.warnings.filter((w) => /used more than once/.test(w))).toEqual([]);
+    // The pasted wires join the pasted symbols.
+    const copies = s.d.edges.filter((x) => pasted.includes(x.id));
+    expect(copies).toHaveLength(2);
+    for (const x of copies) expect(pasted).toEqual(expect.arrayContaining([x.source.node, x.target.node]));
+
+    // Into another drawing, where the names are free, they stay; the names of an imported sheet count too.
+    const t = new Drawing(iface);
+    [t.e] = pasteClip(t.e, clip, { x: 0, y: 0 });
+    expect(pinLabels(t)).toEqual(['a', 'y', 'in1', 'in2']);
+    const imported: Diagram = { module: 'm', nodes: [symbolNode(newUserNode('in:a', 'input', { name: 'a' }), noModules)], edges: [] };
+    const [e3] = pasteClip(emptyEdits(), clip, { x: 0, y: 0 }, imported);
+    expect(e3.nodes.map((n) => n.name)).toEqual(['a2', 'y', 'in1', 'in2', 'u1']);
+  });
+});
+
+describe('placing symbols that have no position', () => {
+  /** A MUX that has its place, wired to a register that is new (as after a re-import). */
+  const setup = () => {
+    const mux = newUserNode('u:1', 'mux', { params: { width: 2 } });
+    const reg = newUserNode('u:2', 'dff', { params: { width: 2 } });
+    const e = addNodes({ ...emptyEdits(), next: 3 }, [
+      { node: mux, pos: { x: 100, y: 100 } },
+      { node: reg, pos: { x: 0, y: 0 } },
+    ]);
+    const d = effectiveDiagram('m', undefined, e, noModules);
+    const c = resolveConnection(d, at('u:1.Y'), at('u:2.D'));
+    if ('error' in c) throw new Error(c.error);
+    const [, e2] = connect(e, c);
+    const size = (id: string) => sizeNode(d.nodes.find((n) => n.id === id)!, approxMeasure);
+    // ELK put the register right under the MUX, a little apart (it had no select wire there).
+    const lnode = (id: string, x: number, y: number) => ({ ...d.nodes.find((n) => n.id === id)!, x, y, ...size(id), ports: [] });
+    const elk: LayoutResult = { module: 'm', width: 400, height: 400, nodes: [lnode('u:1', 0, 0), lnode('u:2', 0, size('u:1').height + 10)], edges: [] };
+    const pos = { 'u:1': e.pos['u:1'] };
+    return { d: effectiveDiagram('m', undefined, e2, noModules), elk, pos, size };
+  };
+  const measured = (n: DNode) => sizeNode(n, approxMeasure);
+
+  it('keeps a stub and a grid step clear of its neighbours, below their bottom pins too', () => {
+    const { d, elk, pos, size } = setup();
+    const out = placeMissing(d, pos, elk, measured);
+    const bottom = pos['u:1'].y + size('u:1').height;
+    expect(out['u:2'].x).toBe(pos['u:1'].x);
+    expect(out['u:2'].y - bottom).toBeGreaterThanOrEqual(30);
+    expect(out['u:2'].y - bottom).toBeLessThan(40);
+  });
+
+  it('keeps off stored wires nearby, and stays put when only a far move would clear them', () => {
+    const { d, elk, pos, size } = setup();
+    const first = placeMissing(d, pos, elk, measured)['u:2'];
+    const reg = size('u:2');
+    // Another net's wire runs across where the register would go (the MUX's select wire, say).
+    const across: Diagram = {
+      ...d,
+      nodes: [
+        ...d.nodes,
+        symbolNode(newUserNode('u:3', 'input', { name: 's' }), noModules),
+        symbolNode(newUserNode('u:4', 'output', { name: 't' }), noModules),
+      ],
+      edges: [...d.edges, { id: 'w:9', source: { node: 'u:3', port: 'u:3.out' }, target: { node: 'u:4', port: 'u:4.in' }, width: 1, fullSource: true }],
+    };
+    const wireY = first.y + 20;
+    const routes = { 'w:9': { points: [{ x: -200, y: wireY }, { x: 600, y: wireY }] } };
+    const pos2 = { ...pos, 'u:3': { x: -260, y: wireY - 10 }, 'u:4': { x: 600, y: wireY - 10 } };
+    const out = placeMissing(across, pos2, elk, measured, routes)['u:2'];
+    expect(out.x).toBe(first.x);
+    expect(out.y).toBeGreaterThanOrEqual(wireY + 20);
+    const r = { x: out.x - 19, y: out.y - 19, width: reg.width + 38, height: reg.height + 38 };
+    expect(polylineHitsRect(routes['w:9'].points, r)).toBe(false);
+    // Without the routes the wire is not known, and the register takes the first free spot.
+    expect(placeMissing(across, pos2, elk, measured)['u:2']).toEqual(first);
+    // A wire running down a long way there is not worth a long move: it is routed again instead.
+    const down = { 'w:9': { points: [{ x: first.x + 10, y: first.y - 5 }, { x: first.x + 10, y: first.y + 2000 }] } };
+    expect(placeMissing(across, pos2, elk, measured, down)['u:2']).toEqual(first);
   });
 });
