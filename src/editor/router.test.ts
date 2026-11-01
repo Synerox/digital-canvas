@@ -79,6 +79,22 @@ function lineGaps(a: Point[], b: Point[]): number[] {
   return out;
 }
 
+/** How far segments of the two polylines run side by side, parallel and closer than `gap` but not on one line. */
+function besideLength(a: Point[], b: Point[], gap = 10): number {
+  let n = 0;
+  for (let i = 1; i < a.length; i++)
+    for (let j = 1; j < b.length; j++) {
+      const [p, q, r, s] = [a[i - 1], a[i], b[j - 1], b[j]];
+      let off: number | undefined;
+      let span: [number, number, number, number] | undefined;
+      if (p.y === q.y && r.y === s.y) [off, span] = [Math.abs(p.y - r.y), [Math.min(p.x, q.x), Math.max(p.x, q.x), Math.min(r.x, s.x), Math.max(r.x, s.x)]];
+      else if (p.x === q.x && r.x === s.x) [off, span] = [Math.abs(p.x - r.x), [Math.min(p.y, q.y), Math.max(p.y, q.y), Math.min(r.y, s.y), Math.max(r.y, s.y)]];
+      if (off === undefined || !span || off === 0 || off >= gap) continue;
+      n += Math.max(0, Math.min(span[1], span[3]) - Math.max(span[0], span[2]));
+    }
+  return n;
+}
+
 /** Whether point c lies on segment a-b (axis-parallel). */
 const onSegment = (c: Point, a: Point, b: Point) =>
   (a.x === b.x && c.x === a.x && c.y >= Math.min(a.y, b.y) && c.y <= Math.max(a.y, b.y)) ||
@@ -361,6 +377,82 @@ describe('routeWire', () => {
     const pts = routeWire(from, to, { obstacles: [A, B2], grid: 20 });
     expectClean(pts, from, to);
     expect(bends(pts)).toBe(2);
+  });
+
+  describe('at off-grid pin heights (G5)', () => {
+    // An XOR whose output is at y=612 and a comparator feeding an OR input at y=615, far to the right.
+    const xor = R(164, 592, 40, 40);
+    const gt = R(164, 670, 40, 40);
+    const or = R(955, 605, 40, 40);
+    const dbg = R(1045, 619, 40, 20);
+    const obstacles = [xor, gt, or, dbg];
+    const xorY = east(xor, 612);
+    const out = west(dbg, 629);
+    const gtY = east(gt, 690);
+    const orA = west(or, 615);
+
+    it('does not run along another net 3px away, as one double line', () => {
+      // The comparator's wire as it was drawn: along y=615 all the way to the OR.
+      const other = [P(204, 690), P(220, 690), P(220, 615), P(955, 615)];
+      const pts = routeWire(xorY, out, { obstacles, otherNets: [other] });
+      expectClean(pts, xorY, out);
+      expect(besideLength(pts, other)).toBe(0);
+      for (const r of obstacles) expect(polylineHitsRect(pts, r)).toBe(false);
+    });
+
+    it('keeps the second wire of the two off the first, whichever is drawn first', () => {
+      const first = routeWire(xorY, out, { obstacles, reserved: [gtY, orA] });
+      const second = routeWire(gtY, orA, { obstacles, otherNets: [first] });
+      expectClean(second, gtY, orA);
+      expect(besideLength(second, first)).toBeLessThanOrEqual(20);
+      const first2 = routeWire(gtY, orA, { obstacles, reserved: [xorY] });
+      const second2 = routeWire(xorY, out, { obstacles, otherNets: [first2] });
+      expectClean(second2, xorY, out);
+      expect(besideLength(second2, first2)).toBeLessThanOrEqual(20);
+    });
+
+    it('does not bend right next to the end of a free pin stub 3px off its line', () => {
+      // The XOR's output is not wired yet; its stub ends at (220, 612). A bend at (220, 615) would read as joined to it.
+      const pts = routeWire(gtY, orA, { obstacles, reserved: [xorY] });
+      expectClean(pts, gtY, orA);
+      const stub = portStub(xorY);
+      expect(stub).toEqual(P(220, 612));
+      for (const p of pts.slice(1, -1)) expect(Math.abs(p.x - stub.x) + Math.abs(p.y - stub.y), JSON.stringify(p)).toBeGreaterThanOrEqual(5);
+    });
+
+    it('still takes a short run beside another net next to a pin', () => {
+      // Two pins 7px apart: the wires leave side by side for a grid step or two rather than detour.
+      const S = R(100, 100, 40, 40);
+      const T = R(300, 100, 40, 40);
+      const other = [P(140, 107), P(160, 107), P(160, 300), P(400, 300)];
+      const from = east(S, 114);
+      const to = west(T, 114);
+      expect(routeWire(from, to, { obstacles: [S, T], otherNets: [other] })).toEqual([P(140, 114), P(300, 114)]);
+    });
+  });
+
+  it('keeps off slice names by a bar (F12)', () => {
+    // A concatenation bar with inputs [3]..[0] at y=550..610; each name is written under its wire, left of the bar.
+    const bar = R(340, 540, 10, 80);
+    const names = [550, 570, 590, 610].map((y) => R(325.66, y + 1.98, 11.34, 7.92));
+    // A source right under the bar: the shortest wire into [1] runs up past the end of its stub, through the
+    // names of [0] and [1].
+    const src = R(280, 772, 40, 40);
+    const from = east(src, 792);
+    const to = west(bar, 590);
+    // The wire into [0] is drawn already, up x=320.
+    const zero = [P(279, 720), P(320, 720), P(320, 610), P(340, 610)];
+    const through = (pts: Point[], r: Rect) => polylineHitsRect(pts, { x: r.x - 0.5, y: r.y - 0.5, width: r.width + 1, height: r.height + 1 });
+    const free = routeWire(from, to, { obstacles: [bar, src], otherNets: [zero] });
+    expect(through(free, names[3])).toBe(true);
+    const pts = routeWire(from, to, { obstacles: [bar, src], otherNets: [zero], texts: names });
+    expectClean(pts, from, to);
+    for (const r of names) expect(through(pts, r), JSON.stringify(r)).toBe(false);
+    expect(overlaps(pts, zero)).toBe(0);
+    // A straight wire through a name is not taken as it is either.
+    const left = R(200, 590, 40, 20);
+    const line = routeWire(east(left, 600), west(R(400, 590, 40, 20), 600), { obstacles: [left], texts: [R(300, 595, 20, 8)] });
+    expect(through(line, R(300, 595, 20, 8))).toBe(false);
   });
 });
 

@@ -147,7 +147,8 @@ const SLICE_FONT = 9;
  * Where the slice names of splits (`[7:4]` right of the bar, above its wire) and of concatenations
  * (left of the bar, below its wire) go. When a wire (typically the name's own, turning just next to
  * the bar), a wire label or another name runs through it, the name moves past its wire's bend, or
- * else to the other side of its wire.
+ * else to the other side of its wire. The usual spot is the one the router keeps new wires off
+ * (sliceNameBox in editor/geometry): the two must agree.
  */
 function placeSliceNames(nodes: readonly LNode[], edges: readonly LEdge[], labeledPorts?: ReadonlySet<string>): Map<string, TextSpot> {
   const out = new Map<string, TextSpot>();

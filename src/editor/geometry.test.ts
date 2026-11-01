@@ -7,7 +7,7 @@ import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 import { type LayoutResult, type Point, approxMeasure, layoutDiagram } from '../layout/elk-layout';
 import { type SheetEdits, emptyEdits } from './doc';
-import { buildGeometry, labelBox, runTogether } from './geometry';
+import { buildGeometry, labelBox, runTogether, sliceNameBox } from './geometry';
 import { polylineCrowdsRect, polylineHitsRect, wiresMeet } from './router';
 import { addNodes, connect, copyNodes, effectiveDiagram, layoutToEdits, moveNodes, pasteClip, rename, resolveConnection, setParams } from './sheet';
 import { type InterfaceOf, type SymKey, type SymParams, newUserNode } from './symbols';
@@ -355,6 +355,64 @@ describe('wire labels', () => {
     s.move(['u:3'], 0, 20);
     expect(s.layout!.edges.find((y) => y.id === v)!.points.some((p) => p.x === 380)).toBe(true);
     expect(s.layout!.edges.find((y) => y.id === w)!.labelBox).toEqual(moved);
+  });
+
+  it('does not keep an ELK box as close to another net wire as to its own (G6)', () => {
+    // Two wires 20px apart; ELK put `count` under the upper one, 3px over the lower one.
+    const s = new Sheet([
+      ['u:1', 'input', 0, 38],
+      ['u:2', 'output', 300, 38],
+      ['u:3', 'input', 0, 58],
+      ['u:4', 'output', 300, 58],
+    ]);
+    const w = s.wire('u:1.out', 'u:2.in');
+    s.wire('u:3.out', 'u:4.in');
+    const own = s.pin('u:1.out').y;
+    const other = s.pin('u:3.out').y;
+    expect(other - own).toBe(20);
+    s.e = rename(s.e, w, 'count');
+    const width = Math.ceil(approxMeasure('count', 11)) + 4;
+    const elk = { x: 150, y: own + 4, width, height: 13 };
+    expect(other - (elk.y + elk.height)).toBe(3);
+    s.e = { ...s.e, routes: { ...s.e.routes, [w]: { ...s.e.routes[w], label: elk } } };
+    const g = buildGeometry({ netlist: s.d, pos: s.e.pos, routes: s.e.routes, measure: approxMeasure });
+    const b = g.layout.edges.find((x) => x.id === w)!.labelBox!;
+    expect(b).not.toEqual(elk);
+    expect(alongWire(b, s.points(w))).toBe(true);
+    expect(b.y + b.height).toBe(own - 3);
+    // A box that is nearer its own wire than any other stays where it is.
+    const fine = { ...elk, y: own - 16 };
+    s.e = { ...s.e, routes: { ...s.e.routes, [w]: { ...s.e.routes[w], label: fine } } };
+    expect(buildGeometry({ netlist: s.d, pos: s.e.pos, routes: s.e.routes, measure: approxMeasure }).layout.edges.find((x) => x.id === w)!.labelBox).toEqual(fine);
+  });
+
+  it('places a label off spots as close to another net wire as to its own', () => {
+    // Under the wire is clear, above it another net runs 3px over the label: below it goes.
+    const other = { ...segmentBox({ x: 0, y: 81 }, { x: 300, y: 81 }), net: 'b' };
+    const own = { ...segmentBox(line[0], line[1]), net: 'a' };
+    const b = labelBox(line, 'data_bus', m, { nodes: [], wires: [own, other], labels: [] }, 0, 'a');
+    expect(b.y).toBe(103);
+    // Without knowing the nets, both are just wires that it does not cross.
+    expect(labelBox(line, 'data_bus', m, { nodes: [], wires: [own, other], labels: [] }).y).toBe(84);
+  });
+
+  it('routes new wires around the slice names of a concatenation (F12)', () => {
+    // Four inputs below a concatenation bar: the wires into the upper slices come up past the lower ones' names.
+    const s = new Sheet([
+      ['u:1', 'concat', 400, 100, { parts: 4, width: 1 }],
+      ['u:2', 'input', 300, 300],
+      ['u:3', 'input', 300, 340],
+      ['u:4', 'input', 300, 380],
+      ['u:5', 'input', 300, 420],
+    ]);
+    const bar = s.layout!.nodes.find((n) => n.id === 'u:1')!;
+    const slices = bar.ports.filter((q) => q.side === 'WEST');
+    expect(slices.map((q) => q.name)).toEqual(['[3]', '[2]', '[1]', '[0]']);
+    ['u:2', 'u:3', 'u:4', 'u:5'].forEach((id, k) => s.wire(`${id}.out`, slices[3 - k].id));
+    const names = slices.map((q) => sliceNameBox(bar, q)!);
+    const hits = s.layout!.edges.flatMap((x) => names.filter((r) => polylineHitsRect(x.points, { x: r.x - 0.5, y: r.y - 0.5, width: r.width + 1, height: r.height + 1 })).map((r) => `${x.id} through ${JSON.stringify(r)}`));
+    expect(hits).toEqual([]);
+    expect(crowded(s.layout!)).toEqual([]);
   });
 
   it('keeps the labels of the Fruit Battle sheets off symbols, wires and each other', async () => {

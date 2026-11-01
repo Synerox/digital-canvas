@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type LEdge, type LNode, type LayoutResult, approxMeasure } from '../layout/elk-layout';
+import { sliceNameBox } from '../editor/geometry';
 import { exportSvg } from './export';
 import { THEMES } from './theme';
 
@@ -80,5 +81,44 @@ describe('wire labels', () => {
     const svg = exportSvg(layout(nodes, edges), THEMES.report);
     // Below its wire instead of above it, under the label.
     expect(textAt(svg, '[7:4]').y).toBeGreaterThan(110);
+  });
+
+  it('write slice names where the router keeps wires off them, when nothing is in the way', () => {
+    // sliceNameBox (the sheet geometry's copy of the usual spot) and placeSliceNames must agree.
+    const port = (id: string, name: string, side: 'WEST' | 'EAST', x: number, y: number) =>
+      ({ id, name, side, dir: side === 'WEST' ? 'in' : 'out', width: 4, x, y }) as const;
+    const split: LNode = {
+      id: 's',
+      kind: 'split',
+      label: '}{',
+      src: [],
+      x: 250,
+      y: 100,
+      width: 10,
+      height: 40,
+      ports: [port('s.in', 'in', 'WEST', 250, 120), port('s.[7:4]', '[7:4]', 'EAST', 260, 110), port('s.[3:0]', '[3:0]', 'EAST', 260, 130)],
+    };
+    const join: LNode = {
+      id: 'j',
+      kind: 'join',
+      label: '{ }',
+      src: [],
+      x: 450,
+      y: 100,
+      width: 10,
+      height: 40,
+      ports: [port('j.[15:12]', '[15:12]', 'WEST', 450, 110), port('j.[11:8]', '[11:8]', 'WEST', 450, 130), port('j.out', 'out', 'EAST', 460, 120)],
+    };
+    const svg = exportSvg(layout([split, join], []), THEMES.report);
+    for (const n of [split, join])
+      for (const q of n.ports) {
+        const b = sliceNameBox(n, q);
+        if (!b) continue;
+        const t = textAt(svg, q.name);
+        expect(n.kind === 'split' ? b.x : b.x + b.width, q.name).toBeCloseTo(t.x, 6);
+        expect(b.y + 9 * 0.78, q.name).toBeCloseTo(t.y, 6);
+      }
+    expect(sliceNameBox(split, split.ports[0])).toBeUndefined();
+    expect(sliceNameBox(join, join.ports[2])).toBeUndefined();
   });
 });

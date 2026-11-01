@@ -10,8 +10,9 @@
  * (grid point, direction of travel), so bends can be charged for. It goes
  * around symbols, grows a tree for its own net (fan-out wires branch off
  * the wires already drawn, giving T junctions) and never runs along a wire
- * of another net, which would read as a connection. `simpleRoute` is the
- * cheap version used while dragging and as the fallback.
+ * of another net, which would read as a connection, nor far close beside
+ * one, which would draw as one double line. `simpleRoute` is the cheap
+ * version used while dragging and as the fallback.
  */
 import type { Side } from '../core/diagram';
 import type { Point } from '../layout/elk-layout';
@@ -54,6 +55,11 @@ export interface RouteOptions {
    * wire there later and look connected to it.
    */
   reserved?: RouteEnd[];
+  /**
+   * Boxes of text drawn on the sheet outside the symbols (the slice names by split and join bars). A wire
+   * through one makes it hard to read, and reads as that wire's name: crossing one costs a detour of a few bends.
+   */
+  texts?: Rect[];
   /** Grid pitch, default 10. */
   grid?: number;
   /** Search cap before falling back to simpleRoute. */
@@ -80,6 +86,14 @@ const OVERLAP = 1e5;
 /** Extra cost (per grid pitch) of one grid edge on the line of another net's wire, at most LINE_GAP grid steps past its end. */
 const LINED = 10;
 const LINE_GAP = 2;
+/**
+ * Extra cost per px of running alongside another net's wire, closer than a grid step but not on its line (pins
+ * at off-grid heights put lines there): the two draw as one double line. This much right next to it, falling
+ * off to nothing a grid step away; a short run near a pin is fine, a long one costs more than a detour.
+ */
+const NEAR = 4;
+/** Cost (per grid pitch) of one grid edge through a text box (see RouteOptions.texts). */
+const ON_TEXT = 25;
 /** Extra cost per px of running right next to a symbol (within one grid pitch of its keep-out). */
 const HUG = 0.3;
 /** Another net's coordinate this close to a grid line counts as being on it. */
@@ -415,9 +429,14 @@ interface Lattice {
   vCost: Float64Array;
   /** Per node: 0 free, 1 on the inside of another net's segment, 2 on a corner or end of another net. */
   touch: Uint8Array | null;
-  /** Per edge (the horizontal ones, then the vertical ones): charged already for lining up with another net (see addOther). */
+  /** Per edge (the horizontal ones, then the vertical ones): what it has been charged for already, as bits (see addOther). */
   lined: Uint8Array | null;
 }
+
+/** Lining up with another net's wire. */
+const LINED_BIT = 1;
+/** Running close beside another net's wire. */
+const NEAR_BIT = 2;
 
 function makeLattice(xs: number[], ys: number[]): Lattice {
   const nx = xs.length;
@@ -808,7 +827,7 @@ export function wiresMeet(a: Point[], b: Point[]): boolean {
 }
 
 /** The facing-ports case: one straight wire, when nothing is in the way. */
-function straightRoute(from: RouteEnd, to: RouteEnd, obstacles: Rect[], others: Seg[]): Point[] | null {
+function straightRoute(from: RouteEnd, to: RouteEnd, obstacles: Rect[], texts: Rect[], others: Seg[], grid: number): Point[] | null {
   const fd = SIDE_DIR[from.side];
   if (SIDE_DIR[to.side] !== (fd ^ 2)) return null;
   const p = from.point;
@@ -821,6 +840,13 @@ function straightRoute(from: RouteEnd, to: RouteEnd, obstacles: Rect[], others: 
     if (polylineHitsRect(line, { x: r.x - INFLATE, y: r.y - INFLATE, width: r.width + 2 * INFLATE, height: r.height + 2 * INFLATE })) return null;
   }
   if (conflictsWithOthers(p, q, others)) return null;
+  // Through a slice name, or close beside another net's wire: the search weighs that against a detour.
+  if (texts.some((r) => polylineHitsRect(line, r))) return null;
+  const horizontal = p.y === q.y;
+  const at = horizontal ? p.y : p.x;
+  const lo = horizontal ? Math.min(p.x, q.x) : Math.min(p.y, q.y);
+  const hi = horizontal ? Math.max(p.x, q.x) : Math.max(p.y, q.y);
+  if (others.some((s) => s.horizontal === horizontal && Math.abs(s.at - at) < grid && Math.min(hi, s.hi) - Math.max(lo, s.lo) > EPS)) return null;
   return [{ x: p.x, y: p.y }, { x: q.x, y: q.y }];
 }
 
@@ -874,8 +900,8 @@ function addOther(L: Lattice, s: Seg, c: Costs, grid: number): void {
       const k = s.horizontal ? line * (nx - 1) + a : a * nx + line;
       if (cost[k] >= BLOCK) return false;
       const m = s.horizontal ? k : hCost.length + k;
-      if (!lined[m]) {
-        lined[m] = 1;
+      if (!(lined[m] & LINED_BIT)) {
+        lined[m] |= LINED_BIT;
         cost[k] += LINED * grid;
       }
       return true;
@@ -887,12 +913,37 @@ function addOther(L: Lattice, s: Seg, c: Costs, grid: number): void {
   } else {
     // Between two lattice lines: the edges across it cross it (or hit its end).
     const e = lowerBound(across, s.at) - 1;
-    if (e < 0 || e >= (s.horizontal ? ny : nx) - 1) return;
-    for (let a = a0; a < along.length && along[a] <= s.hi + MATCH_TOL; a++) {
-      const cost = along[a] > s.lo + MATCH_TOL && along[a] < s.hi - MATCH_TOL ? c.cross : c.touch;
-      if (s.horizontal) vCost[e * nx + a] += cost;
-      else hCost[a * (nx - 1) + e] += cost;
+    if (e >= 0 && e < (s.horizontal ? ny : nx) - 1)
+      for (let a = a0; a < along.length && along[a] <= s.hi + MATCH_TOL; a++) {
+        const cost = along[a] > s.lo + MATCH_TOL && along[a] < s.hi - MATCH_TOL ? c.cross : c.touch;
+        if (s.horizontal) vCost[e * nx + a] += cost;
+        else hCost[a * (nx - 1) + e] += cost;
+      }
+  }
+  // Lattice lines beside it, closer than a grid step (off-grid pin heights put them there; wires a step
+  // apart are the closest the grid makes): a long wire along one draws as a double line with it, so that
+  // costs per px, once per edge. Not within LINE_GAP steps of its ends, where the stubs of pins close
+  // together meet and a short run is fine. Within half a step a bend or end on one reads as on the wire:
+  // mark those points like the wire's own.
+  const runCost = s.horizontal ? hCost : vCost;
+  const runLo = s.lo + LINE_GAP * grid;
+  const runHi = s.hi - LINE_GAP * grid;
+  for (let l = upperBound(across, s.at - grid); l < across.length && across[l] < s.at + grid; l++) {
+    const off = Math.abs(across[l] - s.at);
+    if (off <= MATCH_TOL) continue;
+    for (let a = Math.max(0, upperBound(along, runLo) - 1); a + 1 < along.length && along[a] < runHi; a++) {
+      if (Math.min(along[a + 1], runHi) - Math.max(along[a], runLo) <= EPS) continue;
+      const k = s.horizontal ? l * (nx - 1) + a : a * nx + l;
+      const m = s.horizontal ? k : hCost.length + k;
+      if (lined[m] & NEAR_BIT) continue;
+      lined[m] |= NEAR_BIT;
+      runCost[k] += NEAR * (1 - off / grid) * (along[a + 1] - along[a]);
     }
+    if (off < grid / 2)
+      for (let a = a0; a < along.length && along[a] <= s.hi + MATCH_TOL; a++) {
+        const n = nodeAt(a, l);
+        touch[n] = Math.max(touch[n], along[a] > s.lo + MATCH_TOL && along[a] < s.hi - MATCH_TOL ? 1 : 2);
+      }
   }
 }
 
@@ -916,7 +967,8 @@ export function routeWire(from: RouteEnd, to: RouteEnd, opts: RouteOptions): Poi
   // Free pins' stubs count as wires of other nets.
   for (const r of opts.reserved ?? []) if (!samePoint(r.point, p) && !samePoint(r.point, q)) for (const s of stubSegments(r, grid)) others.push(s);
   const obstacles = [...opts.obstacles, from.rect, to.rect];
-  const straight = straightRoute(from, to, obstacles, others);
+  const texts = opts.texts ?? [];
+  const straight = straightRoute(from, to, obstacles, texts, others, grid);
   if (straight) return straight;
 
   const a = searchStubEnd(from, obstacles, grid);
@@ -960,7 +1012,7 @@ export function routeWire(from: RouteEnd, to: RouteEnd, opts: RouteOptions): Poi
   for (const w of windows) {
     if (prev && w.x0 >= prev.x0 && w.y0 >= prev.y0 && w.x1 <= prev.x1 && w.y1 <= prev.y1) continue;
     prev = w;
-    const found = routeInWindow(from, to, a, b, own, obstacles, others, grid, w, budget);
+    const found = routeInWindow(from, to, a, b, own, obstacles, texts, others, grid, w, budget);
     if (found && (!best || found.cost < best.cost)) best = found;
     // Clean (no symbol crossed, no wire overlapped): a bigger window cannot do much better.
     if (best && best.cost < OVERLAP) break;
@@ -976,6 +1028,7 @@ function routeInWindow(
   b: Point,
   own: Point[][],
   obstacles: Rect[],
+  texts: Rect[],
   others: Seg[],
   grid: number,
   w: Window,
@@ -1007,6 +1060,10 @@ function routeInWindow(
     for (let i = 0; i + 1 < nx; i++) if (near[j * nx + i] && near[j * nx + i + 1]) hCost[j * (nx - 1) + i] += HUG * (xs[i + 1] - xs[i]);
   for (let j = 0; j + 1 < ny; j++)
     for (let i = 0; i < nx; i++) if (near[j * nx + i] && near[(j + 1) * nx + i]) vCost[j * nx + i] += HUG * (ys[j + 1] - ys[j]);
+  // Text: costly, and as wide as a drawn wire (half a px each side) would touch it.
+  for (const r of texts)
+    if (r.x <= w.x1 && r.y <= w.y1 && r.x + r.width >= w.x0 && r.y + r.height >= w.y0)
+      blockBox(L, r.x - 0.5, r.y - 0.5, r.x + r.width + 0.5, r.y + r.height + 0.5, ON_TEXT * grid);
 
   // Other nets.
   const tol = MATCH_TOL;
