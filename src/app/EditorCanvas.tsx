@@ -230,6 +230,23 @@ export function EditorCanvas() {
     return () => ui.removeEventListener('fit', onFit);
   }, [fit]);
 
+  /** The pointer (client coordinates) while it is over the canvas. */
+  const hover = useRef<{ x: number; y: number }>(undefined);
+  useEffect(() => {
+    // Ctrl+V and Edit › Paste: a copy from another sheet goes where the user looks, the pointer when it
+    // is over the canvas, else the middle of the view (the store keeps a paste on its own sheet beside the original).
+    const onPaste = () => {
+      const el = wrap.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const v = viewRef.current;
+      const at = hover.current ?? { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      useStore.getState().paste({ x: (at.x - r.left - v.x) / v.k, y: (at.y - r.top - v.y) / v.k });
+    };
+    ui.addEventListener('paste', onPaste);
+    return () => ui.removeEventListener('paste', onPaste);
+  }, []);
+
   const toWorld = (cx: number, cy: number): Point => {
     const el = wrap.current!;
     const r = el.getBoundingClientRect();
@@ -481,7 +498,11 @@ export function EditorCanvas() {
         }
         mode.current = { kind: 'press-empty', start: w, cx: ev.clientX, cy: ev.clientY, additive, moved: false };
       }}
+      onPointerLeave={() => {
+        hover.current = undefined;
+      }}
       onPointerMove={(ev) => {
+        hover.current = { x: ev.clientX, y: ev.clientY };
         const w = toWorld(ev.clientX, ev.clientY);
         const m = mode.current;
         const s = store();

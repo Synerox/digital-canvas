@@ -79,17 +79,24 @@ const HISTORY = 200;
 
 export const AUTOSAVE_KEY = 'digital-canvas:work:v1';
 
+/**
+ * Edits of Verilog sheets put aside by the name of the file whose module they
+ * belong to, while no open file declares that module (see changeFiles).
+ */
+export type PutAside = Record<string, EditDoc['sheets']>;
+
 export interface HistoryEntry {
   doc: EditDoc;
   path: PathEntry[];
   sheet: string;
   /**
-   * For a step that changed the Verilog files in a way the document alone cannot undo (another
-   * design opened, open files removed): the files and Top choice to go back to. Undo and redo of
-   * such a step swap the whole state, so `path` and `sheet` are where to return in those files.
+   * For a step that changed the Verilog files (an import, another design opened, open files
+   * removed): the files, Top choice and edits put aside to go back to. Undo and redo of such a
+   * step swap the whole state, so `path` and `sheet` are where to return in those files.
    */
   files?: Record<string, string>;
   top?: string;
+  putAside?: PutAside;
 }
 
 export interface Placing {
@@ -129,6 +136,8 @@ interface State {
   /** Wires drawn in the warning colour, and what is wrong. */
   issues: SheetIssues;
   doc: EditDoc;
+  /** Edits of modules no open file declares, kept for a file of the same name (see changeFiles). */
+  putAside: PutAside;
   /** Undo history: each entry is the document before an edit, and where the edit was made. */
   past: HistoryEntry[];
   future: HistoryEntry[];
@@ -157,10 +166,11 @@ interface State {
 
   /**
    * Import Verilog files. `replace`: they are all the files now (another design,
-   * unless they reuse an open file's name). Otherwise they are added, and replace
-   * open files of the same names. `newVersion`: the code is a new version of the
-   * open files that declare the same modules, whatever their names (see
-   * planImport); the edits are kept.
+   * unless they reuse the name of an open file, or of one whose edits are put
+   * aside). Otherwise they are added, and replace open files of the same names.
+   * `newVersion`: the code is a new version of the open files that declare the
+   * same modules, whatever their names (see planImport); the edits are kept.
+   * Any change of the files is one undo step that brings back the old ones.
    */
   setFiles(files: Record<string, string>, replace: boolean, opts?: { newVersion?: boolean }): Promise<void>;
   removeFile(name: string): Promise<void>;
@@ -203,7 +213,11 @@ interface State {
   autoLayout(): Promise<void>;
   copy(): boolean;
   cut(): void;
-  paste(at?: Point): void;
+  /**
+   * Paste what Copy took: on the sheet it was copied from, beside the original;
+   * on another sheet, centred on `near` (where the user looks) when given.
+   */
+  paste(near?: Point): void;
   duplicate(): void;
   undo(): void;
   redo(): void;
@@ -228,8 +242,8 @@ const flatAllowed = new Set<string>();
 /** Incremented by every rebuild/navigation, so a slow older call cannot overwrite a newer result. */
 let rebuildGen = 0;
 let navSeq = 0;
-/** What Copy took, and the box of the copied symbols on their sheet (see paste). */
-let clipboard: { clip: Clip; box: Box } | undefined;
+/** What Copy took, the box of the copied symbols, and the sheet they were copied from (see paste). */
+let clipboard: { clip: Clip; box: Box; sheet: string } | undefined;
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
 
 const measures = new Map<string, MeasureText>();
@@ -250,9 +264,8 @@ const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const snap = (v: number) => Math.round(v / GRID) * GRID;
 
 /**
- * Where a copy of the symbols in `box` goes when no point is given: at the
- * same place if nothing is there (pasted on another sheet), otherwise straight
- * below, past every symbol it would overlap.
+ * Where a copy of the symbols in `box` goes: at the same place if nothing is
+ * there, otherwise straight below, past every symbol it would overlap.
  */
 export function pasteSpot(box: Box, nodes: readonly Box[]): Point {
   const gap = 2 * GRID;
@@ -437,19 +450,61 @@ export function withoutVerilogEdits(doc: EditDoc): EditDoc {
   return { drawn: doc.drawn, sheets: Object.fromEntries(Object.entries(doc.sheets).filter(([k]) => isDrawnKey(k))) };
 }
 
+/** Whether a sheet key is a Verilog sheet of one of these modules (in either view, or of its automatic blocks `<module>/<block>`). */
+function ofModules(key: string, modules: readonly string[]): boolean {
+  const m = /^v:[a-z]+:(.*)$/.exec(key)?.[1];
+  return m !== undefined && modules.some((x) => m === x || m.startsWith(`${x}/`));
+}
+
+export interface FilesChange {
+  doc: EditDoc;
+  putAside: PutAside;
+  /** Modules whose edits were put aside before and come back. */
+  restored: string[];
+}
+
 /**
- * The document without the edits of these Verilog modules' sheets, in both
- * views and of their automatic blocks (`<module>/<block>`): no file declares
- * them any more, and a module of the same name added later is another one.
- * Returns `doc` itself when there is nothing to drop.
+ * The document when the open files change from `before` to `after`. Edits are
+ * keyed by module name only, so the edits of a module that no file declares
+ * any more must not show on a module of that name added later (another
+ * design's top, say: C5). They are put aside under the name of the file that
+ * declared it, and come back when a file of that name declares the module
+ * again (a new version of a removed file), on sheets that have no edits of
+ * their own. Returns `doc` and `putAside` themselves when nothing changes.
  */
-export function withoutModuleEdits(doc: EditDoc, modules: readonly string[]): EditDoc {
-  const gone = (key: string) => {
-    const m = /^v:[a-z]+:(.*)$/.exec(key)?.[1];
-    return m !== undefined && modules.some((x) => m === x || m.startsWith(`${x}/`));
-  };
-  if (!Object.keys(doc.sheets).some((k) => gone(k) && !isEmptyEdits(doc.sheets[k]))) return doc;
-  return { drawn: doc.drawn, sheets: Object.fromEntries(Object.entries(doc.sheets).filter(([k]) => !gone(k))) };
+export function changeFiles(doc: EditDoc, putAside: PutAside, before: Record<string, string>, after: Record<string, string>): FilesChange {
+  const declared = new Set(declaredModules(after));
+  let sheets = doc.sheets;
+  let aside = putAside;
+  for (const [f, text] of Object.entries(before)) {
+    if (after[f] === text) continue;
+    const gone = declaredModules({ [f]: text }).filter((m) => !declared.has(m));
+    const keys = Object.keys(doc.sheets).filter((k) => ofModules(k, gone) && !isEmptyEdits(doc.sheets[k]));
+    if (keys.length === 0) continue;
+    aside = { ...aside, [f]: { ...aside[f], ...Object.fromEntries(keys.map((k) => [k, doc.sheets[k]])) } };
+    sheets = Object.fromEntries(Object.entries(sheets).filter(([k]) => !keys.includes(k)));
+  }
+  const restored = new Set<string>();
+  for (const [f, text] of Object.entries(after)) {
+    const kept = aside[f];
+    if (before[f] === text || !kept) continue;
+    const own = declaredModules({ [f]: text });
+    const back = Object.keys(kept).filter((k) => ofModules(k, own) && isEmptyEdits(sheets[k]));
+    if (back.length === 0) continue;
+    sheets = { ...sheets, ...Object.fromEntries(back.map((k) => [k, kept[k]])) };
+    for (const k of back) restored.add(own.find((m) => ofModules(k, [m]))!);
+    // What came back is in the document now (and in the undo history): it is not put aside twice.
+    const rest = Object.fromEntries(Object.entries(kept).filter(([k]) => !back.includes(k)));
+    aside = { ...aside };
+    if (Object.keys(rest).length) aside[f] = rest;
+    else delete aside[f];
+  }
+  return { doc: sheets === doc.sheets ? doc : { drawn: doc.drawn, sheets }, putAside: aside, restored: [...restored] };
+}
+
+/** Whether two sets of files are the same names with the same text. */
+export function sameFiles(a: Record<string, string>, b: Record<string, string>): boolean {
+  return Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([f, text]) => b[f] === text);
 }
 
 const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
@@ -496,8 +551,18 @@ export function withoutModuleDefinitions(text: string, modules: ReadonlySet<stri
     }
     // A module header inside a module: not something to cut by text.
     if (open) return undefined;
-    const line = code.lastIndexOf('\n', m.index - 1) + 1;
-    open = { at: /^[ \t]*$/.test(code.slice(line, m.index)) ? line : m.index, cut: modules.has(m[1]) };
+    // Attributes before the header (`(* keep_hierarchy *)`) belong to the module: left behind, they
+    // would stand before nothing, which Yosys rejects.
+    let start = m.index;
+    for (;;) {
+      let i = start;
+      while (i > 0 && /\s/.test(code[i - 1])) i--;
+      const attr = code.endsWith('*)', i) ? code.lastIndexOf('(*', i - 3) : -1;
+      if (attr < 0) break;
+      start = attr;
+    }
+    const line = code.lastIndexOf('\n', start - 1) + 1;
+    open = { at: /^[ \t]*$/.test(code.slice(line, start)) ? line : start, cut: modules.has(m[1]) };
   }
   if (open) return undefined;
   let out = text;
@@ -827,6 +892,7 @@ export const useStore = create<State>((set, get) => {
       viewMode: f.viewMode,
       theme: f.theme,
       doc: f.doc,
+      putAside: {},
       past: [],
       future: [],
       dirty,
@@ -847,24 +913,43 @@ export const useStore = create<State>((set, get) => {
     await get().rebuild();
   };
 
+  /** A history entry that brings back the files as they are now, with the document. */
+  const hereWithFiles = (): HistoryEntry => {
+    const s = get();
+    return { ...here(), files: s.files, top: s.topOverride, putAside: s.putAside };
+  };
+
   /**
    * Record a change of the Verilog files as one undo step that puts them back
-   * too (see HistoryEntry.files), with `doc` as the document after it. Nothing
-   * is recorded when there is nothing to go back to: no files, no history and
-   * no change of the document (the example opened at start).
+   * too (see HistoryEntry.files), with `doc` and `putAside` as they are after
+   * it. Nothing is recorded when there is nothing to go back to: no files, no
+   * history, no change of the document and nothing put aside (the example
+   * opened at start).
    */
-  const pushFilesStep = (doc: EditDoc) => {
+  const pushFilesStep = (doc: EditDoc, putAside = get().putAside) => {
     const s = get();
-    if (Object.keys(s.files).length === 0 && s.past.length === 0 && doc === s.doc) return;
-    set({ past: [...s.past.slice(-(HISTORY - 1)), { ...here(), files: s.files, top: s.topOverride }], future: [], doc, dirty: true });
+    if (Object.keys(s.files).length === 0 && s.past.length === 0 && doc === s.doc && Object.keys(putAside).length === 0) return;
+    set({ past: [...s.past.slice(-(HISTORY - 1)), hereWithFiles()], future: [], doc, putAside, dirty: true });
   };
 
   /** After undo/redo of a step that changed the files: open those files again, where the step left them. */
   const reopenFiles = async (entry: HistoryEntry) => {
     const mode = viewModeOf(entry.sheet);
-    set({ files: entry.files ?? {}, topOverride: entry.top, path: entry.path, ...(mode ? { viewMode: mode } : {}) });
+    set({ files: entry.files ?? {}, topOverride: entry.top, putAside: entry.putAside ?? {}, path: entry.path, ...(mode ? { viewMode: mode } : {}) });
     scheduleAutosave();
     await get().rebuild();
+  };
+
+  /**
+   * Make `files` the open files as one undo step, with the edits of modules
+   * they no longer declare put aside (see changeFiles). No step when nothing
+   * changes.
+   */
+  const pushFiles = (files: Record<string, string>) => {
+    const s = get();
+    if (sameFiles(s.files, files)) return;
+    const c = changeFiles(s.doc, s.putAside, s.files, files);
+    pushFilesStep(c.doc, c.putAside);
   };
 
   /**
@@ -896,12 +981,13 @@ export const useStore = create<State>((set, get) => {
   /**
    * Open files that are not a new version of the open ones. The edits of
    * Verilog sheets are dropped: they are keyed by module name only, and a module
-   * of another design with the same name (top, say) would show them. One undo
-   * step brings back the files and the edits, and nothing older refers to the
-   * other design while it is not open.
+   * of another design with the same name (top, say) would show them. The edits
+   * put aside go too: they are not for a file of the other design that has the
+   * same name. One undo step brings back the files and the edits, and nothing
+   * older refers to the other design while it is not open.
    */
   const openOtherDesign = async (files: Record<string, string>) => {
-    pushFilesStep(withoutVerilogEdits(get().doc));
+    pushFilesStep(withoutVerilogEdits(get().doc), {});
     await openFiles(files, { clearTop: true });
   };
 
@@ -920,31 +1006,30 @@ export const useStore = create<State>((set, get) => {
     viewMode: 'blocks',
     issues: { flagged: new Set(), messages: [] },
     doc: emptyDoc(),
+    putAside: {},
     past: [],
     future: [],
     dirty: false,
     interfaceOf,
 
     async setFiles(files, replace, opts = {}) {
-      const current = get().files;
+      const { files: current, putAside } = get();
       if (replace) {
         // Replacing all files keeps the edits only when it is a new version of the open design:
-        // it reuses a file name (File › Open Verilog of the same files).
-        if (!Object.keys(files).some((f) => f in current)) return openOtherDesign(files);
-        // Open files it leaves out come back with Undo.
-        if (Object.keys(current).some((f) => !(f in files))) pushFilesStep(get().doc);
+        // it reuses a file name (File › Open Verilog of the same files), or the name of a removed
+        // file whose edits are put aside.
+        if (!Object.keys(files).some((f) => f in current || f in putAside)) return openOtherDesign(files);
+        // Open files it leaves out come back with Undo; so do the old versions of the others.
+        pushFiles(files);
         await openFiles(files, { clearTop: true });
         return;
       }
-      if (opts.newVersion) {
-        // The same design under other file names: the edits stay. Open files it replaces, or cuts
-        // a module out of, come back with Undo.
-        const plan = planImport(current, files);
-        if (plan.replaced.length || plan.trimmed.length) pushFilesStep(get().doc);
-        await openFiles(plan.files, { imported: files });
-        return;
-      }
-      await openFiles({ ...current, ...files }, { imported: files });
+      // With `newVersion`, the same design under other file names: the edits stay. Open files it
+      // replaces, cuts a module out of or updates come back with Undo, and so does the file set
+      // without the files it adds.
+      const all = opts.newVersion ? planImport(current, files).files : { ...current, ...files };
+      pushFiles(all);
+      await openFiles(all, { imported: files });
     },
 
     async removeFile(name) {
@@ -952,10 +1037,9 @@ export const useStore = create<State>((set, get) => {
       if (!(name in s.files)) return;
       const files = { ...s.files };
       delete files[name];
-      // The edits of modules only this file declared would show on a module of the same name added
-      // later (another design's top, say): drop them, in one undo step that brings back the file too.
-      const left = new Set(declaredModules(files));
-      pushFilesStep(withoutModuleEdits(s.doc, declaredModules({ [name]: s.files[name] }).filter((m) => !left.has(m))));
+      // The edits of modules only this file declared are put aside for a file of this name (see
+      // changeFiles), in one undo step that brings back the file too.
+      pushFiles(files);
       set({ files });
       scheduleAutosave();
       await get().rebuild();
@@ -1397,7 +1481,7 @@ export const useStore = create<State>((set, get) => {
       const x = Math.min(...copied.map((n) => n.x));
       const y = Math.min(...copied.map((n) => n.y));
       const box = { x, y, width: Math.max(...copied.map((n) => n.x + n.width)) - x, height: Math.max(...copied.map((n) => n.y + n.height)) - y };
-      clipboard = { clip, box };
+      clipboard = { clip, box, sheet: s.sheet };
       return true;
     },
 
@@ -1405,12 +1489,15 @@ export const useStore = create<State>((set, get) => {
       if (get().copy()) get().deleteSelection();
     },
 
-    paste(at) {
+    paste(near) {
       const s = get();
       if (!clipboard || !s.layout || !settled(s)) return;
-      const { clip, box } = clipboard;
-      // Without a point: where it was copied from if that is free, otherwise below it, never on top of it.
-      const where = at ?? pasteSpot(box, s.layout.nodes);
+      const { clip, box, sheet } = clipboard;
+      // On its own sheet: where it was copied from if that is free, otherwise below it, never on top of
+      // it. On another sheet those coordinates can be far out of view (Ctrl+V would seem to do nothing):
+      // there it goes where the user looks, and below what is already there.
+      const from = near && sheet !== s.sheet ? { ...box, x: near.x - box.width / 2, y: near.y - box.height / 2 } : box;
+      const where = pasteSpot(from, s.layout.nodes);
       const at2 = { x: snap(where.x), y: snap(where.y) };
       let pasted: string[] = [];
       editSheet((e) => {
@@ -1431,7 +1518,7 @@ export const useStore = create<State>((set, get) => {
       if (!prev) return;
       // The redo entry keeps where the change was made (not where Undo was pressed), so Redo shows it too.
       // A step that changed the files swaps the whole state: Redo comes back here.
-      const redo = prev.files ? { ...here(), files: s.files, top: s.topOverride } : { ...prev, doc: s.doc };
+      const redo = prev.files ? hereWithFiles() : { ...prev, doc: s.doc };
       set({ past: s.past.slice(0, -1), future: [redo, ...s.future], doc: prev.doc, dirty: true });
       scheduleAutosave();
       void (prev.files ? reopenFiles(prev) : showAfterHistory(prev));
@@ -1441,7 +1528,7 @@ export const useStore = create<State>((set, get) => {
       const s = get();
       const next = s.future[0];
       if (!next) return;
-      const undo = next.files ? { ...here(), files: s.files, top: s.topOverride } : { ...next, doc: s.doc };
+      const undo = next.files ? hereWithFiles() : { ...next, doc: s.doc };
       set({ future: s.future.slice(1), past: [...s.past, undo], doc: next.doc, dirty: true });
       scheduleAutosave();
       void (next.files ? reopenFiles(next) : showAfterHistory(next));
@@ -1513,13 +1600,17 @@ export const useStore = create<State>((set, get) => {
       // The files changed meanwhile: these blocks are gone.
       if (get().blockDesign !== blockDesign) return;
       const now = get();
-      const taken = new Set([...now.doc.drawn, ...Object.keys(now.design?.modules ?? {}), ...now.moduleNames]);
+      // The new drawings take no module's name, nor the name the Verilog export gives an automatic block
+      // or Yosys's copy of a parameterized module (top/score → top_score): the export would then write
+      // those under other names, with warnings about names the user never wrote.
+      const madeUp = Object.keys(blockDesign?.modules ?? {}).map(verilogIdent);
+      const taken = new Set([...now.doc.drawn, ...Object.keys(now.design?.modules ?? {}), ...now.moduleNames, ...madeUp]);
       const name = uniqueModuleName(`${module.replace(/^.*\//, '')}_drawing`, taken);
       taken.add(name);
-      // Each block's drawing is named after the block's module (top/crop_points → top_crop_points).
+      // Each block's drawing is named after the copy and the block (top/crop_points → top_drawing_crop_points).
       const names = new Map<string, string>();
       for (const m of subs.keys()) {
-        names.set(m, uniqueModuleName(m, taken));
+        names.set(m, uniqueModuleName(`${name}_${m.replace(/^.*\//, '')}`, taken));
         taken.add(names.get(m)!);
       }
       // Wires name a block's ports; a drawing's ports are named after its pins (see drawingPorts),

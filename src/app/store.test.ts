@@ -28,6 +28,7 @@ import { diagramToVerilog } from '../editor/verilog-export';
 import { type Point, sizeNode } from '../layout/elk-layout';
 import {
   AUTOSAVE_KEY,
+  changeFiles,
   drawingPorts,
   drawnRoute,
   followPinRenames,
@@ -40,7 +41,6 @@ import {
   useStore,
   viewModeOf,
   withoutModuleDefinitions,
-  withoutModuleEdits,
   withoutVerilogEdits,
 } from './store';
 import { exportCurrent } from './Dialogs';
@@ -201,14 +201,43 @@ describe('document helpers', () => {
     expect(withoutVerilogEdits(clean)).toBe(clean);
   });
 
-  it('drops the edits of some modules, with their automatic blocks (C5)', () => {
-    const edited: SheetEdits = { ...emptyEdits(), hidden: ['in:clk'] };
+  it('puts aside the edits of modules no file declares, and brings them back with a file of that name (C5, F3)', () => {
+    const edits = (id: string): SheetEdits => ({ ...emptyEdits(), hidden: [id] });
     const doc: EditDoc = {
       drawn: ['d1'],
-      sheets: { 'v:blocks:top': edited, 'v:flat:top': edited, 'v:blocks:top/alu': edited, 'v:blocks:topx': edited, 'v:blocks:sub': edited, 'd:d1': drawing([]) },
+      sheets: {
+        'v:blocks:top': edits('in:a'),
+        'v:flat:top': edits('in:a'),
+        'v:blocks:top/x': edits('in:b'),
+        'v:blocks:topx': edits('in:d'),
+        'v:blocks:sub': edits('in:c'),
+        'd:d1': drawing([]),
+      },
     };
-    expect(Object.keys(withoutModuleEdits(doc, ['top']).sheets)).toEqual(['v:blocks:topx', 'v:blocks:sub', 'd:d1']);
-    expect(withoutModuleEdits(doc, ['other'])).toBe(doc);
+    const a = 'module top(input a, output y); sub s(.c(a), .y(y)); endmodule\n';
+    const b = 'module sub(input c, output y); assign y = c; endmodule\n';
+    // a.v removed: the edits of top (both views, its automatic blocks) go aside under a.v; sub and topx keep theirs.
+    const removed = changeFiles(doc, {}, { 'a.v': a, 'b.v': b }, { 'b.v': b });
+    expect(Object.keys(removed.doc.sheets).sort()).toEqual(['d:d1', 'v:blocks:sub', 'v:blocks:topx']);
+    expect(Object.keys(removed.putAside)).toEqual(['a.v']);
+    expect(Object.keys(removed.putAside['a.v']).sort()).toEqual(['v:blocks:top', 'v:blocks:top/x', 'v:flat:top']);
+    // Another file with a module called top does not get them.
+    const other = changeFiles(removed.doc, removed.putAside, { 'b.v': b }, { 'b.v': b, 'o.v': 'module top(input q, output y); assign y = q; endmodule\n' });
+    expect(other.doc).toBe(removed.doc);
+    expect(other.putAside).toBe(removed.putAside);
+    expect(other.restored).toEqual([]);
+    // A new version of a.v does, and they are no longer put aside (the undo history keeps them).
+    const back = changeFiles(removed.doc, removed.putAside, { 'b.v': b }, { 'b.v': b, 'a.v': `${a}// v2\n` });
+    expect(back.doc.sheets).toEqual(doc.sheets);
+    expect(back.restored).toEqual(['top']);
+    expect(back.putAside).toEqual({});
+    // A new version of a file that no longer declares a module puts that module's edits aside too.
+    const lost = changeFiles(doc, {}, { 'a.v': a, 'b.v': b }, { 'a.v': a, 'b.v': 'module sub2(input c, output y); assign y = c; endmodule\n' });
+    expect(Object.keys(lost.putAside['b.v'])).toEqual(['v:blocks:sub']);
+    // No module goes: the same objects.
+    const same = changeFiles(doc, {}, { 'a.v': a }, { 'a.v': a, 'b.v': b });
+    expect(same.doc).toBe(doc);
+    expect(same.putAside).toEqual({});
   });
 
   it('cuts module definitions out of Verilog text, or says it cannot (N6)', () => {
@@ -236,6 +265,10 @@ endmodule
 `);
     // A module that never ends is not cut by guessing.
     expect(withoutModuleDefinitions('module a(); \nmodule b(); endmodule\n', new Set(['b']))).toBeUndefined();
+    // Its attributes go with it (left behind, they would stand before nothing: a Yosys error).
+    const attrs = 'module top(input x, output y); a u(.x(x), .y(y)); endmodule\n(* keep_hierarchy *)\n(* blackbox=0 *) module a(input x, output y); always @(*) ; assign y = x; endmodule\n';
+    expect(withoutModuleDefinitions(attrs, new Set(['a']))).toBe('module top(input x, output y); a u(.x(x), .y(y)); endmodule\n');
+    expect(withoutModuleDefinitions(attrs, new Set(['top']))).toBe(attrs.slice(attrs.indexOf('(* keep')));
   });
 
   it('plans an import of a new version of open files (N5, N6)', () => {
@@ -327,10 +360,10 @@ describe('store', () => {
     expect(st().path).toEqual([{ instance: 'top_drawing', module: 'top_drawing', drawn: true }]);
     const wires = st().netlist!.edges.length;
     expect(wires).toBe(before.edges.length);
-    // Each automatic block is a drawing of its own (named after it), and the copy's blocks use those.
+    // Each automatic block is a drawing of its own (named after the copy and the block), and the copy's blocks use those.
     const blocks = st().doc.sheets['d:top_drawing'].nodes.filter((n) => n.sym === 'block');
     expect(blocks.length).toBe(autos.length);
-    expect(st().doc.drawn).toEqual(['top_drawing', ...autos.map((m) => m.name.replace('/', '_'))]);
+    expect(st().doc.drawn).toEqual(['top_drawing', ...autos.map((m) => m.name.replace('top/', 'top_drawing_'))]);
     expect(blocks.every((b) => st().doc.drawn.includes(b.params.module!))).toBe(true);
     // Every block keeps all its pins (named as before) and wires.
     for (const b of blocks) {
@@ -539,14 +572,173 @@ describe('store', () => {
     expect(st().doc.sheets['v:blocks:top']).toBeUndefined();
     await st().removeFile(FRUIT_FILE);
     await settle();
-    // Undo puts back the file and its edits.
+    // Undo puts back the file and its edits, one step at a time.
     st().undo();
     await settle();
     expect(Object.keys(st().files).sort()).toEqual([FRUIT_FILE, 'keep.v']);
     st().undo();
     await settle();
+    expect(Object.keys(st().files)).toEqual(['keep.v']);
+    st().undo();
+    await settle();
     expect(Object.keys(st().files).sort()).toEqual(['keep.v', 'pasted.v']);
     expect(st().doc.sheets['v:blocks:top'].hidden.length).toBe(1);
+  }, 60_000);
+
+  it('drops the edits of modules only the files left out declared when all files are replaced by some of the same names (C5)', async () => {
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE, 'pasted.v': 'module top(input clk, input rst, output y); assign y = clk & rst; endmodule\n' }, { top: 'top' });
+    await settle();
+    st().select([input('clk').id]);
+    st().deleteSelection();
+    // File › Open Verilog files with auction.v alone.
+    await st().setFiles({ [AUCTION_FILE]: AUCTION_SOURCE }, true);
+    await settle();
+    expect(Object.keys(st().files)).toEqual([AUCTION_FILE]);
+    expect(st().doc.sheets['v:blocks:top']).toBeUndefined();
+    // Another design's top does not get them.
+    await st().setFiles({ [FRUIT_FILE]: FRUIT_SOURCE }, false, { newVersion: true });
+    await settle();
+    await st().openPath([{ instance: 'top', module: 'top' }]);
+    await settle();
+    expect(st().doc.sheets['v:blocks:top']).toBeUndefined();
+    expect(input('seed')).toBeDefined();
+    expect(st().layout!.nodes.some((n) => n.id.startsWith('u:'))).toBe(false);
+    // Undo, one step at a time: without Fruit Battle, then with pasted.v and its edits.
+    st().undo();
+    await settle();
+    expect(Object.keys(st().files)).toEqual([AUCTION_FILE]);
+    st().undo();
+    await settle();
+    expect(Object.keys(st().files).sort()).toEqual([AUCTION_FILE, 'pasted.v']);
+    expect(st().doc.sheets['v:blocks:top'].hidden.length).toBe(1);
+  }, 60_000);
+
+  it('makes every import that changes the open files one undo step that brings them back, with the Top choice (F1, F10)', async () => {
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE });
+    const y0 = input('clk').y;
+    st().moveSelection(new Set([input('clk').id]), 0, 100);
+    const steps = st().past.length;
+    // A new file (shown as the top, as the design does not use it), then a new version under its own name.
+    const fsm1 = 'module fsm(input clk, input go, output reg st); always @(posedge clk) st <= go; endmodule\n';
+    const fsm2 = fsm1.replace('st <= go', 'st <= !go');
+    await st().setFiles({ 'fsm.v': fsm1 }, false, { newVersion: true });
+    await settle();
+    expect(st().design!.top).toBe('fsm');
+    await st().setFiles({ 'fsm.v': fsm2 }, false, { newVersion: true });
+    await settle();
+    // Nothing changes: no step.
+    await st().setFiles({ 'fsm.v': fsm2 }, false, { newVersion: true });
+    await settle();
+    expect(st().past.length).toBe(steps + 2);
+    st().undo();
+    await settle();
+    expect(st().files).toEqual({ [AUCTION_FILE]: AUCTION_SOURCE, 'fsm.v': fsm1 });
+    st().undo();
+    await settle();
+    expect(st().files).toEqual({ [AUCTION_FILE]: AUCTION_SOURCE });
+    expect(st().design!.top).toBe('auction_top');
+    expect(input('clk').y).toBe(y0 + 100);
+    st().redo();
+    st().redo();
+    await vi.waitFor(() => expect(st().files['fsm.v']).toBe(fsm2));
+    await settle();
+
+    // A new version of auction.v under its own name: Undo brings back the old text, not the move before it.
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE });
+    st().moveSelection(new Set([input('clk').id]), 0, 100);
+    const v2 = AUCTION_SOURCE.replace("bid != 4'd0", "bid != 4'd1");
+    await st().setFiles({ [AUCTION_FILE]: v2 }, false, { newVersion: true });
+    await settle();
+    expect(input('clk').y).toBe(y0 + 100);
+    st().undo();
+    await settle();
+    expect(st().files).toEqual({ [AUCTION_FILE]: AUCTION_SOURCE });
+    expect(input('clk').y).toBe(y0 + 100);
+    // And with Replace (File › Open Verilog files of the same file).
+    await st().setFiles({ [AUCTION_FILE]: v2 }, true);
+    await settle();
+    st().undo();
+    await settle();
+    expect(st().files).toEqual({ [AUCTION_FILE]: AUCTION_SOURCE });
+    expect(input('clk').y).toBe(y0 + 100);
+  }, 60_000);
+
+  it('keeps the edits of a removed file for a new version under the same name, and only for it (F3)', async () => {
+    const keep = { 'keep.v': 'module keep(input a, output y); assign y = a; endmodule\n' };
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE, ...keep }, { top: 'auction_top' });
+    const y0 = input('clk').y;
+    st().moveSelection(new Set([input('clk').id]), 0, 100);
+    await st().removeFile(AUCTION_FILE);
+    await settle();
+    expect(Object.keys(st().doc.sheets).filter((k) => k.startsWith('v:') && !k.endsWith(':keep'))).toEqual([]);
+    // Dropped onto the app, a new version under the same name brings them back.
+    const v2 = AUCTION_SOURCE.replace("bid != 4'd0", "bid != 4'd1");
+    await st().setFiles({ [AUCTION_FILE]: v2 }, false, { newVersion: true });
+    await settle();
+    await st().setTop('auction_top');
+    await settle();
+    expect(input('clk').y).toBe(y0 + 100);
+    // Undo the import and import it again: still there (Undo brings back what was put aside).
+    st().undo();
+    await vi.waitFor(() => expect(Object.keys(st().files)).toEqual(['keep.v']));
+    await settle();
+    await st().setFiles({ [AUCTION_FILE]: v2 }, true);
+    await settle();
+    expect(input('clk').y).toBe(y0 + 100);
+    // Undo twice: the removal undone, the file and the edits as they were.
+    st().undo();
+    await settle();
+    st().undo();
+    await settle();
+    expect(st().files).toEqual({ [AUCTION_FILE]: AUCTION_SOURCE, ...keep });
+    expect(input('clk').y).toBe(y0 + 100);
+    // Under another name, or after another design was opened, it is another file: no edits.
+    await st().removeFile(AUCTION_FILE);
+    await settle();
+    await st().setFiles({ 'auction2.v': v2 }, false, { newVersion: true });
+    await settle();
+    await st().setTop('auction_top');
+    await settle();
+    expect(st().doc.sheets['v:blocks:auction_top']).toBeUndefined();
+    expect(st().putAside[AUCTION_FILE]).toBeDefined();
+    await st().loadExample('fruit');
+    expect(st().putAside).toEqual({});
+  }, 60_000);
+
+  it('pastes onto another sheet where the user looks, and on its own sheet beside the original (F2, N30)', async () => {
+    const far = { ...drawing([pin('u:1', 'input', 'a')]), pos: { 'u:1': { x: 1200, y: 600 } } };
+    await open({}, { doc: { drawn: ['a', 'b'], sheets: { 'd:a': far, 'd:b': drawing([]) } }, path: [{ instance: 'a', module: 'a', drawn: true }] });
+    st().select(['u:1']);
+    expect(st().copy()).toBe(true);
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    await st().openPath([{ instance: 'b', module: 'b', drawn: true }]);
+    st().paste({ x: 100, y: 80 });
+    const p1 = box([...st().selection][0]);
+    expect(Math.abs(p1.x + p1.width / 2 - 100)).toBeLessThanOrEqual(10);
+    expect(Math.abs(p1.y + p1.height / 2 - 80)).toBeLessThanOrEqual(10);
+    // Again at the same spot: below the first copy, not on top of it.
+    st().paste({ x: 100, y: 80 });
+    const p2 = box([...st().selection][0]);
+    expect(p2.x).toBe(p1.x);
+    expect(p2.y).toBeGreaterThanOrEqual(p1.y + p1.height);
+    // Back on the sheet it was copied from, the point does not matter: beside the original.
+    await st().openPath([{ instance: 'a', module: 'a', drawn: true }]);
+    st().paste({ x: 0, y: 0 });
+    const p3 = box([...st().selection][0]);
+    expect(p3.x).toBe(1200);
+    expect(p3.y).toBeGreaterThan(600);
+  }, 60_000);
+
+  it('names the drawings of a copy apart from the automatic blocks the Verilog export writes (F6)', async () => {
+    await open({ [FRUIT_FILE]: FRUIT_SOURCE });
+    const before = exportCurrent();
+    await st().convertToDrawing();
+    await settle();
+    await st().openPath([{ instance: 'top', module: 'top' }]);
+    await settle();
+    const after = exportCurrent();
+    expect(after.warnings).toEqual(before.warnings);
+    expect(after.code).toBe(before.code);
   }, 60_000);
 
   it('keeps the notice about a renamed drawing when an import is shown as the top (N25)', async () => {

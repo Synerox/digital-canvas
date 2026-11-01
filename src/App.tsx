@@ -170,7 +170,8 @@ export default function App() {
         if (k === 'a') return take(), st.selectAll();
         if (k === 'c') return st.copy() ? take() : undefined;
         if (k === 'x') return take(), st.cut();
-        if (k === 'v') return take(), st.paste();
+        // The canvas pastes: on another sheet the copy goes where the user looks, which only the canvas knows.
+        if (k === 'v') return take(), ui.dispatchEvent(new Event('paste'));
         if (k === 'd') return take(), st.duplicate();
         return;
       }
@@ -227,7 +228,7 @@ export default function App() {
     { label: 'Redo', shortcut: `${MOD}+Shift+Z`, onSelect: () => s.redo() },
     { label: 'Cut', shortcut: `${MOD}+X`, onSelect: () => s.cut() },
     { label: 'Copy', shortcut: `${MOD}+C`, onSelect: () => void s.copy() },
-    { label: 'Paste', shortcut: `${MOD}+V`, onSelect: () => s.paste() },
+    { label: 'Paste', shortcut: `${MOD}+V`, onSelect: () => ui.dispatchEvent(new Event('paste')) },
     { label: 'Duplicate', shortcut: `${MOD}+D`, onSelect: () => s.duplicate() },
     { label: 'Delete', shortcut: 'Del', onSelect: () => s.deleteSelection() },
     { label: 'Select all', shortcut: `${MOD}+A`, onSelect: () => s.selectAll() },
@@ -263,7 +264,8 @@ export default function App() {
           return;
         }
         const files = await readFiles(list);
-        if (Object.keys(files).length) await s.setFiles(files, false);
+        // A new version of an open file under another name replaces it, as in Import Verilog (not every module defined twice).
+        if (Object.keys(files).length) await s.setFiles(files, false, { newVersion: true });
       }}
     >
       <header className="toolbar">
