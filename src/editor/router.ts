@@ -48,6 +48,12 @@ export interface RouteOptions {
    * allowed but costs a little.
    */
   otherNets?: Point[][];
+  /**
+   * Pins of other nets whose wires are not drawn (yet). Their stubs are kept clear like other nets' wires:
+   * a wire that turned on, or ran through, the spot where such a pin's wire has to start would meet that
+   * wire there later and look connected to it.
+   */
+  reserved?: RouteEnd[];
   /** Grid pitch, default 10. */
   grid?: number;
   /** Search cap before falling back to simpleRoute. */
@@ -157,6 +163,10 @@ export function adjustRoute(points: Point[], newStart: Point, newEnd: Point): Po
 
 /** Whether segment p-q passes through the interior of the box (Liang-Barsky clip, then test the middle of the clipped piece). */
 function segmentHitsBox(p: Point, q: Point, x0: number, y0: number, x1: number, y1: number): boolean {
+  const e = 1e-6;
+  // Wires are horizontal and vertical: answer those without clipping (geometry tests every route).
+  if (p.y === q.y) return p.y > y0 + e && p.y < y1 - e && Math.max(p.x, q.x) > x0 + e && Math.min(p.x, q.x) < x1 - e;
+  if (p.x === q.x) return p.x > x0 + e && p.x < x1 - e && Math.max(p.y, q.y) > y0 + e && Math.min(p.y, q.y) < y1 - e;
   const dx = q.x - p.x;
   const dy = q.y - p.y;
   let t0 = 0;
@@ -174,7 +184,6 @@ function segmentHitsBox(p: Point, q: Point, x0: number, y0: number, x1: number, 
   const t = (t0 + t1) / 2;
   const mx = p.x + dx * t;
   const my = p.y + dy * t;
-  const e = 1e-6;
   return mx > x0 + e && mx < x1 - e && my > y0 + e && my < y1 - e;
 }
 
@@ -185,6 +194,15 @@ export function polylineHitsRect(points: Point[], r: Rect): boolean {
   if (points.length === 1) return segmentHitsBox(points[0], points[0], r.x, r.y, x1, y1);
   for (let i = 0; i + 1 < points.length; i++) if (segmentHitsBox(points[i], points[i + 1], r.x, r.y, x1, y1)) return true;
   return false;
+}
+
+/**
+ * True when the polyline comes closer to the symbol than routed wires do: through it, along its edge, or
+ * through one of its pins. Wires and symbols both sit on the grid, so a symbol dropped next to a wire
+ * often lands exactly on it, and the wire then reads as connected to the pins it passes.
+ */
+export function polylineCrowdsRect(points: Point[], r: Rect): boolean {
+  return polylineHitsRect(points, { x: r.x - INFLATE, y: r.y - INFLATE, width: r.width + 2 * INFLATE, height: r.height + 2 * INFLATE });
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +627,11 @@ function stubEnd(end: RouteEnd, len: number, clear: number, grid: number): Point
   }
 }
 
+/** Where the router's straight piece of wire at a port ends (the first bend or branch is no closer). */
+export function portStub(end: RouteEnd, grid = 10): Point {
+  return stubEnd(end, STUB, STUB_CLEAR, grid > 0 ? grid : 10);
+}
+
 /** Direction of travel from a to an axis-aligned b, or -1 when they are the same point or not aligned. */
 function directionTo(a: Point, b: Point): number {
   if (a.y === b.y && a.x !== b.x) return b.x > a.x ? 0 : 2;
@@ -627,17 +650,36 @@ interface Seg {
   hi: number;
 }
 
+function cutUp(pl: Point[]): Seg[] {
+  const segs: Seg[] = [];
+  for (let i = 0; i + 1 < pl.length; i++) {
+    const p = pl[i];
+    const q = pl[i + 1];
+    if (Math.abs(p.y - q.y) <= EPS && Math.abs(p.x - q.x) > EPS) segs.push({ horizontal: true, at: p.y, lo: Math.min(p.x, q.x), hi: Math.max(p.x, q.x) });
+    else if (Math.abs(p.x - q.x) <= EPS && Math.abs(p.y - q.y) > EPS) segs.push({ horizontal: false, at: p.x, lo: Math.min(p.y, q.y), hi: Math.max(p.y, q.y) });
+  }
+  return segs;
+}
+
+// Segments of each wire and pin stub seen. A refresh hands every wire it routes the same wires of the
+// other nets and the same free pins (neither is changed in place), so each is cut up once, not once per wire.
+const segCache = new WeakMap<Point[], Seg[]>();
+const stubCache = new WeakMap<RouteEnd, { grid: number; segs: Seg[] }>();
+
 function segmentsOf(polylines: Point[][]): Seg[] {
   const out: Seg[] = [];
   for (const pl of polylines) {
-    for (let i = 0; i + 1 < pl.length; i++) {
-      const p = pl[i];
-      const q = pl[i + 1];
-      if (Math.abs(p.y - q.y) <= EPS && Math.abs(p.x - q.x) > EPS) out.push({ horizontal: true, at: p.y, lo: Math.min(p.x, q.x), hi: Math.max(p.x, q.x) });
-      else if (Math.abs(p.x - q.x) <= EPS && Math.abs(p.y - q.y) > EPS) out.push({ horizontal: false, at: p.x, lo: Math.min(p.y, q.y), hi: Math.max(p.y, q.y) });
-    }
+    let segs = segCache.get(pl);
+    if (!segs) segCache.set(pl, (segs = cutUp(pl)));
+    for (const s of segs) out.push(s);
   }
   return out;
+}
+
+function stubSegments(end: RouteEnd, grid: number): Seg[] {
+  let c = stubCache.get(end);
+  if (!c || c.grid !== grid) stubCache.set(end, (c = { grid, segs: cutUp([end.point, stubEnd(end, STUB, STUB_CLEAR, grid)]) }));
+  return c.segs;
 }
 
 /** Whether a straight wire p-q would run along another net or touch one of its corners or ends. */
@@ -654,6 +696,39 @@ function conflictsWithOthers(p: Point, q: Point, others: Seg[]): boolean {
       const inside = s.at > lo + MATCH_TOL && s.at < hi - MATCH_TOL && at > s.lo + MATCH_TOL && at < s.hi - MATCH_TOL;
       if (!inside) return true;
     }
+  }
+  return false;
+}
+
+/**
+ * How many of the first `count` segments of an own-net wire stay out of the symbols. Its source symbol
+ * does not count, nor, for the wire's last segment, a symbol its end is on (a pin may sit inside the box).
+ */
+function clearSegments(pl: Point[], count: number, source: Rect, obstacles: Rect[]): number {
+  for (let s = 0; s < count; s++) {
+    const u = pl[s];
+    const v = pl[s + 1];
+    const last = s + 2 === pl.length;
+    for (const r of obstacles) {
+      if (sameRect(r, source)) continue;
+      if (last && v.x >= r.x && v.x <= r.x + r.width && v.y >= r.y && v.y <= r.y + r.height) continue;
+      if (segmentHitsBox(u, v, r.x, r.y, r.x + r.width, r.y + r.height)) return s;
+    }
+  }
+  return count;
+}
+
+/**
+ * True when two wires of different nets would look connected: they run along each other, or a corner or
+ * end of one lies on the other. Crossing each other's insides is fine.
+ */
+export function wiresMeet(a: Point[], b: Point[]): boolean {
+  const others = segmentsOf([b]);
+  for (let i = 0; i + 1 < a.length; i++) {
+    const p = a[i];
+    const q = a[i + 1];
+    if ((p.x === q.x) === (p.y === q.y)) continue; // a point, or slanted (not from the router)
+    if (conflictsWithOthers(p, q, others)) return true;
   }
   return false;
 }
@@ -742,18 +817,22 @@ export function routeWire(from: RouteEnd, to: RouteEnd, opts: RouteOptions): Poi
   const q = to.point;
   if (samePoint(p, q)) return [{ x: p.x, y: p.y }, { x: q.x, y: q.y }];
   const others = segmentsOf(opts.otherNets ?? []);
+  // Free pins' stubs count as wires of other nets.
+  for (const r of opts.reserved ?? []) if (!samePoint(r.point, p) && !samePoint(r.point, q)) for (const s of stubSegments(r, grid)) others.push(s);
   const obstacles = [...opts.obstacles, from.rect, to.rect];
   const straight = straightRoute(from, to, obstacles, others);
   if (straight) return straight;
 
   const a = stubEnd(from, STUB, STUB_CLEAR, grid);
   const b = stubEnd(to, STUB, STUB_CLEAR, grid);
-  // Own-net wires that start at this port, cut to their orthogonal part.
+  // Own-net wires that start at this port, cut to their orthogonal part, and to before they first run
+  // through a symbol: a branch takes the wire's path up to the branch point and must not copy a crossing.
   const own: Point[][] = [];
   for (const pl of opts.ownNet ?? []) {
     if (pl.length < 2 || !samePoint(pl[0], p)) continue;
     let n = 1;
     while (n < pl.length && (pl[n].x === pl[n - 1].x || pl[n].y === pl[n - 1].y)) n++;
+    n = Math.min(n, 1 + clearSegments(pl, n - 1, from.rect, obstacles));
     if (n >= 2) own.push([p, ...pl.slice(1, n)]);
   }
 

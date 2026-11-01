@@ -6,10 +6,13 @@ import {
   adjustRoute,
   netJunctions,
   orthogonalize,
+  polylineCrowdsRect,
   polylineHitsRect,
+  portStub,
   routeWire,
   simpleRoute,
   simplify,
+  wiresMeet,
 } from './router';
 
 const R = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height });
@@ -263,6 +266,43 @@ describe('routeWire', () => {
     expect(routeWire(from, to, { obstacles: [A, B2], maxExpansions: 1 })).toEqual(simpleRoute(from, to));
   });
 
+  it('keeps the stub of a pin not wired yet clear', () => {
+    const rects = {
+      in1: R(40, 340, 37, 20),
+      not2: R(510, 170, 40, 40),
+      not3: R(320, 180, 40, 40),
+      out4: R(310, 40, 37, 20),
+      not5: R(600, 160, 40, 40),
+      out6: R(380, 340, 37, 20),
+    };
+    const obstacles = Object.values(rects);
+    const from = east(rects.in1, 350);
+    const to = west(rects.not2, 190);
+    // out6's input waits for a wire; its stub ends at (370, 350), right where this wire would turn.
+    const pin = west(rects.out6, 350);
+    const stub = [pin.point, portStub(pin)];
+    expect(stub[1]).toEqual(P(370, 350));
+    expect(wiresMeet(routeWire(from, to, { obstacles }), stub)).toBe(true);
+    const pts = routeWire(from, to, { obstacles, reserved: [pin] });
+    expectClean(pts, from, to);
+    expect(wiresMeet(pts, stub)).toBe(false);
+    for (const r of obstacles) expect(polylineHitsRect(pts, r)).toBe(false);
+  });
+
+  it('does not branch off its own net beyond where that wire runs through a symbol', () => {
+    const S = R(40, 20, 60, 40);
+    const X = R(200, 20, 40, 40);
+    const T1 = R(400, 20, 40, 40);
+    const T2 = R(400, 140, 40, 40);
+    const from = east(S, 40);
+    const to = west(T2, 160);
+    // A wire of the net that runs straight through X (say, X was placed on it): its far part is no trunk to copy.
+    const through = [P(100, 40), P(400, 40)];
+    const pts = routeWire(from, to, { obstacles: [S, X, T1, T2], ownNet: [through] });
+    expectClean(pts, from, to);
+    expect(polylineHitsRect(pts, X)).toBe(false);
+  });
+
   it('works with a coarser grid', () => {
     const B2 = R(300, 60, 60, 60);
     const from = east(A, 40);
@@ -422,6 +462,37 @@ describe('polyline helpers', () => {
     expect(polylineHitsRect([P(50, -10), P(50, 10)], r)).toBe(true);
     expect(polylineHitsRect([P(-10, -10), P(0, 0)], r)).toBe(false); // touches a corner
     expect(polylineHitsRect([P(-10, 60), P(60, -10)], r)).toBe(true); // slanted, through a corner region
+  });
+
+  it('polylineCrowdsRect also sees wires along an edge, through a pin, or closer than routed wires keep', () => {
+    const r = R(0, 0, 100, 50);
+    expect(polylineCrowdsRect([P(-10, 0), P(110, 0)], r)).toBe(true); // along an edge
+    expect(polylineCrowdsRect([P(0, -20), P(0, 70)], r)).toBe(true); // through the pins on the left edge
+    expect(polylineCrowdsRect([P(-20, 20), P(0, 20)], r)).toBe(true); // ends on a pin
+    expect(polylineCrowdsRect([P(-3, -20), P(-3, 70)], r)).toBe(true);
+    expect(polylineCrowdsRect([P(-4, -20), P(-4, 70)], r)).toBe(false); // as close as the router goes
+    expect(polylineCrowdsRect([P(-10, 60), P(110, 60)], r)).toBe(false);
+  });
+
+  it('wiresMeet tells wires that look connected from wires that cross', () => {
+    const h = [P(0, 0), P(100, 0)];
+    expect(wiresMeet([P(50, -50), P(50, 50)], h)).toBe(false); // a crossing
+    expect(wiresMeet([P(-50, 10), P(150, 10)], h)).toBe(false); // parallel, a grid line apart
+    expect(wiresMeet([P(50, 0), P(150, 0)], h)).toBe(true); // along it
+    expect(wiresMeet([P(50, -50), P(50, 0)], h)).toBe(true); // ends on it
+    expect(wiresMeet([P(50, -50), P(50, 0), P(80, 0)], h)).toBe(true); // turns onto it
+    expect(wiresMeet([P(100, -50), P(100, 50)], h)).toBe(true); // through its end
+    expect(wiresMeet([P(120, -50), P(120, 50)], h)).toBe(false);
+  });
+
+  it('portStub is where the router leaves a port', () => {
+    const A = R(40, 20, 60, 40);
+    expect(portStub(east(A, 40))).toEqual(P(110, 40));
+    expect(portStub(west(A, 40))).toEqual(P(30, 40));
+    const to = west(R(300, 60, 60, 60), 100);
+    const pts = routeWire(east(A, 40), to, { obstacles: [A, to.rect] });
+    expect(pts[1].x).toBeGreaterThanOrEqual(portStub(east(A, 40)).x);
+    expect(pts[pts.length - 2].x).toBeLessThanOrEqual(portStub(to).x);
   });
 });
 
