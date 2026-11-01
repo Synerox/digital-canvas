@@ -7,12 +7,16 @@
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
 import type { LayoutResult, Point } from '../layout/elk-layout';
-import type { RouteRec, SheetEdits } from './doc';
-import { type InterfaceOf, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
+import { type RouteRec, type SheetEdits, freeIdFloor } from './doc';
+import { type InterfaceOf, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
 
 // ---------- effective netlist ----------
 
-/** A symbol's drawn text after a rename. */
+/**
+ * A symbol's drawn text after a rename. A constant is never renamed: its
+ * label is its Verilog value (the export and Convert to drawing read it), so
+ * a stale label saved for one has no effect.
+ */
 export function applyLabel(n: DNode, text: string | undefined): DNode {
   if (text === undefined) return n;
   switch (n.kind) {
@@ -21,7 +25,6 @@ export function applyLabel(n: DNode, text: string | undefined): DNode {
     case 'input':
     case 'output':
     case 'inout':
-    case 'const':
     case 'text':
       return { ...n, label: text || n.label };
     default:
@@ -89,45 +92,75 @@ export type WireEnd =
   /** A point on an existing wire: connects to the wire's net (its driver). */
   | { kind: 'wire'; edge: string; at: Point };
 
+export type Slice = { lo: number; width: number };
+
 export interface Connection {
   source: { node: string; port: string };
   target: { node: string; port: string };
   /** True when the user drew from the target to the source (the drawn route must be reversed). */
   reversed: boolean;
+  /** The bits of the source the new wire carries, when not all of them (it joins a wire that carries a slice). */
+  slice?: Slice;
 }
 
-/** Decide which end drives: an output port or a wire's net drives an input port. */
+const sameSlice = (a: Slice | undefined, b: Slice | undefined) => a?.lo === b?.lo && a?.width === b?.width;
+
+/**
+ * Decide which end drives: an output port or a wire's net drives an input
+ * port. A wire joined to an existing wire (or to an input that wire feeds)
+ * carries the same bits as that wire, so a slice stays a slice.
+ */
 export function resolveConnection(d: Diagram, a: WireEnd, b: WireEnd): Connection | { error: string } {
   const portOf = new Map<string, { node: DNode; port: DPort }>();
   for (const n of d.nodes) for (const p of n.ports) portOf.set(p.id, { node: n, port: p });
   const edgeOf = new Map(d.edges.map((x) => [x.id, x]));
+  type Driver = { source: { node: string; port: string }; slice?: Slice };
   /** Driver of an end, if it is a driving end. */
-  const driver = (end: WireEnd): { node: string; port: string } | undefined => {
-    if (end.kind === 'wire') return edgeOf.get(end.edge)?.source;
+  const driver = (end: WireEnd): Driver | undefined => {
+    if (end.kind === 'wire') {
+      const x = edgeOf.get(end.edge);
+      return x && { source: x.source, slice: x.bits };
+    }
     const p = portOf.get(end.port);
-    return p && p.port.dir === 'out' ? { node: end.node, port: end.port } : undefined;
+    return p && p.port.dir === 'out' ? { source: { node: end.node, port: end.port } } : undefined;
   };
   const sink = (end: WireEnd): { node: string; port: string } | undefined => {
     if (end.kind !== 'port') return undefined;
     const p = portOf.get(end.port);
     return p && p.port.dir === 'in' ? { node: end.node, port: end.port } : undefined;
   };
+  // Inout ports of blocks are wired as inputs, but they can drive their net too.
+  const isInout = (s: { port: string }) => !!portOf.get(s.port)?.port.inout;
+  const conn = (dr: Driver, target: { node: string; port: string }, reversed: boolean): Connection => ({
+    source: dr.source,
+    target,
+    reversed,
+    ...(dr.slice ? { slice: dr.slice } : {}),
+  });
   if (a.kind === 'port' && b.kind === 'port' && a.node === b.node && a.port === b.port) return { error: 'Pick a different pin.' };
   const da = driver(a);
   const db = driver(b);
   const sa = sink(a);
   const sb = sink(b);
   let c: Connection | undefined;
-  if (da && sb) c = { source: da, target: sb, reversed: false };
-  else if (db && sa) c = { source: db, target: sa, reversed: true };
+  if (da && sb) c = conn(da, sb, false);
+  else if (db && sa) c = conn(db, sa, true);
   else if (sa && sb) {
-    // Two inputs: join the undriven one to the other's driver.
-    const into = (s: { port: string }) => d.edges.find((x) => x.target.port === s.port)?.source;
+    // Two inputs: join the undriven one to the other's driver, with the bits that wire carries.
+    const into = (s: { port: string }): Driver | undefined => {
+      const x = d.edges.find((y) => y.target.port === s.port);
+      return x && { source: x.source, slice: x.bits };
+    };
     const fa = into(sa);
     const fb = into(sb);
-    if (fa && !fb) c = { source: fa, target: sb, reversed: false };
-    else if (fb && !fa) c = { source: fb, target: sa, reversed: true };
+    // An inout port can be the source of the wire into the other end.
+    if (fa?.source.port === sb.port || fb?.source.port === sa.port) return { error: 'These pins are already connected.' };
+    if (fa && !fb) c = conn(fa, sb, false);
+    else if (fb && !fa) c = conn(fb, sa, true);
     else if (fa && fb) return { error: 'Both inputs already have a driver.' };
+    // Neither has a driver: an inout port may be the one that drives (two blocks sharing a bus).
+    else if (isInout(sa)) c = conn({ source: sa }, sb, false);
+    else if (isInout(sb)) c = conn({ source: sb }, sa, true);
     else return { error: 'Connect an output to an input (neither of these inputs has a driver yet).' };
   } else if (da && db) {
     return { error: 'Both ends are outputs. Connect an output to an input.' };
@@ -135,7 +168,7 @@ export function resolveConnection(d: Diagram, a: WireEnd, b: WireEnd): Connectio
     return { error: 'Connect an output to an input.' };
   }
   if (c.source.node === c.target.node && c.source.port === c.target.port) return { error: 'Pick a different pin.' };
-  if (d.edges.some((x) => x.source.port === c!.source.port && x.target.port === c!.target.port)) {
+  if (d.edges.some((x) => x.source.port === c!.source.port && x.target.port === c!.target.port && sameSlice(x.bits, c!.slice))) {
     return { error: 'These pins are already connected.' };
   }
   return c;
@@ -208,7 +241,13 @@ export function deleteItems(e: SheetEdits, d: Diagram, ids: Iterable<string>): S
 
 export function connect(e: SheetEdits, c: Connection, route?: Point[], label?: string): [string, SheetEdits] {
   const [id, e1] = newId(e, 'w');
-  const edge: UserEdge = { id, source: c.source, target: c.target, ...(label ? { label } : {}) };
+  const edge: UserEdge = {
+    id,
+    source: c.source,
+    target: c.target,
+    ...(label ? { label } : {}),
+    ...(c.slice ? { slice: { ...c.slice } } : {}),
+  };
   const routes = route && route.length >= 2 ? { ...e1.routes, [id]: { points: route, manual: true } } : e1.routes;
   return [id, { ...e1, edges: [...e1.edges, edge], routes }];
 }
@@ -230,8 +269,57 @@ export function resetLabel(e: SheetEdits, id: string): SheetEdits {
   return { ...e, labels };
 }
 
+/**
+ * Which port takes the place of each port of `before` that `after` no longer
+ * has. Ports are matched by their position among the ports with the same
+ * direction and side; bus slices count from the LSB, so a concatenation or
+ * split keeps its low part on its low part. Only a port that is new in
+ * `after` can take a place, so an existing wire is never doubled.
+ */
+function portSuccessors(before: DNode, after: DNode): Map<string, string> {
+  const slots = (n: DNode) => {
+    const fromLsb = n.kind === 'join' || n.kind === 'split';
+    const groups = new Map<string, DPort[]>();
+    for (const p of n.ports) groups.set(`${p.dir}:${p.side}`, [...(groups.get(`${p.dir}:${p.side}`) ?? []), p]);
+    const out = new Map<string, DPort>();
+    for (const [g, ps] of groups) ps.forEach((p, k) => out.set(`${g}:${fromLsb ? ps.length - 1 - k : k}`, p));
+    return out;
+  };
+  const beforeNames = new Set(before.ports.map((p) => p.name));
+  const afterNames = new Set(after.ports.map((p) => p.name));
+  const afterSlots = slots(after);
+  const map = new Map<string, string>();
+  for (const [slot, p] of slots(before)) {
+    if (afterNames.has(p.name)) continue;
+    const q = afterSlots.get(slot);
+    if (q && !beforeNames.has(q.name)) map.set(p.id, q.id);
+  }
+  return map;
+}
+
+/**
+ * Change a symbol's parameters. Port names can depend on them (a 2-input MUX
+ * has A and B, a wider one I0..In; concatenation and split ports are named by
+ * their bit ranges), so the wires on a port that goes away move to the port
+ * that takes its place instead of being dropped.
+ */
 export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEdits {
-  return { ...e, nodes: e.nodes.map((n) => (n.id === id ? { ...n, params: { ...n.params, ...params } } : n)) };
+  const old = e.nodes.find((n) => n.id === id);
+  if (!old) return e;
+  const u: UserNode = { ...old, params: { ...old.params, ...params } };
+  const nodes = e.nodes.map((n) => (n.id === id ? u : n));
+  // Blocks are left alone: their ports come from the module, not from parameters
+  // (and the ports of another module are not the same signals by position).
+  const noModules: InterfaceOf = () => undefined;
+  const moved = portSuccessors(symbolNode(old, noModules), symbolNode(u, noModules));
+  if (moved.size === 0) return { ...e, nodes };
+  const remap = (end: { node: string; port: string }) => (end.node === id && moved.has(end.port) ? { node: id, port: moved.get(end.port)! } : end);
+  const edges = e.edges.map((x) => {
+    const source = remap(x.source);
+    const target = remap(x.target);
+    return source === x.source && target === x.target ? x : { ...x, source, target };
+  });
+  return { ...e, nodes, edges };
 }
 
 export function setSlice(e: SheetEdits, id: string, slice: { lo: number; width: number } | undefined): SheetEdits {
@@ -388,8 +476,12 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
   switch (n.kind) {
     case 'input':
     case 'output':
-    case 'inout':
-      return { id, sym: n.kind, params: { width: n.ports[0]?.width ?? 1 }, name: n.label };
+    case 'inout': {
+      // A library pin is at most PARAM_LIMITS.width bits; a wider one stays a frozen copy.
+      const w = n.ports[0]?.width ?? 1;
+      if (w <= PARAM_LIMITS.width[1]) return { id, sym: n.kind, params: { width: w }, name: n.label };
+      break;
+    }
     case 'const':
       return { id, sym: 'const', params: { value: n.label } };
     case 'text':
@@ -536,6 +628,7 @@ export function toDrawing(d: Diagram, layout: LayoutResult, e: SheetEdits, iface
       };
     }
   }
-  out.next = n;
+  // Hand-drawn symbols keep their u:<n> IDs, which can be above the wire count.
+  out.next = freeIdFloor(out);
   return out;
 }

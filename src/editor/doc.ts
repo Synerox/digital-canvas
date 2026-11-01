@@ -11,6 +11,8 @@
  * - A drawing (a module drawn by hand) has no Verilog: its symbols and wires
  *   are all in its edits.
  */
+import type { DNode, DPort, NodeKind, Side } from '../core/diagram';
+import type { SrcRange } from '../core/ir';
 import type { Point } from '../layout/elk-layout';
 import type { RuleId } from '../core/rules';
 import type { ThemeName } from '../render/theme';
@@ -103,6 +105,16 @@ export function isDrawnKey(key: string): boolean {
   return key.startsWith('d:');
 }
 
+/** The lowest ID counter that never hands out an ID already used by the sheet's symbols or wires. */
+export function freeIdFloor(e: Pick<SheetEdits, 'nodes' | 'edges' | 'next'>): number {
+  let next = e.next;
+  for (const x of [...e.nodes, ...e.edges]) {
+    const m = /^[uw]:(\d+)$/.exec(x.id);
+    if (m) next = Math.max(next, Number(m[1]) + 1);
+  }
+  return next;
+}
+
 /** True once the sheet has its own layout (always true for a drawing with symbols). */
 export function isPinned(e: SheetEdits | undefined): boolean {
   return !!e && Object.keys(e.pos).length > 0;
@@ -152,19 +164,44 @@ function userNode(v: unknown): UserNode | undefined {
   const out: UserNode = { id: v.id, sym, params };
   if (isStr(v.name)) out.name = v.name;
   if (sym === 'raw') {
-    const r = v.raw;
-    if (!isObj(r) || !isStr(r.kind) || !isStr(r.label) || !Array.isArray(r.ports)) return undefined;
-    const ports = r.ports.filter(
-      (q): q is { id: string; name: string; dir: 'in' | 'out'; side: 'WEST' | 'EAST' | 'NORTH' | 'SOUTH'; width: number } =>
-        isObj(q) &&
-        isStr(q.name) &&
-        (q.dir === 'in' || q.dir === 'out') &&
-        ['WEST', 'EAST', 'NORTH', 'SOUTH'].includes(q.side as string) &&
-        isNum(q.width),
-    );
-    out.raw = { ...(r as object), ports: ports.map((q) => ({ ...q, id: `${v.id}.${q.name}` })), src: Array.isArray(r.src) ? r.src : [] } as UserNode['raw'];
+    const raw = rawNode(v.id, v.raw);
+    if (!raw) return undefined;
+    out.raw = raw;
   }
   return out;
+}
+
+const NODE_KINDS: NodeKind[] = ['instance', 'cell', 'input', 'output', 'inout', 'const', 'join', 'split', 'text'];
+const SIDES: Side[] = ['WEST', 'EAST', 'NORTH', 'SOUTH'];
+const isKind = (v: unknown): v is NodeKind => NODE_KINDS.includes(v as NodeKind);
+const isSide = (v: unknown): v is Side => SIDES.includes(v as Side);
+
+/**
+ * The frozen drawing node of a `raw` symbol, built only from fields of the
+ * right type: the canvas, Inspector and code panel read them while rendering,
+ * so one bad value in a hand-edited file would otherwise take the whole page down.
+ */
+function rawNode(id: string, r: unknown): DNode | undefined {
+  if (!isObj(r) || !isKind(r.kind) || !isStr(r.label) || !Array.isArray(r.ports)) return undefined;
+  const ports: DPort[] = [];
+  for (const q of r.ports) {
+    if (!isObj(q) || !isStr(q.name) || (q.dir !== 'in' && q.dir !== 'out') || !isSide(q.side) || !isNum(q.width)) continue;
+    ports.push({ id: `${id}.${q.name}`, name: q.name, dir: q.dir, side: q.side, width: q.width, ...(q.inout === true ? { inout: true } : {}) });
+  }
+  const src: SrcRange[] = [];
+  for (const s of Array.isArray(r.src) ? r.src : []) {
+    if (isObj(s) && isStr(s.file) && isNum(s.startLine) && isNum(s.startCol) && isNum(s.endLine) && isNum(s.endCol)) {
+      src.push({ file: s.file, startLine: s.startLine, startCol: s.startCol, endLine: s.endLine, endCol: s.endCol });
+    }
+  }
+  const node: DNode = { id, kind: r.kind, label: r.label, ports, src };
+  for (const k of ['subLabel', 'cellType', 'moduleName', 'instanceName', 'rule'] as const) if (isStr(r[k])) node[k] = r[k];
+  if (isObj(r.attrs)) {
+    const attrs: NonNullable<DNode['attrs']> = {};
+    for (const [k, a] of Object.entries(r.attrs)) if (isStr(a) || isNum(a) || typeof a === 'boolean') attrs[k] = a;
+    node.attrs = attrs;
+  }
+  return node;
 }
 
 function userEdge(v: unknown): UserEdge | undefined {
@@ -203,10 +240,7 @@ export function parseEdits(v: unknown): SheetEdits {
   if (Array.isArray(v.edges)) e.edges = v.edges.map(userEdge).filter((x): x is UserEdge => !!x);
   e.next = isNum(v.next) && v.next >= 1 ? Math.floor(v.next) : 1;
   // Never hand out an ID that is already used.
-  for (const n of [...e.nodes, ...e.edges]) {
-    const m = /^[uw]:(\d+)$/.exec(n.id);
-    if (m) e.next = Math.max(e.next, Number(m[1]) + 1);
-  }
+  e.next = freeIdFloor(e);
   return e;
 }
 
