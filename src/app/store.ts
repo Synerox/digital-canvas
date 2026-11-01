@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { type Diagram, buildDiagram } from '../core/diagram';
+import { type Diagram, type Side, buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES, RULES, type RuleId } from '../core/rules';
 import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy } from '../core/ir';
 import { parseYosysJson } from '../core/yosys-json';
@@ -23,11 +23,12 @@ import {
   emptyDoc,
   emptyEdits,
   isDrawnKey,
+  isEmptyEdits,
   isPinned,
   parseSavedFile,
   sheetKey,
 } from '../editor/doc';
-import { buildGeometry } from '../editor/geometry';
+import { buildGeometry, stubPoint } from '../editor/geometry';
 import {
   type Clip,
   type WireEnd,
@@ -55,6 +56,7 @@ import {
 import { type InterfaceOf, type ModulePort, type SymKey, type SymParams, clampParam, newUserNode, symbolNode } from '../editor/symbols';
 import { orthogonalize } from '../editor/router';
 import { type SheetIssues, checkSheet } from '../editor/check';
+import { verilogIdent } from '../editor/verilog-export';
 
 export type { PathEntry, ViewMode } from '../editor/doc';
 
@@ -101,6 +103,13 @@ interface State {
   path: PathEntry[];
   /** The sheet on screen (see sheetKey). */
   sheet: string;
+  /**
+   * The sheet that `base`, `baseLayout`, `netlist` and `layout` belong to. While a Verilog
+   * sheet is being opened (or opened again with other rules) they are still the previous
+   * ones and this differs from `sheet`: edits wait, or they would land on the new sheet's
+   * key computed from the old netlist and positions.
+   */
+  loadedSheet?: string;
   /** The sheet's netlist from Verilog, before edits (undefined for drawings). */
   base?: Diagram;
   /** ELK layout of `base`. */
@@ -248,30 +257,197 @@ function uniqueModuleName(want: string, taken: Set<string>): string {
   for (let i = 2; ; i++) if (!taken.has(`${base}_${i}`)) return `${base}_${i}`;
 }
 
+/** The view a Verilog sheet key belongs to (undefined for a drawing or no sheet). */
+export function viewModeOf(key: string): ViewMode | undefined {
+  const m = /^v:(blocks|flat):/.exec(key);
+  return m ? (m[1] as ViewMode) : undefined;
+}
+
+export interface DrawingPort extends ModulePort {
+  /** The pin symbol (u:<n>) the port comes from. */
+  pin: string;
+}
+
+/**
+ * The ports of a block that instantiates a drawing: one per pin, in drawing
+ * order. diagramToVerilog writes each pin as verilogIdent(label), made unique
+ * with _2, _3… in the same order. A port is named like its pin when the
+ * export writes verilogIdent of that name (the instance's .name() then matches
+ * the module's port), and takes the written name when the pin had to be made
+ * unique (`a b` and `a_b` are both a_b; input x and output x): otherwise the
+ * instance connects the wrong port and a pin is lost. Pins keep their names in
+ * the common case, so block port IDs (`<block>.<name>`) in saved work stay valid.
+ */
+export function drawingPorts(e: SheetEdits | undefined): DrawingPort[] {
+  const ports: DrawingPort[] = [];
+  const used = new Set<string>();
+  const seen = new Set<string>();
+  for (const n of e?.nodes ?? []) {
+    if (n.sym !== 'input' && n.sym !== 'output' && n.sym !== 'inout') continue;
+    // effectiveDiagram draws a repeated ID once.
+    if (seen.has(n.id)) continue;
+    seen.add(n.id);
+    // The label symbolNode gives the pin, and the take() rule of diagramToVerilog.
+    const label = n.name || (n.sym === 'input' ? 'in' : n.sym === 'output' ? 'out' : 'io');
+    const ident = verilogIdent(label);
+    let written = ident;
+    for (let i = 2; used.has(written); i++) written = `${ident}_${i}`;
+    used.add(written);
+    const own = label.trim();
+    ports.push({ pin: n.id, name: own && verilogIdent(own) === written ? own : written, dir: n.sym, width: clampParam('width', n.params.width, 1) });
+  }
+  return ports;
+}
+
+/**
+ * Wires to a block of a drawing name the block's ports by pin name
+ * (`<block>.<name>`). When an edit of the drawing changes the name of a pin's
+ * port (a rename, or a repeated name that now resolves differently), move those
+ * wires to the new name on every sheet, so they stay connected.
+ */
+export function followPinRenames(doc: EditDoc, drawing: string, before: SheetEdits | undefined, after: SheetEdits | undefined): EditDoc {
+  const was = new Map(drawingPorts(before).map((p) => [p.pin, p.name]));
+  const renamed = new Map<string, string>();
+  for (const p of drawingPorts(after)) {
+    const old = was.get(p.pin);
+    if (old !== undefined && old !== p.name) renamed.set(old, p.name);
+  }
+  if (renamed.size === 0) return doc;
+  let changed = false;
+  const sheets: EditDoc['sheets'] = {};
+  for (const [k, e] of Object.entries(doc.sheets)) {
+    const blocks = new Set(e.nodes.filter((n) => n.sym === 'block' && n.params.module === drawing).map((n) => n.id));
+    if (blocks.size === 0) {
+      sheets[k] = e;
+      continue;
+    }
+    // One lookup per end, so pins that swap names do not collide.
+    const follow = (end: { node: string; port: string }) => {
+      if (!blocks.has(end.node) || !end.port.startsWith(`${end.node}.`)) return end;
+      const to = renamed.get(end.port.slice(end.node.length + 1));
+      return to === undefined ? end : { ...end, port: `${end.node}.${to}` };
+    };
+    let edited = false;
+    const edges = e.edges.map((w) => {
+      const source = follow(w.source);
+      const target = follow(w.target);
+      if (source === w.source && target === w.target) return w;
+      edited = true;
+      return { ...w, source, target };
+    });
+    sheets[k] = edited ? { ...e, edges } : e;
+    changed ||= edited;
+  }
+  return changed ? { ...doc, sheets } : doc;
+}
+
+/** A drawing under a new name, with the blocks that instantiate it. */
+export function renameDrawingIn(doc: EditDoc, from: string, to: string): EditDoc {
+  const sheets: EditDoc['sheets'] = {};
+  for (const [k, e] of Object.entries(doc.sheets)) {
+    const nk = k === `d:${from}` ? `d:${to}` : k;
+    const nodes = e.nodes.some((n) => n.sym === 'block' && n.params.module === from)
+      ? e.nodes.map((n) => (n.sym === 'block' && n.params.module === from ? { ...n, params: { ...n.params, module: to } } : n))
+      : e.nodes;
+    sheets[nk] = nodes === e.nodes ? e : { ...e, nodes };
+  }
+  return { drawn: doc.drawn.map((d) => (d === from ? to : d)), sheets };
+}
+
+function renamePathDrawing(path: PathEntry[], from: string, to: string): PathEntry[] {
+  return path.map((p) => (p.drawn && p.module === from ? { ...p, module: to, instance: p.instance === from ? to : p.instance } : p));
+}
+
+/** The sheets (drawings and Verilog modules) that hold a block of `module`. */
+export function sheetsUsing(doc: EditDoc, module: string): string[] {
+  const out = new Set<string>();
+  for (const [k, e] of Object.entries(doc.sheets)) {
+    if (e.nodes.some((n) => n.sym === 'block' && n.params.module === module)) out.add(k.replace(/^d:|^v:[a-z]+:/, ''));
+  }
+  out.delete(module);
+  return [...out];
+}
+
+/**
+ * The document without the edits of Verilog sheets (drawings stay). Those
+ * edits are keyed by module name only, so another design must not inherit them.
+ * Returns `doc` itself when there is nothing to drop.
+ */
+export function withoutVerilogEdits(doc: EditDoc): EditDoc {
+  const verilog = Object.keys(doc.sheets).filter((k) => !isDrawnKey(k));
+  if (!verilog.some((k) => !isEmptyEdits(doc.sheets[k]))) return doc;
+  return { drawn: doc.drawn, sheets: Object.fromEntries(Object.entries(doc.sheets).filter(([k]) => isDrawnKey(k))) };
+}
+
+const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+/**
+ * The module an import is about: of the modules it adds, the first one (in
+ * source order) that none of the imported code instantiates, so a file with
+ * submodules opens at its top. A textual guess (Yosys keeps only one top).
+ */
+export function importedTop(files: Record<string, string>, added: readonly string[]): string | undefined {
+  const texts = Object.values(files).map(stripComments);
+  const order: string[] = [];
+  for (const t of texts) {
+    for (const m of t.matchAll(/^\s*(?:macro)?module\s+(?:automatic\s+|static\s+)?([A-Za-z_][\w$]*)/gm)) if (added.includes(m[1]) && !order.includes(m[1])) order.push(m[1]);
+  }
+  for (const m of added) if (!order.includes(m)) order.push(m);
+  const used = (m: string) => {
+    // `m [#(…)] name [range] (`, but not the module's own header.
+    const re = new RegExp(`(?<!module\\s+)(?<![\\w$])${m.replace(/\$/g, '\\$')}\\s*(?:#|[A-Za-z_\\\\][\\w$]*\\s*(?:\\[[^\\]]*\\]\\s*)?\\()`);
+    return texts.some((t) => re.test(t));
+  };
+  return order.find((m) => !used(m)) ?? order[0];
+}
+
+/**
+ * The route of a wire drawn through bends, from points[0] to the last point.
+ * At a pin (when its side is given) the wire first leaves the symbol on a short
+ * stub, and the leg next to the stub turns across it, so the wire never runs
+ * back through its own symbol or into a pin sideways. Other corners go
+ * horizontal first, like orthogonalize.
+ */
+export function drawnRoute(points: readonly Point[], startSide?: Side, endSide?: Side): Point[] {
+  if (points.length < 2) return [...points];
+  const across = (side: Side) => side === 'EAST' || side === 'WEST';
+  const out: Point[] = [points[0]];
+  const goTo = (q: Point, verticalFirst: boolean) => {
+    const a = out[out.length - 1];
+    if (a.x !== q.x && a.y !== q.y) out.push(verticalFirst ? { x: a.x, y: q.y } : { x: q.x, y: a.y });
+    out.push(q);
+  };
+  if (startSide) out.push(stubPoint(points[0], startSide));
+  const inner = endSide ? points.slice(1, -1) : points.slice(1);
+  // After a horizontal stub, go vertical first (and the other way round).
+  inner.forEach((q, i) => goTo(q, i === 0 && !!startSide && across(startSide)));
+  if (endSide) {
+    const last = points[points.length - 1];
+    // Reach the stub across its direction, then go straight into the pin.
+    goTo(stubPoint(last, endSide), inner.length === 0 && startSide ? across(startSide) : !across(endSide));
+    out.push(last);
+  }
+  // Only simplifies: every leg is horizontal or vertical already.
+  return orthogonalize(out);
+}
+
 export const useStore = create<State>((set, get) => {
   // ---------- helpers that need the store ----------
 
   const interfaceOf: InterfaceOf = (name) => {
-    const { doc, design } = get();
-    if (doc.drawn.includes(name)) {
-      const e = doc.sheets[`d:${name}`];
-      const ports: ModulePort[] = [];
-      const seen = new Set<string>();
-      for (const n of e?.nodes ?? []) {
-        if (n.sym !== 'input' && n.sym !== 'output' && n.sym !== 'inout') continue;
-        const pname = (n.name ?? '').trim() || (n.sym === 'input' ? 'in' : n.sym === 'output' ? 'out' : 'io');
-        if (seen.has(pname)) continue;
-        seen.add(pname);
-        ports.push({ name: pname, dir: n.sym, width: clampParam('width', n.params.width, 1) });
-      }
-      return { label: name, ports };
-    }
-    const m = get().viewDesign()?.modules[name] ?? design?.modules[name];
+    const { doc, design, blockDesign } = get();
+    if (doc.drawn.includes(name)) return { label: name, ports: drawingPorts(doc.sheets[`d:${name}`]) };
+    // Not viewDesign(): a block copied from an automatic block names a module only the block
+    // view has, and it must keep its ports (and wires) when the full circuit is shown.
+    const m = blockDesign?.modules[name] ?? design?.modules[name];
     if (!m) return undefined;
     return { label: m.displayName, ports: m.ports.map((p) => ({ name: p.name, dir: p.direction, width: p.bits.length })) };
   };
 
   const edits = (): SheetEdits => get().doc.sheets[get().sheet] ?? emptyEdits();
+
+  /** False while a Verilog sheet is being opened: what is on screen still belongs to the previous one. */
+  const settled = (s: State) => isDrawnKey(s.sheet) || s.loadedSheet === s.sheet;
 
   /** A history entry for the document as it is now. */
   const here = (): HistoryEntry => ({ doc: get().doc, path: get().path, sheet: get().sheet });
@@ -294,27 +470,31 @@ export const useStore = create<State>((set, get) => {
     const key = s.sheet;
     if (!key) return;
     const drawn = isDrawnKey(key);
-    if (!drawn && !s.base) return;
+    // The base of another sheet would be stored under this sheet's key (see loadedSheet).
+    if (!drawn && (!s.base || !settled(s))) return;
     const e = opts.fast ?? edits();
     const netlist = effectiveDiagram(currentModule(), drawn ? undefined : s.base, e, interfaceOf);
     const measure = measureFor(s.theme);
     let pos = e.pos;
     let routes = e.routes;
-    let placed = false;
+    let placed: string[] = [];
     if (!drawn && !isPinned(e)) {
       if (!s.baseLayout) return;
       const pinned = layoutToEdits(e, s.baseLayout, 'none');
       pos = pinned.pos;
       routes = pinned.routes;
     } else if (netlist.nodes.some((n) => !pos[n.id])) {
+      placed = netlist.nodes.filter((n) => !pos[n.id]).map((n) => n.id);
       pos = placeMissing(netlist, pos, s.baseLayout, (n) => sizeNode(n, measure));
-      placed = true;
     }
-    const g = buildGeometry({ netlist, pos, routes, measure, fast: !!opts.fast, moved: opts.moved, previous: s.layout });
+    // placeMissing keeps symbols apart but not off wires: stored wires that run through a
+    // symbol placed now are routed again, as after a move.
+    const moved = placed.length ? new Set([...(opts.moved ?? []), ...placed]) : opts.moved;
+    const g = buildGeometry({ netlist, pos, routes, measure, fast: !!opts.fast, moved, previous: s.layout });
     const issues = checkSheet(netlist);
     const selection = new Set([...s.selection].filter((id) => netlist.nodes.some((n) => n.id === id) || netlist.edges.some((x) => x.id === id)));
     const patch: Partial<State> = { netlist, layout: g.layout, issues, selection: selection.size === s.selection.size ? s.selection : selection };
-    if (!opts.fast && (placed || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
+    if (!opts.fast && (placed.length || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
       const stored: SheetEdits = { ...e, pos, routes: { ...e.routes, ...g.routed } };
       patch.doc = { ...s.doc, sheets: { ...s.doc.sheets, [key]: stored } };
     }
@@ -353,15 +533,19 @@ export const useStore = create<State>((set, get) => {
     opts: { moved?: ReadonlySet<string>; selection?: ReadonlySet<string> } = {},
   ) => {
     const s = get();
-    if (!s.sheet || !s.netlist || !s.layout || s.status === 'too-large') return;
-    let e = edits();
+    if (!s.sheet || !s.netlist || !s.layout || s.status === 'too-large' || !settled(s)) return;
+    const before = s.doc.sheets[s.sheet];
+    let e = before ?? emptyEdits();
     if (!isDrawnKey(s.sheet) && !isPinned(e)) {
       if (!s.baseLayout) return;
       e = layoutToEdits(e, s.baseLayout, 'existing');
     }
     const next = fn(e, s.netlist, s.layout);
     if (!next || next === e) return;
-    commitDoc({ ...s.doc, sheets: { ...s.doc.sheets, [s.sheet]: next } }, opts);
+    let doc: EditDoc = { ...s.doc, sheets: { ...s.doc.sheets, [s.sheet]: next } };
+    // Blocks of this drawing (on other sheets) follow its pins' new names, in the same undo step.
+    if (isDrawnKey(s.sheet)) doc = followPinRenames(doc, s.sheet.slice(2), before, next);
+    commitDoc(doc, opts);
   };
 
   /** The ELK layout of a sheet's Verilog netlist (cached). */
@@ -386,13 +570,72 @@ export const useStore = create<State>((set, get) => {
     set({ path: [], sheet: '', base: undefined, baseLayout: undefined, netlist: undefined, layout: undefined });
   };
 
+  /** Switch between Block diagram and Full circuit without opening a sheet. */
+  const applyViewMode = (mode: ViewMode) => {
+    const { design, blockDesign } = get();
+    set({ viewMode: mode, ...(design ? { hierarchy: buildHierarchy(mode === 'blocks' ? (blockDesign ?? design) : design) } : {}) });
+    scheduleAutosave();
+  };
+
   /** After undo/redo: show the sheet the change was made on, or redraw this one. */
   const showAfterHistory = async (entry: HistoryEntry) => {
     const { doc, sheet } = get();
     const drawnGone = (p: PathEntry[]) => p.some((x) => x.drawn && !doc.drawn.includes(x.module));
-    if (entry.sheet && entry.sheet !== sheet && !drawnGone(entry.path)) return get().openPath(entry.path);
+    if (entry.sheet && entry.sheet !== sheet && !drawnGone(entry.path)) {
+      // The change may have been made in the other view: show that view again, or the change
+      // happens out of sight (openPath alone would open this path in the current view).
+      const mode = viewModeOf(entry.sheet);
+      if (mode && mode !== get().viewMode) applyViewMode(mode);
+      return get().openPath(entry.path);
+    }
     if (drawnGone(get().path)) return openFallback();
+    // A Verilog sheet that is no longer pinned is drawn from its ELK layout, which openPath
+    // skips while every symbol has a stored position (and a rule change or re-import drops
+    // the cached one): open the sheet again, which lays it out.
+    const s = get();
+    if (!isDrawnKey(sheet) && settled(s) && s.base && !s.baseLayout && !isPinned(doc.sheets[sheet])) return get().openPath(s.path);
     refresh();
+  };
+
+  /**
+   * Drawings and Verilog modules share one namespace: blocks, drill-down and the
+   * Verilog export find a module by name. New and renamed drawings avoid the
+   * names of Verilog modules, but Verilog imported later can declare one. Such a
+   * drawing is renamed, with the blocks that use it, also in the undo history,
+   * so that no undo brings the clash back.
+   */
+  const renameClashingDrawings = (moduleNames: readonly string[]) => {
+    const s = get();
+    const clash = s.doc.drawn.filter((d) => moduleNames.includes(d));
+    if (clash.length === 0) return;
+    const history = [...s.past, ...s.future];
+    const taken = new Set([...moduleNames, ...s.doc.drawn, ...history.flatMap((h) => h.doc.drawn)]);
+    const names = new Map<string, string>();
+    for (const from of clash) {
+      const to = uniqueModuleName(from, taken);
+      taken.add(to);
+      names.set(from, to);
+    }
+    const fix = (h: HistoryEntry): HistoryEntry => {
+      let { doc, path, sheet } = h;
+      for (const [from, to] of names) {
+        if (!doc.drawn.includes(from)) continue;
+        doc = renameDrawingIn(doc, from, to);
+        path = renamePathDrawing(path, from, to);
+        if (sheet === `d:${from}`) sheet = `d:${to}`;
+      }
+      return doc === h.doc ? h : { doc, path, sheet };
+    };
+    const now = fix({ doc: s.doc, path: s.path, sheet: s.sheet });
+    const list = [...names].map(([from, to]) => `${from} → ${to}`).join(', ');
+    set({
+      ...now,
+      past: s.past.map(fix),
+      future: s.future.map(fix),
+      dirty: true,
+      notice: `Renamed drawing ${list}: the Verilog now declares a module with that name.`,
+    });
+    scheduleAutosave();
   };
 
   const applySaved = async (f: SavedFile) => {
@@ -413,6 +656,7 @@ export const useStore = create<State>((set, get) => {
       selection: new Set(),
       path: f.path,
       sheet: '',
+      loadedSheet: undefined,
       layout: undefined,
       netlist: undefined,
       base: undefined,
@@ -422,6 +666,37 @@ export const useStore = create<State>((set, get) => {
       hierarchy: undefined,
     });
     await get().rebuild();
+  };
+
+  /**
+   * Add or replace Verilog files. `otherDesign`: the files are not a new version
+   * of the open ones, so the edits of Verilog sheets are dropped first (one undo
+   * step): they are keyed by module name only, and a module of another design
+   * with the same name (top, say) would show them.
+   */
+  const openFiles = async (files: Record<string, string>, replace: boolean, otherDesign: boolean) => {
+    const s = get();
+    if (otherDesign) {
+      const doc = withoutVerilogEdits(s.doc);
+      // The entry names no sheet: undoing it redraws whatever is on screen.
+      if (doc !== s.doc) set({ past: [...s.past.slice(-(HISTORY - 1)), { doc: s.doc, path: [], sheet: '' }], future: [], doc, dirty: true });
+    }
+    const imported = replace ? [] : declaredModules(files);
+    // Opening Verilog while a drawing is on screen shows the Verilog.
+    const path = s.path[0]?.drawn ? [] : s.path;
+    const all = replace ? files : { ...s.files, ...files };
+    set({ files: all, path, ...(replace ? { topOverride: undefined } : {}) });
+    scheduleAutosave();
+    await get().rebuild();
+    // Added files whose modules the top does not use are not in the design at all (Yosys keeps
+    // only the top's hierarchy), so nothing would show them: make the import the top. A new
+    // version of an open file, or a submodule the top uses, has modules in the design.
+    const { design, error } = get();
+    if (!imported.length || get().files !== all || !design || error || imported.some((m) => design.modules[m])) return;
+    const top = importedTop(files, imported);
+    if (!top) return;
+    await get().setTop(top);
+    if (get().design?.top === top) set({ notice: `Showing ${top}, which ${design.top} does not use. Pick another module under Top.` });
   };
 
   return {
@@ -445,11 +720,10 @@ export const useStore = create<State>((set, get) => {
     interfaceOf,
 
     async setFiles(files, replace) {
-      // Opening Verilog while a drawing is on screen shows the Verilog.
-      const path = get().path[0]?.drawn ? [] : get().path;
-      set({ files: replace ? files : { ...get().files, ...files }, path, ...(replace ? { topOverride: undefined } : {}) });
-      scheduleAutosave();
-      await get().rebuild();
+      // Replacing files keeps the edits only when it is a new version of the open design:
+      // it reuses a file name (the Import dialog names a re-import after the file it updates).
+      const current = get().files;
+      await openFiles(files, replace, replace && !Object.keys(files).some((f) => f in current));
     },
 
     async removeFile(name) {
@@ -461,8 +735,8 @@ export const useStore = create<State>((set, get) => {
     },
 
     async loadExample(name = 'auction') {
-      set({ topOverride: undefined });
-      await get().setFiles(EXAMPLES[name].files, true);
+      // An example always opens as it is, even over an edited copy of itself.
+      await openFiles(EXAMPLES[name].files, true, true);
     },
 
     viewDesign() {
@@ -472,12 +746,10 @@ export const useStore = create<State>((set, get) => {
 
     async setViewMode(mode) {
       if (mode === get().viewMode) return;
-      const { design, blockDesign } = get();
-      set({ viewMode: mode });
-      scheduleAutosave();
+      applyViewMode(mode);
+      const { design } = get();
       if (!design) return;
-      const view = mode === 'blocks' ? (blockDesign ?? design) : design;
-      set({ hierarchy: buildHierarchy(view) });
+      const view = get().viewDesign()!;
       // Auto blocks do not exist in the full circuit: show the module they were cut from.
       const path = get().path.filter((p) => p.drawn || view.modules[p.module]);
       if (path.length && path[0].drawn) return get().openPath(path);
@@ -494,6 +766,7 @@ export const useStore = create<State>((set, get) => {
       const gen = ++rebuildGen;
       const { files } = get();
       const moduleNames = declaredModules(files);
+      renameClashingDrawings(moduleNames);
       // A Top choice that the current files no longer declare is dropped.
       const topOverride = get().topOverride && moduleNames.includes(get().topOverride!) ? get().topOverride : undefined;
       set({ moduleNames, topOverride });
@@ -578,10 +851,19 @@ export const useStore = create<State>((set, get) => {
         placing: keepSelection ? get().placing : undefined,
         ...(keepSelection ? {} : { selection: new Set<string>(), highlighted: new Set<string>(), codeRanges: [] }),
         bigFlat: undefined,
+        // Until the end, base, layout and netlist are the previous ones (even for the same key:
+        // other rules give another netlist).
+        loadedSheet: undefined,
       });
       if (last.drawn) {
         if (!get().doc.drawn.includes(last.module)) return openFallback();
-        set({ base: undefined, baseLayout: undefined, layout: keepSelection ? get().layout : undefined, status: get().error ? 'error' : 'ready' });
+        set({
+          base: undefined,
+          baseLayout: undefined,
+          loadedSheet: key,
+          layout: keepSelection ? get().layout : undefined,
+          status: get().error ? 'error' : 'ready',
+        });
         refresh();
         return;
       }
@@ -594,11 +876,10 @@ export const useStore = create<State>((set, get) => {
       const module = last.module;
       set({ status: 'layout' });
       const cacheKey = `${viewMode}:${module}:${rulesKey(rules)}`;
-      const e = get().doc.sheets[key];
       const stale = () => seq !== navSeq || get().design !== design || get().rules !== rules || get().viewMode !== viewMode;
       let base = baseCache.get(cacheKey);
       if (!base) {
-        if (viewMode === 'flat' && !flatAllowed.has(module) && !isPinned(e)) {
+        if (viewMode === 'flat' && !flatAllowed.has(module) && !isPinned(get().doc.sheets[key])) {
           const cells = flatCellCount(view, module);
           if (cells > FLAT_CELL_LIMIT) {
             set({ layout: undefined, netlist: undefined, base: undefined, status: 'too-large', bigFlat: { module, cells } });
@@ -620,6 +901,8 @@ export const useStore = create<State>((set, get) => {
         }
       }
       // ELK is needed for an unedited sheet, and to place symbols new since the last edit.
+      // The edits are read only now: an undo while the netlist was built may have unpinned the sheet.
+      const e = get().doc.sheets[key];
       let baseLayout: LayoutResult | undefined = layoutCache.get(cacheKey);
       const needsElk = !isPinned(e) || base.nodes.some((n) => !e!.pos[n.id] && !e!.hidden.includes(n.id));
       if (!baseLayout && needsElk) {
@@ -631,6 +914,7 @@ export const useStore = create<State>((set, get) => {
       set({
         base,
         baseLayout,
+        loadedSheet: key,
         layout: keepSelection ? get().layout : undefined,
         status: get().error ? 'error' : 'ready',
         codeFile: file ?? get().codeFile,
@@ -651,9 +935,12 @@ export const useStore = create<State>((set, get) => {
     },
 
     openNode(id) {
-      const n = get().layout?.nodes.find((x) => x.id === id);
+      const s = get();
+      const n = s.layout?.nodes.find((x) => x.id === id);
       if (n?.kind !== 'instance' || !n.moduleName) return;
-      if (get().doc.drawn.includes(n.moduleName)) {
+      // An instance from the Verilog instantiates a Verilog module; only a block drawn by hand can name a drawing.
+      const byHand = isDrawnKey(s.sheet) || userIds(edits()).has(id);
+      if (byHand && s.doc.drawn.includes(n.moduleName)) {
         void get().enterInstance(n.instanceName ?? n.moduleName, n.moduleName, true);
       } else if (get().viewDesign()?.modules[n.moduleName]) {
         void get().enterInstance(n.instanceName ?? n.moduleName, n.moduleName);
@@ -756,7 +1043,7 @@ export const useStore = create<State>((set, get) => {
 
     previewMove(ids, dx, dy) {
       const s = get();
-      if (!s.netlist || !s.sheet) return;
+      if (!s.netlist || !s.sheet || !settled(s)) return;
       let e = edits();
       if (!isDrawnKey(s.sheet) && !isPinned(e)) {
         if (!s.baseLayout) return;
@@ -775,7 +1062,7 @@ export const useStore = create<State>((set, get) => {
 
     connectEnds(a, b, bends) {
       const s = get();
-      if (!s.netlist || !s.layout) return false;
+      if (!s.netlist || !s.layout || !settled(s)) return false;
       const c = resolveConnection(s.netlist, a, b);
       if ('error' in c) {
         set({ notice: c.error });
@@ -784,9 +1071,10 @@ export const useStore = create<State>((set, get) => {
       let route: Point[] | undefined;
       if (bends.length) {
         // A wire drawn with bends keeps them: from the driver, through the bends, to the input.
+        const pinOf = (end: WireEnd) => (end.kind === 'port' ? s.layout!.nodes.flatMap((n) => n.ports).find((q) => q.id === end.port) : undefined);
         const pointOf = (end: WireEnd): Point[] => {
           if (end.kind === 'port') {
-            const p = s.layout!.nodes.flatMap((n) => n.ports).find((q) => q.id === end.port);
+            const p = pinOf(end);
             return p ? [{ x: p.x, y: p.y }] : [];
           }
           // From the wire's own source along its route to where the new wire leaves it.
@@ -808,9 +1096,9 @@ export const useStore = create<State>((set, get) => {
         };
         const from = pointOf(a);
         const to = pointOf(b);
-        const drawn = [...from, ...bends, ...to.slice().reverse()];
+        const drawn = drawnRoute([...from, ...bends, ...to.slice().reverse()], pinOf(a)?.side, pinOf(b)?.side);
         const ordered = c.reversed ? drawn.reverse() : drawn;
-        if (ordered.length >= 2) route = orthogonalize(ordered);
+        if (ordered.length >= 2) route = ordered;
       }
       let id = '';
       editSheet((e) => {
@@ -855,7 +1143,7 @@ export const useStore = create<State>((set, get) => {
 
     async autoLayout() {
       const s = get();
-      if (!s.netlist || !s.sheet) return;
+      if (!s.netlist || !s.sheet || !settled(s)) return;
       const sheet = s.sheet;
       const doc = s.doc;
       set({ status: 'layout' });
@@ -868,14 +1156,14 @@ export const useStore = create<State>((set, get) => {
         throw e;
       }
       set({ status: get().error ? 'error' : 'ready' });
-      // Skip if the user moved on or edited meanwhile.
-      if (get().sheet !== sheet || get().doc !== doc) return;
+      // Skip if the user moved on or edited meanwhile, or the netlist changed (other rules, re-import).
+      if (get().sheet !== sheet || get().doc !== doc || get().base !== s.base) return;
       editSheet((e) => layoutToEdits({ ...e, pos: {}, routes: {} }, l, 'none'));
     },
 
     copy() {
       const s = get();
-      if (!s.netlist || !s.layout) return false;
+      if (!s.netlist || !s.layout || !settled(s)) return false;
       const nodes = new Set([...s.selection].filter((id) => s.layout!.nodes.some((n) => n.id === id)));
       const clip = copyNodes(s.netlist, edits(), s.layout, nodes, interfaceOf);
       if (!clip) return false;
@@ -891,7 +1179,7 @@ export const useStore = create<State>((set, get) => {
     paste(at) {
       const clip = clipboard;
       const s = get();
-      if (!clip || !s.layout) return;
+      if (!clip || !s.layout || !settled(s)) return;
       pasteCount++;
       let where = at;
       if (!where) {
@@ -919,7 +1207,8 @@ export const useStore = create<State>((set, get) => {
       const s = get();
       const prev = s.past[s.past.length - 1];
       if (!prev) return;
-      set({ past: s.past.slice(0, -1), future: [here(), ...s.future], doc: prev.doc, dirty: true });
+      // The redo entry keeps where the change was made (not where Undo was pressed), so Redo shows it too.
+      set({ past: s.past.slice(0, -1), future: [{ ...prev, doc: s.doc }, ...s.future], doc: prev.doc, dirty: true });
       scheduleAutosave();
       void showAfterHistory(prev);
     },
@@ -928,7 +1217,7 @@ export const useStore = create<State>((set, get) => {
       const s = get();
       const next = s.future[0];
       if (!next) return;
-      set({ future: s.future.slice(1), past: [...s.past, here()], doc: next.doc, dirty: true });
+      set({ future: s.future.slice(1), past: [...s.past, { ...next, doc: s.doc }], doc: next.doc, dirty: true });
       scheduleAutosave();
       void showAfterHistory(next);
     },
@@ -948,18 +1237,8 @@ export const useStore = create<State>((set, get) => {
       if (!want || want === from || !s.doc.drawn.includes(from)) return undefined;
       if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(want)) return 'Use letters, digits and _ (a Verilog module name).';
       if (s.doc.drawn.includes(want) || s.design?.modules[want] || s.moduleNames.includes(want)) return `A module named ${want} already exists.`;
-      const sheets: EditDoc['sheets'] = {};
-      for (const [k, e] of Object.entries(s.doc.sheets)) {
-        const nk = k === `d:${from}` ? `d:${want}` : k;
-        // Blocks that instantiate the drawing follow the new name.
-        const nodes = e.nodes.some((n) => n.sym === 'block' && n.params.module === from)
-          ? e.nodes.map((n) => (n.sym === 'block' && n.params.module === from ? { ...n, params: { ...n.params, module: want } } : n))
-          : e.nodes;
-        sheets[nk] = nodes === e.nodes ? e : { ...e, nodes };
-      }
-      const doc: EditDoc = { drawn: s.doc.drawn.map((d) => (d === from ? want : d)), sheets };
-      const path = s.path.map((p) => (p.drawn && p.module === from ? { ...p, module: want, instance: p.instance === from ? want : p.instance } : p));
-      pushDoc(doc, { path, sheet: sheetKey(path[path.length - 1], s.viewMode) });
+      const path = renamePathDrawing(s.path, from, want);
+      pushDoc(renameDrawingIn(s.doc, from, want), { path, sheet: sheetKey(path[path.length - 1], s.viewMode) });
       refresh();
       return undefined;
     },
@@ -970,14 +1249,16 @@ export const useStore = create<State>((set, get) => {
       const sheets = { ...s.doc.sheets };
       delete sheets[`d:${name}`];
       const doc: EditDoc = { drawn: s.doc.drawn.filter((d) => d !== name), sheets };
-      pushDoc(doc);
+      // Its blocks stay, as instances of a module that no longer exists (no ports, no wires): say where.
+      const users = sheetsUsing(doc, name);
+      pushDoc(doc, users.length ? { notice: `Deleted ${name}, which is still used as a block on ${users.join(', ')}. Undo brings it back.` } : {});
       if (s.path.some((p) => p.drawn && p.module === name)) void openFallback();
       else refresh();
     },
 
     convertToDrawing() {
       const s = get();
-      if (!s.netlist || !s.layout) return;
+      if (!s.netlist || !s.layout || !settled(s)) return;
       const taken = new Set([...s.doc.drawn, ...Object.keys(s.design?.modules ?? {}), ...s.moduleNames]);
       const name = uniqueModuleName(`${currentModule().replace(/^.*\//, '')}_drawing`, taken);
       const sheetEdits = toDrawing(s.netlist, s.layout, edits(), interfaceOf);
