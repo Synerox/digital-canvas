@@ -26,6 +26,7 @@ import {
   isDrawnKey,
   isEmptyEdits,
   isPinned,
+  parseEdits,
   parseSavedFile,
   sheetKey,
 } from '../editor/doc';
@@ -85,6 +86,33 @@ export const AUTOSAVE_KEY = 'digital-canvas:work:v1';
  */
 export type PutAside = Record<string, EditDoc['sheets']>;
 
+/** What Save and the browser's copy write: a saved file, with the edits put aside (they must outlive a reload, as the app says they are kept). */
+export type SavedWork = SavedFile & { putAside?: PutAside };
+
+/** The edits put aside in a saved file, made sane like the document's (see parseEdits). */
+function parsePutAside(text: string): PutAside {
+  const out: PutAside = {};
+  let v: unknown;
+  try {
+    v = (JSON.parse(text) as { putAside?: unknown }).putAside;
+  } catch {
+    return out;
+  }
+  const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
+  if (!isObj(v)) return out;
+  for (const [file, sheets] of Object.entries(v)) {
+    if (!isObj(sheets)) continue;
+    const kept = Object.fromEntries(
+      Object.entries(sheets)
+        .filter(([k]) => /^v:(blocks|flat):/.test(k))
+        .map(([k, e]) => [k, parseEdits(e)] as const)
+        .filter(([, e]) => !isEmptyEdits(e)),
+    );
+    if (Object.keys(kept).length) out[file] = kept;
+  }
+  return out;
+}
+
 export interface HistoryEntry {
   doc: EditDoc;
   path: PathEntry[];
@@ -97,6 +125,8 @@ export interface HistoryEntry {
   files?: Record<string, string>;
   top?: string;
   putAside?: PutAside;
+  /** For a change of the drawing rules: the rules to go back to (they redraw every Verilog sheet). */
+  rules?: RuleId[];
 }
 
 export interface Placing {
@@ -163,6 +193,11 @@ interface State {
   placing?: Placing;
   /** A short message about the last action (e.g. why a wire was refused). */
   notice?: string;
+  /**
+   * Another tab wrote its work to the browser's copy (one copy for all tabs): this tab stopped
+   * keeping its own there, which would overwrite that work, until the user says which to keep.
+   */
+  autosavePaused?: boolean;
 
   /**
    * Import Verilog files. `replace`: they are all the files now (another design,
@@ -204,7 +239,8 @@ interface State {
   moveSelection(ids: ReadonlySet<string>, dx: number, dy: number): void;
   connectEnds(a: WireEnd, b: WireEnd, bends: Point[]): boolean;
   deleteSelection(): void;
-  renameItem(id: string, text: string): void;
+  /** Rename a symbol or wire; returns why it was refused, if it was. */
+  renameItem(id: string, text: string): string | undefined;
   resetItemLabel(id: string): void;
   setNodeParams(id: string, params: SymParams): void;
   setEdgeSlice(id: string, slice: { lo: number; width: number } | undefined): void;
@@ -214,10 +250,12 @@ interface State {
   copy(): boolean;
   cut(): void;
   /**
-   * Paste what Copy took: on the sheet it was copied from, beside the original;
-   * on another sheet, centred on `near` (where the user looks) when given.
+   * Paste what Copy took: on the sheet it was copied from, beside the original
+   * when that spot is in `view` (the part of the sheet on screen); on another
+   * sheet, or when that spot is out of view, centred on `near` (where the user
+   * looks). Without them (Duplicate), beside the original.
    */
-  paste(near?: Point): void;
+  paste(near?: Point, view?: Box): void;
   duplicate(): void;
   undo(): void;
   redo(): void;
@@ -228,11 +266,17 @@ interface State {
   convertToDrawing(): Promise<void>;
 
   // ----- files -----
-  savedFile(): SavedFile;
+  savedFile(): SavedWork;
   loadSaved(text: string): Promise<void>;
   /** Start from the browser's autosaved work, if any; returns false when there is none. */
   restoreAutosave(): Promise<boolean>;
   markSaved(): void;
+  /** Another tab wrote the browser's copy: stop overwriting it (see autosavePaused). */
+  otherTabSaved(): void;
+  /** Keep this tab's work in the browser's copy again, in place of the other tab's. */
+  keepThisTab(): void;
+  /** Write a copy that is waiting to be written now (the page is being closed or reloaded). */
+  flushAutosave(): void;
 }
 
 const layoutCache = new Map<string, LayoutResult>();
@@ -303,6 +347,32 @@ function uniqueModuleName(want: string, taken: Set<string>): string {
   base = verilogIdent(base);
   if (!taken.has(base)) return base;
   for (let i = 2; ; i++) if (!taken.has(`${base}_${i}`)) return `${base}_${i}`;
+}
+
+/**
+ * A module name as the user wrote it. Yosys names its copy of a parameterized
+ * module `$paramod\ripple\N=s32'00…01000`; that reads `ripple #(N=8)`. Long
+ * parameter lists are hashed (`$paramod$3f…\ripple`): `ripple #(…)`.
+ */
+export function moduleTitle(name: string): string {
+  const m = /^\$paramod(\$[0-9a-f]+)?\\([^\\]+)((?:\\.*)?)$/.exec(name);
+  if (!m) return name;
+  if (m[1] || !m[3]) return `${m[2]} #(…)`;
+  const value = (v: string) => {
+    const c = /^(s?)(\d+)'([01]+)$/.exec(v);
+    if (!c) return v;
+    let n = BigInt(`0b${c[3]}`);
+    if (c[1] && c[3].length > 0 && c[3][0] === '1') n -= 1n << BigInt(c[3].length);
+    return String(n);
+  };
+  const params = m[3]
+    .slice(1)
+    .split('\\')
+    .map((p) => {
+      const i = p.indexOf('=');
+      return i < 0 ? p : `${p.slice(0, i)}=${value(p.slice(i + 1))}`;
+    });
+  return `${m[2]} #(${params.join(', ')})`;
 }
 
 /** The view a Verilog sheet key belongs to (undefined for a drawing or no sheet). */
@@ -614,6 +684,31 @@ export function planImport(open: Record<string, string>, incoming: Record<string
   return plan;
 }
 
+export type DropPlan =
+  /** New versions of open files (by file name), or files that share no module with any: setFiles with newVersion. */
+  | { kind: 'update'; plan: ImportPlan }
+  /** One file that declares modules of open files under another name: let Import Verilog say what importing it does. */
+  | { kind: 'ask'; name: string; code: string }
+  /** Several such files: added as they are, and the notice says which modules are now declared twice. */
+  | { kind: 'add'; twice: string[] };
+
+/**
+ * What dropping Verilog files on the window does. Modules are matched by name
+ * only, so a file that declares a module an open file declares may be another
+ * design (two `top`s): it must not take that file's place, nor its edits,
+ * unseen. Only a file named like an open file (or like a removed one whose
+ * edits are put aside) is taken for a new version of it, as Import does.
+ */
+export function planDrop(open: Record<string, string>, putAside: PutAside, dropped: Record<string, string>): DropPlan {
+  const fresh = Object.keys(dropped).filter((f) => !(f in open) && !(f in putAside));
+  // Modules of the open files that the drop does not update.
+  const kept = new Set(declaredModules(Object.fromEntries(Object.entries(open).filter(([f]) => !(f in dropped)))));
+  const twice = [...new Set(fresh.flatMap((f) => declaredModules({ [f]: dropped[f] }).filter((m) => kept.has(m))))];
+  if (twice.length === 0) return { kind: 'update', plan: planImport(open, dropped) };
+  if (Object.keys(dropped).length === 1) return { kind: 'ask', name: fresh[0], code: dropped[fresh[0]] };
+  return { kind: 'add', twice };
+}
+
 /**
  * The route of a wire drawn through bends, from points[0] to the last point.
  * At a pin (when its side is given) the wire first leaves the symbol on a short
@@ -714,17 +809,22 @@ export const useStore = create<State>((set, get) => {
     set(patch);
   };
 
-  const scheduleAutosave = () => {
-    if (typeof localStorage === 'undefined') return;
+  const writeAutosave = () => {
     clearTimeout(autosaveTimer);
-    autosaveTimer = setTimeout(() => {
-      try {
-        // Whether the work is saved to a file goes along (only here, not in saved files): see restoreAutosave.
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ ...get().savedFile(), ...(get().dirty ? {} : { saved: true }) }));
-      } catch {
-        set({ notice: 'Could not keep a copy in this browser (storage is full or blocked). Use File › Save drawing.' });
-      }
-    }, 400);
+    autosaveTimer = undefined;
+    if (get().autosavePaused) return;
+    try {
+      // Whether the work is saved to a file goes along (only here, not in saved files): see restoreAutosave.
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ ...get().savedFile(), ...(get().dirty ? {} : { saved: true }) }));
+    } catch {
+      set({ notice: 'Could not keep a copy in this browser (storage is full or blocked). Use File › Save drawing.' });
+    }
+  };
+
+  const scheduleAutosave = () => {
+    if (typeof localStorage === 'undefined' || get().autosavePaused) return;
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(writeAutosave, 400);
   };
 
   /** Replace the document (one undo step) and redraw. */
@@ -867,10 +967,12 @@ export const useStore = create<State>((set, get) => {
       }
       return doc === h.doc ? h : { ...h, doc, path, sheet };
     };
-    const now = fix({ doc: s.doc, path: s.path, sheet: s.sheet });
+    const { doc, path, sheet } = fix({ doc: s.doc, path: s.path, sheet: s.sheet });
     const list = [...names].map(([from, to]) => `${from} → ${to}`).join(', ');
     set({
-      ...now,
+      doc,
+      path,
+      sheet,
       past: s.past.map(fix),
       future: s.future.map(fix),
       dirty: true,
@@ -880,7 +982,7 @@ export const useStore = create<State>((set, get) => {
   };
 
   /** Start over from a saved file. `dirty`: the work is not saved to a file (it comes from the browser's copy). */
-  const applySaved = async (f: SavedFile, dirty = false) => {
+  const applySaved = async (f: SavedFile, dirty = false, putAside: PutAside = {}) => {
     navSeq++;
     cancelLayouts();
     layoutCache.clear();
@@ -892,7 +994,7 @@ export const useStore = create<State>((set, get) => {
       viewMode: f.viewMode,
       theme: f.theme,
       doc: f.doc,
-      putAside: {},
+      putAside,
       past: [],
       future: [],
       dirty,
@@ -1306,10 +1408,12 @@ export const useStore = create<State>((set, get) => {
     },
 
     async toggleRule(id) {
-      const rules = new Set(get().rules);
+      const s = get();
+      const rules = new Set(s.rules);
       if (rules.has(id)) rules.delete(id);
       else rules.add(id);
-      set({ rules });
+      // An undo step: Ctrl+Z right after it must undo it, not an older edit out of sight.
+      set({ rules, past: [...s.past.slice(-(HISTORY - 1)), { ...here(), rules: [...s.rules] }], future: [] });
       scheduleAutosave();
       await get().openPath(get().path);
     },
@@ -1436,10 +1540,12 @@ export const useStore = create<State>((set, get) => {
       // Two pins of one name would be two ports of one name: the export would rename the second.
       const other = n && want && isPin(n) ? d!.nodes.find((x) => x.id !== id && isPin(x) && verilogIdent(x.label) === want) : undefined;
       if (other) {
-        set({ notice: `Another pin is named ${other.label}; the Verilog would call this one ${want}_2. Pick another name.` });
-        return;
+        const why = `Another pin is named ${other.label}; the Verilog would call this one ${want}_2. Pick another name.`;
+        set({ notice: why });
+        return why;
       }
       editSheet((e) => rename(e, id, text));
+      return undefined;
     },
 
     resetItemLabel(id) {
@@ -1499,15 +1605,20 @@ export const useStore = create<State>((set, get) => {
       if (get().copy()) get().deleteSelection();
     },
 
-    paste(near) {
+    paste(near, view) {
       const s = get();
       if (!clipboard || !s.layout || !settled(s)) return;
       const { clip, box, sheet } = clipboard;
       // On its own sheet: where it was copied from if that is free, otherwise below it, never on top of
-      // it. On another sheet those coordinates can be far out of view (Ctrl+V would seem to do nothing):
-      // there it goes where the user looks, and below what is already there.
-      const from = near && sheet !== s.sheet ? { ...box, x: near.x - box.width / 2, y: near.y - box.height / 2 } : box;
-      const where = pasteSpot(from, s.layout.nodes);
+      // it. Those coordinates can be far out of view, on another sheet or after the view moved (after a
+      // Cut, the old spot): Ctrl+V would seem to do nothing. Then it goes where the user looks, and
+      // below what is already there.
+      const beside = sheet === s.sheet ? pasteSpot(box, s.layout.nodes) : undefined;
+      /** Whole on screen; along a side longer than the view, its middle. */
+      const along = (at: number, size: number, from: number, length: number) =>
+        size <= length ? at >= from && at + size <= from + length : at + size / 2 >= from && at + size / 2 <= from + length;
+      const seen = (p: Point) => !view || (along(p.x, box.width, view.x, view.width) && along(p.y, box.height, view.y, view.height));
+      const where = beside && (!near || seen(beside)) ? beside : pasteSpot(near ? { ...box, x: near.x - box.width / 2, y: near.y - box.height / 2 } : box, s.layout.nodes);
       const at2 = { x: snap(where.x), y: snap(where.y) };
       let pasted: string[] = [];
       editSheet((e, d) => {
@@ -1529,20 +1640,21 @@ export const useStore = create<State>((set, get) => {
       if (!prev) return;
       // The redo entry keeps where the change was made (not where Undo was pressed), so Redo shows it too.
       // A step that changed the files swaps the whole state: Redo comes back here.
-      const redo = prev.files ? hereWithFiles() : { ...prev, doc: s.doc };
-      set({ past: s.past.slice(0, -1), future: [redo, ...s.future], doc: prev.doc, dirty: true });
+      const redo = prev.files ? hereWithFiles() : { ...prev, doc: s.doc, ...(prev.rules ? { rules: [...s.rules] } : {}) };
+      set({ past: s.past.slice(0, -1), future: [redo, ...s.future], doc: prev.doc, dirty: true, ...(prev.rules ? { rules: new Set(prev.rules) } : {}) });
       scheduleAutosave();
-      void (prev.files ? reopenFiles(prev) : showAfterHistory(prev));
+      // Other rules redraw the sheet on screen (they apply to all).
+      void (prev.files ? reopenFiles(prev) : prev.rules ? get().openPath(get().path) : showAfterHistory(prev));
     },
 
     redo() {
       const s = get();
       const next = s.future[0];
       if (!next) return;
-      const undo = next.files ? hereWithFiles() : { ...next, doc: s.doc };
-      set({ future: s.future.slice(1), past: [...s.past, undo], doc: next.doc, dirty: true });
+      const undo = next.files ? hereWithFiles() : { ...next, doc: s.doc, ...(next.rules ? { rules: [...s.rules] } : {}) };
+      set({ future: s.future.slice(1), past: [...s.past, undo], doc: next.doc, dirty: true, ...(next.rules ? { rules: new Set(next.rules) } : {}) });
       scheduleAutosave();
-      void (next.files ? reopenFiles(next) : showAfterHistory(next));
+      void (next.files ? reopenFiles(next) : next.rules ? get().openPath(get().path) : showAfterHistory(next));
     },
 
     newDrawing(name = 'drawing') {
@@ -1638,11 +1750,28 @@ export const useStore = create<State>((set, get) => {
       }
       const retarget = (e: SheetEdits): SheetEdits => {
         const ports = new Map<string, Map<string, string>>();
+        // An automatic block is often named after the output it drives (block game_result, output game_result).
+        // The Verilog export of the sheet names that instance apart from the port without a word, as the name is
+        // made up; the copy names its block the same way, or its export warns about a name the user never gave.
+        const pinKinds: readonly string[] = ['input', 'output', 'inout'];
+        const pinSym = (u: UserNode) => pinKinds.includes(u.sym === 'raw' ? (u.raw?.kind ?? '') : u.sym);
+        const used = new Set([
+          ...drawingPorts(e).map((p) => verilogIdent(p.name)),
+          ...e.nodes.filter((u) => !autoOf(u) && !pinSym(u) && u.name).map((u) => verilogIdent(u.name!)),
+        ]);
         const nodes = e.nodes.map((u): UserNode => {
           const m = autoOf(u);
           if (!m) return u;
           ports.set(u.id, portNames.get(m)!);
-          return { id: u.id, sym: 'block', params: { module: names.get(m)! }, ...(u.name ? { name: u.name } : {}) };
+          let name = u.name;
+          if (name) {
+            const stem = verilogIdent(name);
+            let n = stem;
+            for (let i = 2; used.has(n); i++) n = `${stem}_${i}`;
+            used.add(n);
+            if (n !== stem) name = n;
+          }
+          return { id: u.id, sym: 'block', params: { module: names.get(m)! }, ...(name ? { name } : {}) };
         });
         if (ports.size === 0) return e;
         const end = (x: { node: string; port: string }) => {
@@ -1687,11 +1816,12 @@ export const useStore = create<State>((set, get) => {
         theme: s.theme,
         doc: compactDoc(s.doc),
         path: s.path,
+        ...(Object.keys(s.putAside).length ? { putAside: s.putAside } : {}),
       };
     },
 
     async loadSaved(text) {
-      await applySaved(parseSavedFile(text));
+      await applySaved(parseSavedFile(text), false, parsePutAside(text));
     },
 
     async restoreAutosave() {
@@ -1702,7 +1832,9 @@ export const useStore = create<State>((set, get) => {
         const f = parseSavedFile(text);
         // Whether the work was saved to a file when the browser kept it (see scheduleAutosave).
         const saved = (JSON.parse(text) as { saved?: unknown }).saved === true;
-        await applySaved(f, !saved);
+        // This tab shows the browser's copy now, whichever tab wrote it: it keeps it up to date again.
+        set({ autosavePaused: false });
+        await applySaved(f, !saved, parsePutAside(text));
         return true;
       } catch {
         return false;
@@ -1713,6 +1845,21 @@ export const useStore = create<State>((set, get) => {
       set({ dirty: false });
       // The browser's copy says so too, so a reload does not call the work unsaved.
       scheduleAutosave();
+    },
+
+    otherTabSaved() {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = undefined;
+      set({ autosavePaused: true });
+    },
+
+    keepThisTab() {
+      set({ autosavePaused: false });
+      if (typeof localStorage !== 'undefined') writeAutosave();
+    },
+
+    flushAutosave() {
+      if (autosaveTimer !== undefined) writeAutosave();
     },
   };
 });

@@ -6,7 +6,7 @@ import { Inspector } from './app/Inspector';
 import { Menu, type MenuItem } from './app/Menu';
 import { Palette } from './app/Palette';
 import { Breadcrumb, CodePanel, Drawings, FileList, HierarchyTree, LogPanel, RulePanel, TopSelector, ViewToggle } from './app/Panels';
-import { EXAMPLES, type ExampleName, useStore } from './app/store';
+import { AUTOSAVE_KEY, EXAMPLES, type ExampleName, planDrop, useStore } from './app/store';
 import { ui } from './app/ui-events';
 import { FILE_EXTENSION, FileFormatError, isDrawnKey } from './editor/doc';
 import { GRID } from './layout/elk-layout';
@@ -91,6 +91,7 @@ export default function App() {
   const status = useStore((x) => x.status);
   const error = useStore((x) => x.error);
   const notice = useStore((x) => x.notice);
+  const otherTab = useStore((x) => x.autosavePaused);
   const dirty = useStore((x) => x.dirty);
   const theme = useStore((x) => x.theme);
   const sheet = useStore((x) => x.sheet);
@@ -107,7 +108,8 @@ export default function App() {
   // undefined = automatic: open when Yosys reports an error.
   const [showLog, setShowLog] = useState<boolean>();
   const [showExport, setShowExport] = useState(false);
-  const [showImport, setShowImport] = useState(false);
+  /** The Import dialog, with the code of a dropped file it opens with (see dropVerilog). */
+  const [showImport, setShowImport] = useState<boolean | { name: string; code: string }>(false);
   const [showVerilog, setShowVerilog] = useState(false);
   const [showHints, setShowHints] = useState(false);
   const [showLibrary, setShowLibrary] = useState(true);
@@ -118,6 +120,24 @@ export default function App() {
     void (async () => {
       if (!(await useStore.getState().restoreAutosave())) await useStore.getState().loadExample();
     })();
+  }, []);
+
+  // The browser keeps one copy of the work for all its tabs. When another tab writes it, this tab stops
+  // writing (it would overwrite that work unseen) and asks which to keep. A copy still waiting to be
+  // written goes when the page is closed or reloaded, or the last edit before that would be lost.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === AUTOSAVE_KEY && e.newValue !== null) useStore.getState().otherTabSaved();
+    };
+    const flush = () => useStore.getState().flushAutosave();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('pagehide', flush);
+    window.addEventListener('beforeunload', flush);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('pagehide', flush);
+      window.removeEventListener('beforeunload', flush);
+    };
   }, []);
 
   // Messages fade after a few seconds.
@@ -205,6 +225,40 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  /** Dropped Verilog files (see planDrop): never a silent replacement of an open file matched only by its module names. */
+  const dropVerilog = async (files: Record<string, string>) => {
+    const st = useStore.getState();
+    const drop = planDrop(st.files, st.putAside, files);
+    if (drop.kind === 'ask') {
+      setShowImport({ name: drop.name, code: drop.code });
+      return;
+    }
+    const before = st.notice;
+    const names = Object.keys(files).join(', ');
+    let said: string | undefined;
+    if (drop.kind === 'add') {
+      await st.setFiles(files, false);
+      const them = drop.twice.length === 1 ? 'it' : 'them';
+      said = `Added ${names}. ${drop.twice.join(', ')} ${drop.twice.length === 1 ? 'is' : 'are'} declared in an open file too: Yosys reports ${them} declared twice until one of the files no longer declares ${them} (Import Verilog can replace ${them} instead).`;
+    } else {
+      // A new version of an open file of the same name keeps the edits, as in Import Verilog; open files of other names that it covers or shares a module with change too.
+      await st.setFiles(files, false, { newVersion: true });
+      const { replaced, trimmed } = drop.plan;
+      if (replaced.length || trimmed.length) {
+        said = [
+          replaced.length ? `${names} replaces ${replaced.join(', ')}, which ${replaced.length === 1 ? 'declares' : 'declare'} only modules it declares too.` : '',
+          trimmed.length ? `The modules ${names} declares again are cut out of ${trimmed.join(', ')}.` : '',
+          'Undo brings the old files back.',
+        ]
+          .filter(Boolean)
+          .join(' ');
+      }
+    }
+    // What the import said itself (the module shown, a drawing renamed) stays.
+    const now = useStore.getState().notice;
+    if (said) st.setNotice([said, now !== before ? now : undefined].filter(Boolean).join(' '));
+  };
+
   const logVisible = showLog ?? status === 'error';
   const currentModule = path[path.length - 1]?.module ?? 'diagram';
   const drawn = isDrawnKey(sheet);
@@ -238,6 +292,8 @@ export default function App() {
   return (
     <div
       className="app"
+      // Names are code: some fonts' contextual alternates draw the x of ram4x8 as ×, which reads as another name.
+      style={{ fontFeatureSettings: '"calt" 0' }}
       onDragEnter={(e) => {
         if (!Array.from(e.dataTransfer.types).includes('Files')) return;
         dragDepth.current++;
@@ -264,8 +320,7 @@ export default function App() {
           return;
         }
         const files = await readFiles(list);
-        // A new version of an open file under another name replaces it, as in Import Verilog (not every module defined twice).
-        if (Object.keys(files).length) await s.setFiles(files, false, { newVersion: true });
+        if (Object.keys(files).length) await dropVerilog(files);
       }}
     >
       <header className="toolbar">
@@ -364,6 +419,24 @@ export default function App() {
             {!drawn && <ViewToggle />}
             <Breadcrumb />
           </div>
+          {otherTab && (
+            <div className="error-banner" role="alert">
+              <b>Another tab saved its work in this browser.</b> This tab no longer keeps a copy here, so that it does not overwrite that work: close or
+              reload it and its changes are lost unless you save them (File › Save drawing).{' '}
+              <button
+                onClick={() => {
+                  if (!useStore.getState().dirty || confirm("Open the other tab's work here? The work in this tab is lost unless you saved it to a file.")) {
+                    void s.restoreAutosave();
+                  }
+                }}
+              >
+                Open the other tab's work
+              </button>{' '}
+              <button onClick={() => s.keepThisTab()} title="The browser keeps this tab's work instead; the other tab then stops keeping its own">
+                Keep this tab's work
+              </button>
+            </div>
+          )}
           {hasLayout && status === 'error' && !drawn && (
             <div className="error-banner">
               <b>Yosys could not elaborate the current files.</b> {error} <span className="muted">The diagram below is from the last successful run.</span>
@@ -433,7 +506,7 @@ export default function App() {
       {showExport && exportLayout && (
         <ExportDialog layout={exportLayout} initialTheme={theme} name={currentModule.replace(/[^A-Za-z0-9_.-]/g, '_')} onClose={() => setShowExport(false)} />
       )}
-      {showImport && <ImportDialog onClose={() => setShowImport(false)} />}
+      {showImport && <ImportDialog initial={showImport === true ? undefined : showImport} onClose={() => setShowImport(false)} />}
       {showVerilog && <VerilogExportDialog onClose={() => setShowVerilog(false)} />}
     </div>
   );

@@ -9,6 +9,7 @@ import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 import { exportCurrent, planImport } from './Dialogs';
 import { useStore } from './store';
+import { declaredModules } from '../yosys/script';
 
 const T = 60_000;
 const fruit = { [FRUIT_FILE]: FRUIT_SOURCE };
@@ -221,6 +222,131 @@ describe('Export Verilog', () => {
       await show(files, [{ instance: 'mine', module: 'mine', drawn: true }], { mine: drawingWithBlock(derived) });
       const copy = await check();
       expect(copy.out.code).toMatch(new RegExp(`^module ${as} \\(`, 'm'));
+    },
+    T,
+  );
+
+  // A ripple adder of full adders, with parameters (G8).
+  const alu = {
+    'alu.v': [
+      'module full_adder(input a, b, cin, output s, cout);',
+      '  assign s = a ^ b ^ cin;',
+      '  assign cout = (a & b) | (cin & (a ^ b));',
+      'endmodule',
+      'module ripple #(parameter N = 4) (input [N-1:0] x, y, input cin, output [N-1:0] sum, output cout);',
+      '  wire [N:0] c;',
+      '  assign c[0] = cin;',
+      '  genvar i;',
+      '  generate for (i = 0; i < N; i = i + 1) begin : g',
+      '    full_adder fa (.a(x[i]), .b(y[i]), .cin(c[i]), .s(sum[i]), .cout(c[i+1]));',
+      '  end endgenerate',
+      '  assign cout = c[N];',
+      'endmodule',
+      'module top(input [7:0] a, b, output [7:0] s, output co);',
+      '  ripple #(.N(8)) u_add (.x(a), .y(b), .cin(1\'b0), .sum(s), .cout(co));',
+      'endmodule',
+    ].join('\n'),
+  };
+  /** A NOT drawn between `from` and `to` in place of the imported wire `edge`. */
+  const inverter = (edge: string, from: { node: string; port: string }, to: { node: string; port: string }): SheetEdits => ({
+    ...emptyEdits(),
+    hidden: [edge],
+    nodes: [newUserNode('u:1', 'not')],
+    edges: [
+      { id: 'w:2', source: from, target: { node: 'u:1', port: 'u:1.A' } },
+      { id: 'w:3', source: { node: 'u:1', port: 'u:1.Y' }, target: to },
+    ],
+    next: 4,
+  });
+
+  it(
+    "writes a parameterized sub-module with the edits made on its sheet, as that sheet's own export does (G8)",
+    async () => {
+      const d = await design(alu);
+      const paramod = Object.keys(d.modules).find((m) => m.startsWith('$paramod'))!;
+      const edits = inverter('in:cin.out>cell:g[0].fa.cin', { node: 'in:cin', port: 'in:cin.out' }, { node: 'cell:g[0].fa', port: 'cell:g[0].fa.cin' });
+      await show(alu, [{ instance: 'top', module: 'top' }], {}, { [paramod]: edits });
+      const { out, mod } = await check();
+      const as = paramod.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+/, '');
+      const sub = moduleText(out.code, as);
+      expect(sub).toMatch(/~cin/);
+      expect(Object.keys(mod.cells)).toHaveLength(1);
+      // The sub-module's own sheet writes the same module.
+      await show(alu, [{ instance: 'top', module: 'top' }, { instance: 'u_add', module: paramod }], {}, { [paramod]: edits });
+      const own = await check();
+      expect(own.out.name).toBe(as);
+      expect(moduleText(own.out.code, as)).toBe(sub);
+    },
+    T,
+  );
+
+  it(
+    "writes a module of the user's files from its sheet when the sheet changes its logic, and checks it in place of the file's (G8)",
+    async () => {
+      // full_adder's carry made by an XOR instead of the OR: the export must not quietly use the file's.
+      const or = '(a & b) | (cin & (a ^ b))';
+      const edits: SheetEdits = {
+        ...emptyEdits(),
+        hidden: [`cell:$or{${or}}`],
+        nodes: [newUserNode('u:1', 'xor')],
+        edges: [
+          { id: 'w:2', source: { node: 'cell:$and{a & b}', port: 'cell:$and{a & b}.Y' }, target: { node: 'u:1', port: 'u:1.A' } },
+          { id: 'w:3', source: { node: 'cell:$and{cin & (a ^ b)}', port: 'cell:$and{cin & (a ^ b)}.Y' }, target: { node: 'u:1', port: 'u:1.B' } },
+          { id: 'w:4', source: { node: 'u:1', port: 'u:1.Y' }, target: { node: 'out:cout', port: 'out:cout.in' } },
+        ],
+        next: 5,
+      };
+      await show(alu, [{ instance: 'top', module: 'top' }], {}, { full_adder: edits });
+      const { out } = await check();
+      const fa = moduleText(out.code, 'full_adder');
+      expect(fa).not.toMatch(/\|/);
+      expect(fa).toMatch(/\^/);
+      expect(out.redefined).toEqual(['full_adder']);
+      // Nothing else comes from the files: the export stands on its own.
+      expect(out.external).toBeUndefined();
+      expect(Object.keys(out.check.files)).toEqual(['top.v']);
+
+      // In the auction, the edited bid_check is written here and cut out of the file the check reads.
+      const inverted = inverter(
+        'cell:$logic_and{(bid != 4\'d0) && (bid <= budget)}.Y>out:valid.in',
+        { node: "cell:$logic_and{(bid != 4'd0) && (bid <= budget)}", port: "cell:$logic_and{(bid != 4'd0) && (bid <= budget)}.Y" },
+        { node: 'out:valid', port: 'out:valid.in' },
+      );
+      const renamed: SheetEdits = { ...inverted, labels: { 'in:bid': 'amount' } };
+      await show(auction, [{ instance: 'auction_top', module: 'auction_top' }], {}, { bid_check: renamed });
+      const a = await check();
+      expect(moduleText(a.out.code, 'bid_check')).toMatch(/~/);
+      expect(a.out.redefined).toEqual(['bid_check']);
+      expect(a.out.external?.files).toEqual([AUCTION_FILE]);
+      expect(a.out.external?.modules).not.toContain('bid_check');
+      expect(declaredModules({ f: a.out.check.files[AUCTION_FILE] })).not.toContain('bid_check');
+      // The instances connect the port by its Verilog name, and the warnings say so.
+      expect(moduleText(a.out.code, 'bid_check')).toMatch(/input wire \[3:0\] bid\b/);
+      expect(a.out.warnings).toContain('bid_check: its instances connect the pins its Verilog gives it: amount keeps its Verilog name bid');
+      expect(Object.keys(a.mod.cells).length).toBeGreaterThan(3);
+
+      // A pin renamed and nothing else: the module comes from the file, with a warning.
+      await show(auction, [{ instance: 'auction_top', module: 'auction_top' }], {}, { bid_check: { ...emptyEdits(), labels: { 'in:bid': 'amount' } } });
+      const r = await check();
+      expect(r.out.redefined).toBeUndefined();
+      expect(r.out.external?.modules).toContain('bid_check');
+      expect(r.out.warnings).toContain('bid_check comes from your Verilog files: amount keeps its Verilog name bid');
+    },
+    T,
+  );
+
+  it(
+    'says when the other view has edits the export leaves out (G12)',
+    async () => {
+      const d = await design(alu);
+      const paramod = Object.keys(d.modules).find((m) => m.startsWith('$paramod'))!;
+      const flat = { ...emptyEdits(), hidden: ['x'] };
+      const bd = withAutoBlocks(d, alu);
+      useStore.setState({ files: alu, design: d, blockDesign: bd, viewMode: 'blocks', path: [{ instance: 'top', module: 'top' }], sheet: 'v:blocks:top' });
+      useStore.setState({ doc: { drawn: [], sheets: { 'v:flat:top': flat } }, netlist: buildDiagram(bd, 'top', useStore.getState().rules) });
+      expect(exportCurrent().warnings).toContain('Edits made in the Full circuit (on top) are not in this export: the Block diagram and the Full circuit are edited apart');
+      useStore.setState({ viewMode: 'flat', sheet: 'v:flat:top', doc: { drawn: [], sheets: { [`v:blocks:${paramod}`]: flat } } });
+      expect(exportCurrent().warnings).toContain('Edits made in the Block diagram (on ripple #(N=8)) are not in the Full circuit: the two views are edited apart');
     },
     T,
   );

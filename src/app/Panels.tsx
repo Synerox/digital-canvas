@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { HierarchyNode } from '../core/ir';
 import { RULES } from '../core/rules';
-import { type PathEntry, sameFile, useStore } from './store';
+import { type PathEntry, moduleTitle, sameFile, useStore } from './store';
 
 export function HierarchyTree() {
   const hierarchy = useStore((s) => s.hierarchy);
@@ -17,12 +17,12 @@ export function HierarchyTree() {
       <li key={key}>
         <button className={`tree-item ${key === current ? 'active' : ''}`} onClick={() => openPath(here)}>
           {prefix.length === 0 ? (
-            <b>{n.module}</b>
+            <b>{moduleTitle(n.module)}</b>
           ) : n.module.startsWith(`${prefix[prefix.length - 1].module}/`) ? (
             <span className="auto-block">{n.instance}</span>
           ) : (
             <>
-              <span>{n.instance}</span> <span className="muted">: {n.module}</span>
+              <span>{n.instance}</span> <span className="muted" title={n.module}>: {moduleTitle(n.module)}</span>
             </>
           )}
         </button>
@@ -93,10 +93,10 @@ export function Breadcrumb() {
           {i > 0 && <span className="sep">›</span>}
           <button className={i === path.length - 1 ? 'current' : ''} onClick={() => openPath(path.slice(0, i + 1))}>
             {i === 0
-              ? p.module
+              ? moduleTitle(p.module)
               : !p.drawn && view?.modules[p.module]?.auto
                 ? view.modules[p.module].displayName
-                : `${p.instance} (${p.module})`}
+                : `${p.instance} (${moduleTitle(p.module)})`}
           </button>
         </span>
       ))}

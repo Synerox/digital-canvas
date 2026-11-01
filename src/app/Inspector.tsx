@@ -10,12 +10,15 @@ import { checkSheet, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
-import { sameFile, sheetsUsing, useStore } from './store';
+import { moduleTitle, sameFile, sheetsUsing, useStore, viewModeOf } from './store';
 import { ui } from './ui-events';
 
 /**
- * A text field that commits on Enter or blur and resets on Escape. `onCommit`
- * may refuse the text by returning why; the field then shows it, like `check`.
+ * A text field that commits on Enter or blur and resets on Escape. `check`
+ * rejects text that is not well formed: the field keeps it, to be corrected,
+ * and says why. `onCommit` may refuse the text by returning why: the field
+ * then shows what is in effect again (the refused text would read as
+ * applied), and says why below it.
  */
 function Field({
   value,
@@ -46,19 +49,29 @@ function Field({
       return;
     }
     if (text === value) return;
-    const problem = check?.(text) ?? onCommit(text);
-    setErr(problem || undefined);
+    const bad = check?.(text);
+    if (bad) {
+      setErr(bad);
+      return;
+    }
+    const refused = onCommit(text);
+    if (refused) setText(value);
+    setErr(refused || undefined);
   };
   return (
     <>
       <input
         id={id}
         ref={inputRef}
-        className={err ? 'invalid' : ''}
+        className={err && text !== value ? 'invalid' : ''}
         value={text}
         placeholder={placeholder}
         spellCheck={false}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          // A refusal is about the text that was refused; a check is about what is typed (see commit).
+          if (err && text === value) setErr(undefined);
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           // Both end the edit by leaving the field, and its blur commits: once, so a change is one undo step.
@@ -188,7 +201,11 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
           </label>
         ) : (
           <p className="small muted">
-            From Verilog: <b>{module}</b>. Your moves, added symbols and wires, renames and deletions are kept when the Verilog is imported again.
+            From Verilog: <b>{moduleTitle(module)}</b>. Your moves, added symbols and wires, renames and deletions are kept when the Verilog is imported again.
+            {/* Each view has sheets of its own: an edit here does not show in the other view, nor in its export. */}
+            {viewModeOf(s.sheet) === 'flat'
+              ? ' They belong to the Full circuit: the Block diagram is edited apart.'
+              : ' They belong to the Block diagram: the Full circuit is edited apart.'}
           </p>
         )}
         <p className="small muted">

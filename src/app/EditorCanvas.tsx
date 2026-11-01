@@ -233,15 +233,17 @@ export function EditorCanvas() {
   /** The pointer (client coordinates) while it is over the canvas. */
   const hover = useRef<{ x: number; y: number }>(undefined);
   useEffect(() => {
-    // Ctrl+V and Edit › Paste: a copy from another sheet goes where the user looks, the pointer when it
-    // is over the canvas, else the middle of the view (the store keeps a paste on its own sheet beside the original).
+    // Ctrl+V and Edit › Paste: a copy goes where the user looks, the pointer when it is over the canvas,
+    // else the middle of the view. The store keeps a paste on its own sheet beside the original while that
+    // spot is on screen: it needs the part of the sheet the canvas shows.
     const onPaste = () => {
       const el = wrap.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
       const v = viewRef.current;
       const at = hover.current ?? { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-      useStore.getState().paste({ x: (at.x - r.left - v.x) / v.k, y: (at.y - r.top - v.y) / v.k });
+      const view = { x: -v.x / v.k, y: -v.y / v.k, width: r.width / v.k, height: r.height / v.k };
+      useStore.getState().paste({ x: (at.x - r.left - v.x) / v.k, y: (at.y - r.top - v.y) / v.k }, view);
     };
     ui.addEventListener('paste', onPaste);
     return () => ui.removeEventListener('paste', onPaste);
@@ -296,6 +298,27 @@ export function EditorCanvas() {
     setWireDraft(undefined);
     setGesture('none');
   }, []);
+
+  // A wire being drawn starts at a pin or a wire of this sheet. When an undo (or anything else) takes
+  // that away, or another sheet opens, stop drawing it: finishing it would be refused for a reason that
+  // makes no sense ('Connect an output to an input'). When its pin only moved, the draft starts there.
+  const sheet = useStore((s) => s.sheet);
+  useEffect(() => {
+    if (mode.current.kind === 'wire' || mode.current.kind === 'press-port') cancelWire();
+  }, [sheet, cancelWire]);
+  useEffect(() => {
+    const m = mode.current;
+    if (m.kind !== 'wire' || !layout) return;
+    if (m.from.kind === 'wire') {
+      const id = m.from.edge;
+      if (!layout.edges.some((x) => x.id === id)) cancelWire();
+      return;
+    }
+    const id = m.from.port;
+    const p = layout.nodes.flatMap((n) => n.ports).find((q) => q.id === id);
+    if (!p) cancelWire();
+    else m.at = { x: p.x, y: p.y };
+  }, [layout, cancelWire]);
 
   // Keys that belong to the canvas while a wire is being drawn or a symbol placed.
   useEffect(() => {

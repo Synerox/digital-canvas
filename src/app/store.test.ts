@@ -34,7 +34,9 @@ import {
   followPinRenames,
   importedTop,
   measureFor,
+  moduleTitle,
   pasteSpot,
+  planDrop,
   planImport,
   renameDrawingIn,
   sheetsUsing,
@@ -286,6 +288,34 @@ endmodule
     expect(Object.keys(one.files)).toEqual([AUCTION_FILE, 'other.v', 'bid_check.v']);
   });
 
+  it("names Yosys's copies of parameterized modules as the user wrote them (G12b)", () => {
+    expect(moduleTitle("$paramod\\ripple\\N=s32'00000000000000000000000000001000")).toBe('ripple #(N=8)');
+    expect(moduleTitle("$paramod\\fifo\\W=32'00000000000000000000000000010000\\OFF=s8'11111110")).toBe('fifo #(W=16, OFF=-2)');
+    expect(moduleTitle('$paramod$4be1c0ffee\\fifo')).toBe('fifo #(…)');
+    expect(moduleTitle('full_adder')).toBe('full_adder');
+  });
+
+  it('takes a dropped file for a new version of an open file only by its file name (G1)', () => {
+    const top = 'module top(input clk, input rst, output y); assign y = clk & rst; endmodule\n';
+    const open = { [AUCTION_FILE]: AUCTION_SOURCE, 'top.v': top };
+    // Another design's top under a name no open file has: Import Verilog shows what importing it does.
+    const fruit = 'module top(input clk, output y); assign y = clk; endmodule\nmodule crop(input a, output y); assign y = a; endmodule\n';
+    expect(planDrop(open, {}, { 'fruit_battle.v': fruit })).toEqual({ kind: 'ask', name: 'fruit_battle.v', code: fruit });
+    // So does one module of an open file.
+    const mine = 'module max_select(input [3:0] bid_a, input [3:0] bid_b, input valid_a, input valid_b, output [3:0] max_bid, output winner); endmodule\n';
+    expect(planDrop(open, {}, { 'my_max.v': mine }).kind).toBe('ask');
+    // Several such files are added as they are; the modules declared twice are named.
+    expect(planDrop(open, {}, { 'fruit_battle.v': fruit, 'my_max.v': mine })).toEqual({ kind: 'add', twice: ['top', 'max_select'] });
+    // The name of an open file, or of a removed one whose edits are put aside: a new version, as Import does.
+    expect(planDrop(open, {}, { 'top.v': fruit })).toMatchObject({ kind: 'update', plan: { replaced: [], trimmed: [] } });
+    expect(planDrop({ [AUCTION_FILE]: AUCTION_SOURCE }, { 'top.v': {} }, { 'top.v': fruit }).kind).toBe('update');
+    // A new version of an open file that declares a module another open file declares: that file changes, and the plan says so.
+    const back = planDrop({ [AUCTION_FILE]: AUCTION_SOURCE.replace(/module max_select[\s\S]*?endmodule\n/, ''), 'my_max.v': mine }, {}, { [AUCTION_FILE]: AUCTION_SOURCE });
+    expect(back).toMatchObject({ kind: 'update', plan: { replaced: ['my_max.v'] } });
+    // Nothing in common: added.
+    expect(planDrop(open, {}, { 'c.v': 'module c(input a, output y); assign y = a; endmodule\n' })).toMatchObject({ kind: 'update', plan: { replaced: [], trimmed: [] } });
+  });
+
   it('pastes a copy where it overlaps nothing (N30)', () => {
     const a = { x: 0, y: 0, width: 40, height: 40 };
     const b = { x: 100, y: 60, width: 40, height: 40 };
@@ -410,7 +440,18 @@ describe('store', () => {
     st().moveSelection(new Set([input('clk').id]), 0, 150);
     expect(input('clk').y).toBe(y0 + 150);
     // Every symbol has a position: the new rules' layout is not computed.
+    const rules = st().rules;
     await st().toggleRule(RULES[0].id);
+    // The rule change is an undo step of its own (G12h), and so is the move before it.
+    st().undo();
+    await settle();
+    expect([...st().rules].sort()).toEqual([...rules].sort());
+    expect(input('clk').y).toBe(y0 + 150);
+    st().redo();
+    await settle();
+    expect(st().rules.has(RULES[0].id)).toBe(!rules.has(RULES[0].id));
+    st().undo();
+    await settle();
     st().undo();
     await settle();
     expect(st().doc.sheets[key]).toBeUndefined();
@@ -701,6 +742,18 @@ describe('store', () => {
     await settle();
     expect(st().doc.sheets['v:blocks:auction_top']).toBeUndefined();
     expect(st().putAside[AUCTION_FILE]).toBeDefined();
+    // Saved (to a file, or the browser's copy) and opened again, they are still kept (G3).
+    const saved = JSON.stringify(st().savedFile());
+    await st().loadSaved(saved);
+    await settle();
+    expect(Object.keys(st().putAside)).toEqual([AUCTION_FILE]);
+    await st().removeFile('auction2.v');
+    await settle();
+    await st().setFiles({ [AUCTION_FILE]: v2 }, false, { newVersion: true });
+    await settle();
+    await st().setTop('auction_top');
+    await settle();
+    expect(input('clk').y).toBe(y0 + 100);
     await st().loadExample('fruit');
     expect(st().putAside).toEqual({});
   }, 60_000);
@@ -721,12 +774,25 @@ describe('store', () => {
     const p2 = box([...st().selection][0]);
     expect(p2.x).toBe(p1.x);
     expect(p2.y).toBeGreaterThanOrEqual(p1.y + p1.height);
-    // Back on the sheet it was copied from, the point does not matter: beside the original.
+    // Back on the sheet it was copied from, while the original is on screen: beside it, wherever the pointer is.
     await st().openPath([{ instance: 'a', module: 'a', drawn: true }]);
-    st().paste({ x: 0, y: 0 });
+    st().paste({ x: 1000, y: 500 }, { x: 900, y: 400, width: 800, height: 600 });
     const p3 = box([...st().selection][0]);
     expect(p3.x).toBe(1200);
     expect(p3.y).toBeGreaterThan(600);
+    // With that spot out of view (the view moved away, or after a Cut): where the user looks (G2).
+    st().select(['u:1']);
+    st().cut();
+    expect(st().layout!.nodes.some((n) => n.id === 'u:1')).toBe(false);
+    st().paste({ x: 100, y: 80 }, { x: 0, y: 0, width: 400, height: 300 });
+    const p4 = box([...st().selection][0]);
+    expect(Math.abs(p4.x + p4.width / 2 - 100)).toBeLessThanOrEqual(10);
+    expect(Math.abs(p4.y + p4.height / 2 - 80)).toBeLessThanOrEqual(10);
+    // A Cut pasted while its spot is still on screen goes back there.
+    st().select([...st().selection]);
+    st().cut();
+    st().paste({ x: 300, y: 200 }, { x: 0, y: 0, width: 800, height: 600 });
+    expect(box([...st().selection][0])).toMatchObject({ x: p4.x, y: p4.y });
   }, 60_000);
 
   it('names the drawings of a copy apart from the automatic blocks the Verilog export writes (F6)', async () => {
@@ -734,6 +800,10 @@ describe('store', () => {
     const before = exportCurrent();
     await st().convertToDrawing();
     await settle();
+    // The copy's export is as quiet as the sheet's: the block that drives output game_result is named apart from it, as the export names the instance.
+    expect(st().sheet).toBe('d:top_drawing');
+    expect(exportCurrent().warnings).toEqual([]);
+    expect(st().doc.sheets['d:top_drawing'].nodes.find((n) => n.params.module === 'top_drawing_game_result')?.name).toBe('game_result_2');
     await st().openPath([{ instance: 'top', module: 'top' }]);
     await settle();
     const after = exportCurrent();
@@ -779,6 +849,41 @@ describe('store', () => {
       expect(st().dirty).toBe(true);
       // Let the copy that restoring schedules be written while there is storage.
       await vi.waitFor(() => expect(writes).toBeGreaterThan(n));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 60_000);
+
+  it("never overwrites another tab's copy of its work unasked, and writes a waiting copy when the page goes (G10)", async () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v) });
+    try {
+      const stored = () => JSON.parse(store.get(AUTOSAVE_KEY) ?? '{}') as SavedFile;
+      await open({}, { doc: { drawn: ['mine'], sheets: { 'd:mine': drawing([pin('u:1', 'input', 'a')]) } }, path: [{ instance: 'mine', module: 'mine', drawn: true }] });
+      await vi.waitFor(() => expect(stored().doc?.drawn).toEqual(['mine']));
+      // A copy waiting to be written goes at once when the page is closed or reloaded.
+      st().renameItem('u:1', 'b');
+      st().flushAutosave();
+      expect(stored().doc.sheets['d:mine'].nodes[0].name).toBe('b');
+      // Another tab writes its work: this tab stops writing, also what was waiting.
+      st().renameItem('u:1', 'c');
+      const other = JSON.stringify({ ...stored(), doc: { drawn: ['theirs'], sheets: { 'd:theirs': drawing([]) } } });
+      store.set(AUTOSAVE_KEY, other);
+      st().otherTabSaved();
+      st().renameItem('u:1', 'd');
+      st().flushAutosave();
+      await new Promise((r) => setTimeout(r, 500));
+      expect(store.get(AUTOSAVE_KEY)).toBe(other);
+      expect(st().autosavePaused).toBe(true);
+      // Keeping this tab's work writes it.
+      st().keepThisTab();
+      expect(stored().doc.sheets['d:mine'].nodes[0].name).toBe('d');
+      // Or the other tab's work is opened here, and this tab keeps the copy again.
+      store.set(AUTOSAVE_KEY, other);
+      st().otherTabSaved();
+      await st().restoreAutosave();
+      expect(st().doc.drawn).toEqual(['theirs']);
+      expect(st().autosavePaused).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -850,10 +955,11 @@ describe('store', () => {
     await settle();
     const pins = st().netlist!.nodes.filter((n) => n.kind === 'input');
     expect(pins.map((n) => n.label)).toEqual(['in1', 'in2']);
-    st().renameItem(pins[1].id, 'in1');
+    // The Inspector shows the name in effect again, and why (G4).
+    expect(st().renameItem(pins[1].id, 'in1')).toMatch(/Another pin is named in1/);
     expect(st().notice).toMatch(/Another pin is named in1/);
     expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['in1', 'in2']);
-    st().renameItem(pins[1].id, 'b');
+    expect(st().renameItem(pins[1].id, 'b')).toBeUndefined();
     expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['in1', 'b']);
   }, 60_000);
 
