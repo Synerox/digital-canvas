@@ -147,6 +147,72 @@ function normalizeWhitespace(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
+/** Remove `//` and `/* *\/` comments (string literals are kept as they are). */
+function stripComments(s: string): string {
+  return s.replace(/"(?:\\.|[^"\\\n])*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m) => (m.startsWith('"') ? m : ' '));
+}
+
+/**
+ * Flip-flops and latches. Yosys gives the ones it infers from an always block the source range
+ * of the whole block, so that text says nothing about which register a cell is.
+ */
+const REGISTER_CELL = /^\$(\w*dff\w*|\w*dlatch\w*|sr|ff)$/;
+
+/** A process (always/initial block) as source text. */
+const PROCESS_TEXT = /^(always(_ff|_comb|_latch)?|initial|final)\b/;
+
+/**
+ * The name of the signal some bits carry: `q`, or `q[3:2]` for part of it, preferring a net
+ * that has exactly these bits; otherwise the names of the nets they touch. Undefined when no
+ * public net carries any of them.
+ *
+ * Several names may carry the same bits (`always @* light = state;` makes `light` another name
+ * of `state`). The one the code that made the cell mentions is taken, so the name does not
+ * change when such an alias is added or removed.
+ */
+function signalName(nets: IRNet[], bits: Bit[], code: string): string | undefined {
+  const nums = bits.filter((b): b is number => typeof b === 'number');
+  if (nums.length === 0) return undefined;
+  const mentioned = (label: string) => {
+    const name = label.replace(/\[\d+(:\d+)?\]$/, '');
+    return new RegExp(`(^|[^\\w$])${name.replace(/[^\w]/g, '\\$&')}($|[^\\w$])`).test(code);
+  };
+  const pick = (labels: string[]) => labels.find(mentioned) ?? labels[0];
+  const whole: string[] = [];
+  const parts: string[] = [];
+  if (nums.length === bits.length) {
+    for (const n of nets) {
+      if (n.hidden) continue;
+      const start = n.bits.indexOf(nums[0]);
+      if (start < 0 || !nums.every((b, i) => n.bits[start + i] === b)) continue;
+      const label = sliceLabel(n, start, start + nums.length - 1);
+      (label === n.name ? whole : parts).push(label);
+    }
+  }
+  if (whole.length) return pick(whole);
+  if (parts.length) return pick(parts);
+  const names = new Set<string>();
+  for (const n of nets) if (!n.hidden && n.bits.some((b) => typeof b === 'number' && nums.includes(b))) names.add(n.name);
+  return names.size ? [...names].join('+') : undefined;
+}
+
+/** `Q=q`: the signals the outputs of a cell drive, for its fingerprint ('' when none has a name). */
+function drivenSignals(
+  nets: IRNet[],
+  connections: Record<string, Bit[]>,
+  directions: Record<string, YosysDirection>,
+  code: string,
+): string {
+  return Object.keys(connections)
+    .filter((p) => directions[p] === 'output')
+    .sort()
+    .flatMap((p) => {
+      const name = signalName(nets, connections[p], code);
+      return name === undefined ? [] : [`${p}=${name}`];
+    })
+    .join(',');
+}
+
 function buildModule(
   name: string,
   m: YosysModule,
@@ -187,7 +253,14 @@ function buildModule(
       base = cname;
     } else {
       // Fingerprint: type + the expression text it came from + named signals it touches.
-      const expr = sourceText(sources, src[0]);
+      // Comments are not part of what a cell computes: adding one must not change its ID.
+      const text = sourceText(sources, src[0]);
+      const expr = text ? normalizeWhitespace(stripComments(text)) : undefined;
+      // A register (or any cell made from a whole always block) is told apart by what it drives:
+      // the block's text changes with every statement or comment in it, and is the same for every
+      // register the block makes. Edits saved for `$dff{Q=q}` then survive changes to the block.
+      const drives =
+        REGISTER_CELL.test(c.type) || PROCESS_TEXT.test(expr ?? '') ? drivenSignals(nets, c.connections, directions, expr ?? '') : '';
       const touched = Object.keys(c.connections)
         .sort()
         .map((p) => {
@@ -202,7 +275,7 @@ function buildModule(
           return `${p}=${[...names].join('+')}`;
         })
         .join(',');
-      base = `${c.type}{${expr ? normalizeWhitespace(expr) : touched}}`;
+      base = `${c.type}{${drives || (expr ?? touched)}}`;
     }
     const n = used.get(base) ?? 0;
     used.set(base, n + 1);

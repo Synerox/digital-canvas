@@ -132,6 +132,48 @@ endmodule
     const d = await design({ 'g.v': "module g(input [3:0] a, b, output [3:0] y, z); assign y = a & b; assign z = a + 4'd1; endmodule" });
     expect(d.modules.g.cells.map((c) => c.id).sort()).toEqual(["$add{a + 4'd1}", '$and{a & b}']);
   }, T);
+
+  // Yosys gives a register the source range of its whole always block: an ID made of that text
+  // changed with any comment or statement in the block, and the edits saved for it were lost.
+  const cnt = (comment: string, wrapAt = 15) => ({
+    'cnt.v': `module cnt (input clk, rst, en, output reg [3:0] q, output reg wrap);
+  always @(posedge clk) begin
+${comment}    if (rst) begin q <= 4'd0; wrap <= 1'b0; end
+    else if (en) begin q <= q + 4'd1; wrap <= (q == 4'd${wrapAt}); end
+  end
+endmodule
+`,
+  });
+  const nodeIds = (d: ReturnType<typeof buildDiagram>) => d.nodes.map((n) => n.id).sort();
+
+  it('names a register by the signal it drives, so a comment in its always block keeps its ID', async () => {
+    const before = await design(cnt(''));
+    const after = await design(cnt('    // synchronous reset\n'));
+    expect(before.modules.cnt.cells.filter((c) => c.type === '$dff').map((c) => c.id).sort()).toEqual(['$dff{Q=q}', '$dff{Q=wrap}']);
+    expect(nodeIds(buildDiagram(after, 'cnt'))).toEqual(nodeIds(buildDiagram(before, 'cnt')));
+    // Another statement of the block changes: the register of q keeps its ID too.
+    const other = await design(cnt('', 14));
+    expect(other.modules.cnt.cells.filter((c) => c.type === '$dff').map((c) => c.id).sort()).toEqual(['$dff{Q=q}', '$dff{Q=wrap}']);
+  }, T);
+
+  it('names a register after the signal its block assigns, not another name of the same bits', async () => {
+    const src = `module fsm(input clk, rst, go, output reg [1:0] light);
+  reg [1:0] state;
+  always @(posedge clk or posedge rst) if (rst) state <= 2'd0; else if (go) state <= state + 2'd1;
+  always @* light = state;
+endmodule
+`;
+    const d = await design({ 'fsm.v': src });
+    expect(d.modules.fsm.cells.find((c) => c.type === '$adff')?.id).toBe('$adff{Q=state}');
+  }, T);
+
+  it('leaves comments out of the source text an ID is made of', async () => {
+    const add = (body: string) => design({ 'a.v': `module a(input [3:0] x, y, output [3:0] s);\n  assign s = ${body};\nendmodule\n` });
+    const plain = await add('x +\n    y');
+    const commented = await add('x + // the carry is dropped\n    /* second */ y');
+    expect(commented.modules.a.cells.map((c) => c.id)).toEqual(['$add{x + y}']);
+    expect(plain.modules.a.cells.map((c) => c.id)).toEqual(['$add{x + y}']);
+  }, T);
 });
 
 describe('Yosys errors', () => {

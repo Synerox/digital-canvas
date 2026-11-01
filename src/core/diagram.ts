@@ -61,7 +61,8 @@ export interface DNode {
    * polarity, reset values, signed operands), as Yosys writes them (binary, MSB first).
    * Only values that differ from what a drawn symbol assumes (rising clock, active-high
    * enable and reset, reset to 0, unsigned operands) are kept, so a cell without `params`
-   * behaves like the library symbol of the same type.
+   * behaves like the library symbol of the same type. A memory ($mem_v2) keeps all of its
+   * parameters (size, initial values, port clocks), which the export needs to write it.
    */
   params?: Record<string, string>;
 }
@@ -183,6 +184,8 @@ const SEMANTIC_PARAMS = ['CLK_POLARITY', 'EN_POLARITY', 'ARST_POLARITY', 'SRST_P
 function semanticParams(c: IRCell): Record<string, string> | undefined {
   // Instances, blackboxes and the rules' dc: cells carry no parameters the export reads.
   if (c.isInstance || !c.type.startsWith('$')) return undefined;
+  // A memory has no library symbol: its size, initial values and port kinds are all needed to write it.
+  if (c.type === '$mem_v2') return Object.fromEntries(Object.entries(c.parameters).map(([k, v]) => [k, v.trim()]));
   const out: Record<string, string> = {};
   for (const k of SEMANTIC_PARAMS) {
     const v = c.parameters[k]?.trim();
@@ -192,6 +195,17 @@ function semanticParams(c: IRCell): Record<string, string> | undefined {
     if (!isDefault) out[k] = v;
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Ports of a memory that do nothing, so they are not drawn: ports with no bits (a ROM has no
+ * write port), and the clock, enable and resets of asynchronous read ports, which Yosys ignores
+ * (they would show up as constant pins).
+ */
+function idleMemoryPort(c: IRCell, port: string): boolean {
+  if (c.type !== '$mem_v2') return false;
+  if (c.connections[port].length === 0) return true;
+  return ['RD_CLK', 'RD_EN', 'RD_ARST', 'RD_SRST'].includes(port) && !/1/.test(c.parameters.RD_CLK_ENABLE ?? '');
 }
 
 function portSide(cell: IRCell, port: string, dir: 'in' | 'out'): Side {
@@ -264,6 +278,11 @@ export function buildDiagram(
     cellType?: string;
     /** For module output pins: declared range, so bar labels use the real indices. */
     range?: { offset: number; upto: boolean };
+    /**
+     * For the B input of a $pmux, which holds the value of every case side by side: the width of
+     * one case. Constants are cut there, so a case table shows one value per case, not one long number.
+     */
+    piece?: number;
   }
   const sinks: Sink[] = [];
 
@@ -304,6 +323,7 @@ export function buildDiagram(
     const id = `cell:${c.id}`;
     const ports: DPort[] = [];
     for (const pname of sortPorts(c.type, Object.keys(c.connections))) {
+      if (idleMemoryPort(c, pname)) continue;
       const direction = c.directions[pname];
       const dir = direction === 'output' ? 'out' : 'in';
       const bits = c.connections[pname];
@@ -321,7 +341,8 @@ export function buildDiagram(
           if (typeof b === 'number') addDriver({ node: id, port: port.id, index: i, width: bits.length, bits }, b);
         });
       } else {
-        sinks.push({ node: id, port: port.id, bits, cellType: c.type });
+        const piece = c.type === '$pmux' && pname === 'B' ? c.connections.A?.length : undefined;
+        sinks.push({ node: id, port: port.id, bits, cellType: c.type, ...(piece ? { piece } : {}) });
         if (direction === 'inout') {
           bits.forEach((b, i) => {
             if (typeof b === 'number') fallbackDrivers.push({ node: id, port: port.id, index: i, width: bits.length, bits });
@@ -451,6 +472,18 @@ export function buildDiagram(
 
   for (const s of sinks) {
     let runs = runsOf(s.bits, s.port, s.node);
+    const piece = s.piece;
+    if (piece) {
+      runs = runs.flatMap((r): Run[] => {
+        if (r.kind !== 'const') return [r];
+        const out: Run[] = [];
+        for (let lo = r.lo; lo < r.lo + r.bits.length; lo = (Math.floor(lo / piece) + 1) * piece) {
+          const hi = Math.min(r.lo + r.bits.length, (Math.floor(lo / piece) + 1) * piece);
+          out.push({ kind: 'const', lo, bits: r.bits.slice(lo - r.lo, hi - r.lo) });
+        }
+        return out;
+      });
+    }
     let zeroExtended = false;
     const arithmetic = s.cellType !== undefined && ARITHMETIC.has(s.cellType);
     if (arithmetic && runs.length > 1 && rules.has('zero-extend')) {

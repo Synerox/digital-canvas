@@ -721,8 +721,10 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
       warn(`${capitalize(at)} is not connected; it reads 0`);
       return zeros(width);
     }
-    if (ws.length > 1) warn(`${capitalize(at)} is driven by ${ws.length} wires; only the first is used`);
-    const w = ws[0];
+    // A wire drawn by hand (`w:` IDs) wins over imported ones: it is what the user wants there, e.g.
+    // after a re-import brings back an imported driver the user had replaced by their own logic.
+    const w = ws.find((x) => x.edge.id.startsWith('w:')) ?? ws[0];
+    if (ws.length > 1) warn(`${capitalize(at)} is driven by ${ws.length} wires; only the one from ${source(w.from, w.fromPort)} is used`);
     if (w.from.kind === 'const') return constAt(w.from, at, width);
     const v = wireVec(w);
     const have = vecWidth(v);
@@ -767,6 +769,26 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
   const blocks: string[] = [];
   const insts: string[] = [];
   const pinAssigns: string[] = [];
+
+  /** Join (concatenation bar) of each net a bar drives. */
+  const joinOfNet = new Map<string, DNode>();
+  for (const n of nodes) {
+    if (n.kind !== 'join') continue;
+    const net = netOf(n, n.ports.find((p) => p.dir === 'out'));
+    if (net) joinOfNet.set(net.name, n);
+  }
+  /**
+   * A value with the nets of concatenation bars replaced by what the bars join. Ports that hold
+   * several values side by side (the cases of a MUX, the ports of a memory) are fed by bars:
+   * seen through the bar, each value is named by itself (`7'd64`, `clk`), not as a slice of the bar.
+   */
+  const throughJoins = (v: Vec, depth = 0): Vec =>
+    v.flatMap((s) => {
+      const j = s.kind === 'net' ? joinOfNet.get(s.name) : undefined;
+      if (!j || s.kind !== 'net' || depth > 16) return [s];
+      const joined = slice(concat(j.ports.filter((p) => p.dir === 'in').map((p) => sinkVec(j, p))), 0, s.netWidth);
+      return throughJoins(slice(joined, s.lo, s.hi - s.lo + 1), depth + 1);
+    });
 
   /** Right-hand side of a combinational cell, or undefined when it has no Verilog form here. */
   const combExpr = (n: DNode, type: string, yWidth: number): string | undefined => {
@@ -816,8 +838,8 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
         // A when no select bit is set, else the slice of B for the lowest set bit of the one-hot S.
         const a = input(n, 'A', yWidth);
         const w = vecWidth(a);
-        const b = input(n, 'B', yWidth);
-        const s = input(n, 'S');
+        const b = throughJoins(input(n, 'B', yWidth));
+        const s = throughJoins(input(n, 'S'));
         let e = render(a);
         for (let k = vecWidth(s) - 1; k >= 0; k--) e = `${render(slice(s, k, 1))} ? ${render(slice(b, k * w, w))} : ${e}`;
         return e;
@@ -931,11 +953,137 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     blocks.push(`  always @(${onClk}) ${load}`);
   };
 
+  /** The MUX cell whose output net is `name`, if one drives it. */
+  const muxOfNet = new Map<string, DNode>();
+  for (const n of nodes) {
+    if (n.kind !== 'cell' || n.cellType !== '$mux') continue;
+    const net = netOf(n, n.ports.find((p) => p.dir === 'out' && p.name === 'Y'));
+    if (net) muxOfNet.set(net.name, n);
+  }
+  /** The A or B bits of a MUX cell, seen through bars, as wide as its output. */
+  const muxInput = (mux: DNode, name: string, width: number) => throughJoins(slice(input(mux, name, width), 0, width));
+  /**
+   * One bit of a write enable. Yosys makes `if (we) mem[a] <= d;` a MUX of constants
+   * (`we ? 8'hFF : 8'h00`); each bit of it is `we` itself, so the bits share one enable and are
+   * written by one statement, as in the source.
+   */
+  const enableBit = (v: Vec): Vec => {
+    const s = v[0];
+    const mux = v.length === 1 && s.kind === 'net' && s.lo === s.hi ? muxOfNet.get(s.name) : undefined;
+    if (!mux || s.kind !== 'net') return v;
+    const [a] = slice(muxInput(mux, 'A', s.netWidth), s.lo, 1);
+    const [b] = slice(muxInput(mux, 'B', s.netWidth), s.lo, 1);
+    if (a.kind !== 'const' || b.kind !== 'const') return v;
+    if (a.bits[0] === b.bits[0]) return [a];
+    return a.bits[0] === '0' && b.bits[0] === '1' ? throughJoins(input(mux, 'S')) : v;
+  };
+  /**
+   * A value as a write under `if (en)` sees it: a MUX selected by `en` itself passes its B input
+   * there (Yosys feeds the address and data of `if (we) mem[a] <= d;` through `we ? a : 2'bxx`).
+   */
+  const whenSelected = (v: Vec, en: string): Vec =>
+    v.flatMap((s) => {
+      const mux = s.kind === 'net' ? muxOfNet.get(s.name) : undefined;
+      if (!mux || s.kind !== 'net' || render(throughJoins(input(mux, 'S'))) !== en) return [s];
+      return slice(muxInput(mux, 'B', s.netWidth), s.lo, s.hi - s.lo + 1);
+    });
+
+  /**
+   * A memory ($mem_v2, as the import draws a `reg [7:0] mem [0:3]` array) written the way Yosys
+   * writes one: the array, its initial values, one clocked block per write clock (bits with their
+   * own enable), and an assign per read port. When its parameters ask for something this form
+   * cannot say, nothing is written and the reason is returned, for the caller to report.
+   */
+  const emitMemory = (n: DNode): string | undefined => {
+    const param = (k: string) => n.params?.[k]?.trim() ?? '';
+    const count = (k: string) => (/^[01]+$/.test(param(k)) ? parseInt(param(k), 2) : NaN);
+    /** Bit i of a per-port flag parameter (binary, MSB first). */
+    const flag = (k: string, i: number) => param(k).charAt(param(k).length - 1 - i) === '1';
+    const [size, width, abits, offset, rdPorts, wrPorts] = ['SIZE', 'WIDTH', 'ABITS', 'OFFSET', 'RD_PORTS', 'WR_PORTS'].map(count);
+    if (![size, width, abits, offset, rdPorts, wrPorts].every(Number.isSafeInteger) || size < 1 || width < 1) return 'has no Verilog form here';
+    const anyPort = (k: string, total: number, set = true) => [...Array(total).keys()].some((i) => flag(k, i) === set);
+    // The import never makes these: it does not run memory_dff or memory_share, and Verilog
+    // writes to an array happen on a clock edge.
+    if (anyPort('RD_CLK_ENABLE', rdPorts)) return 'has a clocked read port, which has no Verilog form here';
+    if (anyPort('RD_WIDE_CONTINUATION', rdPorts) || anyPort('WR_WIDE_CONTINUATION', wrPorts)) return 'has wide ports, which have no Verilog form here';
+    if (anyPort('WR_CLK_ENABLE', wrPorts, false)) return 'has a write port without a clock, which has no Verilog form here';
+
+    const memid = param('MEMID').replace(/^\\/, '');
+    const mem = take(verilogIdent(memid && !memid.startsWith('$') ? memid : (short.get(n.id) ?? 'mem')));
+    decls.push(`  reg ${rangeText(width)}${mem} [${offset}:${offset + size - 1}];`);
+
+    // INIT holds every word (MSB first); x bits are words nobody initialised.
+    const init = param('INIT');
+    const inits: string[] = [];
+    for (let i = 0; i < size; i++) {
+      const word = [...init.slice(Math.max(0, init.length - (i + 1) * width), Math.max(0, init.length - i * width))].reverse();
+      if (word.length !== width || !word.every((b) => /^[01xz]$/.test(b)) || word.every((b) => b === 'x')) continue;
+      inits.push(`    ${mem}[${offset + i}] = ${render(constVec(word as ConstBit[]))};`);
+    }
+    if (inits.length) blocks.push('  initial begin', ...inits, '  end');
+
+    // Writes: ports of one clock share a block, in port order, so a later port wins as in Yosys.
+    if (wrPorts > 0) {
+      const clks = throughJoins(input(n, 'WR_CLK', wrPorts));
+      const addrs = throughJoins(input(n, 'WR_ADDR', wrPorts * abits));
+      const data = throughJoins(input(n, 'WR_DATA', wrPorts * width));
+      const ens = throughJoins(input(n, 'WR_EN', wrPorts * width));
+      const byClock = new Map<string, string[]>();
+      for (let i = 0; i < wrPorts; i++) {
+        const clk = slice(clks, i, 1);
+        if (isConstant(clk)) {
+          warn(`The clock of write port ${i} of ${describe(n)} is a constant; the port is left out`);
+          continue;
+        }
+        const event = `${edgeOf(flag('WR_CLK_POLARITY', i))} ${render(clk)}`;
+        const addr = slice(addrs, i * abits, abits);
+        const lines = byClock.get(event) ?? [];
+        byClock.set(event, lines);
+        // Runs of bits with the same enable are written together: `if (we) mem[a] <= d;`.
+        const enOf = (j: number) => enableBit(slice(ens, i * width + j, 1));
+        for (let lo = 0; lo < width; ) {
+          const en = enOf(lo);
+          const enText = render(en);
+          let hi = lo;
+          while (hi + 1 < width && render(enOf(hi + 1)) === enText) hi++;
+          // A constant enable writes always (1) or never (0, x).
+          const seg = en[0];
+          const always = seg.kind === 'const' ? (seg.bits[0] === '1' ? true : undefined) : false;
+          if (always !== undefined) {
+            const part = lo === 0 && hi === width - 1 ? '' : lo === hi ? `[${lo}]` : `[${hi}:${lo}]`;
+            const value = render(whenSelected(slice(data, i * width + lo, hi - lo + 1), enText));
+            const store = `${mem}[${render(whenSelected(addr, enText))}]${part} <= ${value};`;
+            lines.push(always ? `    ${store}` : `    if (${enText}) ${store}`);
+          }
+          lo = hi + 1;
+        }
+      }
+      for (const [event, lines] of byClock) if (lines.length) blocks.push(`  always @(${event}) begin`, ...lines, '  end');
+    }
+
+    // Reads: asynchronous, each port a slice of the RD_DATA net.
+    const rdPort = n.ports.find((p) => p.dir === 'out' && p.name === 'RD_DATA');
+    const rd = netOf(n, rdPort);
+    if (rd && rdPorts > 0) {
+      const addrs = throughJoins(input(n, 'RD_ADDR', rdPorts * abits));
+      for (let i = 0; i < rdPorts; i++) {
+        const lo = i * width;
+        if (lo >= rd.width) break;
+        const hi = Math.min(rd.width, lo + width) - 1;
+        const target = lo === 0 && hi === rd.width - 1 ? rd.name : lo === hi ? `${rd.name}[${lo}]` : `${rd.name}[${hi}:${lo}]`;
+        assigns.push(`  assign ${target} = ${mem}[${render(slice(addrs, i * abits, abits))}];`);
+      }
+    }
+    return undefined;
+  };
+
   const emitCell = (n: DNode) => {
     const type = n.cellType ?? '';
     const outs = n.ports.filter((p) => p.dir === 'out');
-    if (!isSupported(type)) {
-      warn(`${capitalize(describe(n))} has no Verilog form here; its outputs are left undriven`);
+    const unwritable = type === '$mem_v2' ? emitMemory(n) : isSupported(type) ? undefined : 'has no Verilog form here';
+    if (type === '$mem_v2' && !unwritable) return;
+    if (unwritable) {
+      warn(`${capitalize(describe(n))} ${unwritable}; its outputs are left undriven`);
       assigns.push(`  // ${oneLine(describe(n))}: no Verilog form; outputs left undriven`);
       return;
     }
@@ -962,6 +1110,12 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     const out = n.ports.find((p) => p.dir === 'out');
     const net = netOf(n, out);
     if (!out || !net) return;
+    // A bar read only through itself (see throughJoins) needs no net: it would be written and never used.
+    const throughOnly = (w: Wire) => (w.to.cellType === '$pmux' && (w.toPort.name === 'B' || w.toPort.name === 'S')) || w.to.cellType === '$mem_v2';
+    if (outgoing.get(key(n, out))?.every(throughOnly)) {
+      net.declare = false;
+      return;
+    }
     const ins = n.ports.filter((p) => p.dir === 'in');
     let v = concat(ins.map((p) => sinkVec(n, p)));
     if (vecWidth(v) !== net.width) {

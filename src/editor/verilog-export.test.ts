@@ -71,8 +71,12 @@ const cellTypes = (ir: IRDesign, m: string) => ir.modules[m].cells.map((c) => c.
  * Prove with Yosys (miter + SAT induction) that two designs behave the same:
  * both are flattened, registers start at zero, and every output must match on every cycle
  * (asynchronous resets are modelled as synchronous ones).
+ *
+ * `steps`: check only the first `steps` cycles from the initial state (bounded model checking).
+ * Needed for memories: induction never closes on them (two states may differ in a word nobody
+ * has read yet), and Yosys then searches forever.
  */
-async function expectEquivalent(gold: Record<string, string>, gate: Record<string, string>, top: string): Promise<void> {
+async function expectEquivalent(gold: Record<string, string>, gate: Record<string, string>, top: string, steps?: number): Promise<void> {
   const files: Record<string, string> = {};
   const names = (prefix: string, set: Record<string, string>) =>
     Object.entries(set)
@@ -85,12 +89,15 @@ async function expectEquivalent(gold: Record<string, string>, gate: Record<strin
     `read_verilog -sv ${names('gate', gate)}`,
     `hierarchy -top ${top}`,
     'proc',
+    // SAT has no model of memories: map them to registers and logic.
+    'memory',
     'flatten',
     `rename ${top} gate`,
     'design -stash gate',
     `read_verilog -sv ${names('gold', gold)}`,
     `hierarchy -top ${top}`,
     'proc',
+    'memory',
     'flatten',
     `rename ${top} gold`,
     'design -copy-from gate gate',
@@ -98,7 +105,7 @@ async function expectEquivalent(gold: Record<string, string>, gate: Record<strin
     'hierarchy -top miter',
     // SAT models only synchronous flip-flops.
     'async2sync',
-    'sat -verify -prove-asserts -set-init-zero -tempinduct miter',
+    `sat -verify -prove-asserts -set-init-zero ${steps ? `-seq ${steps}` : '-tempinduct'} miter`,
   ].join('; ');
   let log = '';
   const sink = (bytes: Uint8Array | null) => {
@@ -675,6 +682,178 @@ describe('imported cell parameters', () => {
   }, 60_000);
 });
 
+describe('memories and case tables', () => {
+  const ruleSets: [string, ReadonlySet<RuleId>][] = [
+    ['no rules', new Set()],
+    ['default rules', DEFAULT_RULES],
+  ];
+  const memories = (ir: IRDesign, m: string) => ir.modules[m].cells.filter((c) => c.type === '$mem_v2');
+
+  it.each(ruleSets)('writes a RAM as an array with its write and read ports (%s)', async (_name, rules) => {
+    const files = {
+      'ram4x8.v': `module ram4x8 (input clk, we, input [1:0] addr, input [7:0] din, output [7:0] dout);
+        reg [7:0] mem [0:3];
+        always @(posedge clk) if (we) mem[addr] <= din;
+        assign dout = mem[addr];
+      endmodule`,
+    };
+    const before = await design(files);
+    expect(memories(before, 'ram4x8')).toHaveLength(1);
+    const d = buildDiagram(before, 'ram4x8', rules);
+    // Asynchronous read ports ignore their clock, enable and resets: no constant pins for them.
+    expect(d.nodes.find((n) => n.cellType === '$mem_v2')?.ports.map((p) => p.name).sort()).toEqual(
+      ['RD_ADDR', 'RD_DATA', 'WR_ADDR', 'WR_CLK', 'WR_DATA', 'WR_EN'].sort(),
+    );
+    const { code, warnings } = diagramToVerilog(d, 'ram4x8');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('reg [7:0] mem [0:3];');
+    expect(code).toContain('assign dout = mem[addr];');
+    // Seen through the MUXes Yosys makes for it (`we ? 8'hFF : 8'h00`, `we ? din : 8'bx`…), the write reads as written.
+    expect(code).toContain('  always @(posedge clk) begin\n    if (we) mem[addr] <= din;\n  end');
+    const after = await design({ 'ram4x8.v': code });
+    expect(memories(after, 'ram4x8')).toHaveLength(1);
+    // Long enough to write and read back every word.
+    await expectEquivalent(files, { 'ram4x8.v': code }, 'ram4x8', 12);
+  }, 60_000);
+
+  it('keeps initial values, the address range, part writes and several ports of a memory', async () => {
+    const files = {
+      'mem1.v': `module mem1 (input clk, we, re, input [2:0] wa, ra, input [3:0] wd, input [1:0] be,
+        output reg [3:0] q, output [3:0] qa);
+        reg [3:0] m [2:7];
+        initial begin
+          m[2] = 4'd1;
+          m[5] = 4'hA;
+        end
+        always @(posedge clk) begin
+          if (we) m[wa] <= wd;
+          if (be[1]) m[ra][3:2] <= wd[3:2];
+          if (re) q <= m[ra];
+        end
+        assign qa = m[wa];
+      endmodule`,
+    };
+    const before = await design(files);
+    const { code, warnings } = diagramToVerilog(buildDiagram(before, 'mem1', DEFAULT_RULES), 'mem1');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('reg [3:0] m [2:7];');
+    expect(code).toContain("  initial begin\n    m[2] = 4'd1;\n    m[5] = 4'd10;\n  end");
+    // Both write ports in one block, in their order, so the later one wins as in the source.
+    expect(code).toContain('  always @(posedge clk) begin\n    if (we) m[wa] <= wd;\n    if (be[1]) m[ra][3:2] <= wd[3:2];\n  end');
+    expect(code).toContain('= m[ra];');
+    expect(code).toContain('= m[wa];');
+    const after = await design({ 'mem1.v': code });
+    const [was, is] = [memories(before, 'mem1'), memories(after, 'mem1')];
+    expect(is).toHaveLength(1);
+    // The SAT proof starts every register at zero, so compare the initial values here.
+    for (const k of ['INIT', 'OFFSET', 'SIZE', 'WIDTH', 'RD_PORTS', 'WR_PORTS', 'WR_PRIORITY_MASK']) expect(is[0].parameters[k], k).toBe(was[0].parameters[k]);
+    await expectEquivalent(files, { 'mem1.v': code }, 'mem1', 16);
+  }, 60_000);
+
+  it('writes each bit with its own enable, and leaves a memory it cannot write undriven with a warning', async () => {
+    const s = new Sheet();
+    const [clk, a, ra, d, mask] = (
+      [
+        ['clk', 1],
+        ['a', 2],
+        ['ra', 2],
+        ['d', 4],
+        ['mask', 4],
+      ] as const
+    ).map(([name, width]) => s.add('input', name, { width }));
+    const bin = (v: number, w = 32) => v.toString(2).padStart(w, '0');
+    const params = { MEMID: '\\m', SIZE: bin(4), OFFSET: bin(0), ABITS: bin(2), WIDTH: bin(4), INIT: 'x'.repeat(16) };
+    const ports = { RD_PORTS: bin(1), RD_CLK_ENABLE: '0', RD_WIDE_CONTINUATION: '0', WR_PORTS: bin(1), WR_CLK_ENABLE: '1', WR_CLK_POLARITY: '1', WR_WIDE_CONTINUATION: '0' };
+    const mem = s.cell('$mem_v2', [
+      ['RD_ADDR', 'in', 2],
+      ['RD_DATA', 'out', 4],
+      ['WR_ADDR', 'in', 2],
+      ['WR_CLK', 'in', 1],
+      ['WR_DATA', 'in', 4],
+      ['WR_EN', 'in', 4],
+    ]);
+    mem.params = { ...params, ...ports };
+    s.wire(ra, 'out', mem, 'RD_ADDR');
+    s.wire(a, 'out', mem, 'WR_ADDR');
+    s.wire(clk, 'out', mem, 'WR_CLK');
+    s.wire(d, 'out', mem, 'WR_DATA');
+    s.wire(mask, 'out', mem, 'WR_EN');
+    s.wire(mem, 'RD_DATA', s.add('output', 'q', { width: 4 }), 'in');
+    const { code, warnings } = diagramToVerilog(s.diagram('pm'), 'pm');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('    if (mask[0]) m[a][0] <= d[0];\n    if (mask[1]) m[a][1] <= d[1];');
+    const gold = `module pm(input clk, input [1:0] a, ra, input [3:0] d, mask, output [3:0] q);
+      reg [3:0] m [0:3];
+      integer j;
+      always @(posedge clk) for (j = 0; j < 4; j = j + 1) if (mask[j]) m[a][j] <= d[j];
+      assign q = m[ra];
+    endmodule`;
+    await expectEquivalent({ 'pm.v': gold }, { 'pm.v': code }, 'pm', 10);
+
+    // A clocked read port has no Verilog form here (the import never makes one).
+    mem.params = { ...params, ...ports, RD_CLK_ENABLE: '1' };
+    const clocked = diagramToVerilog(s.diagram('pm'), 'pm');
+    expect(clocked.warnings).toEqual(['Mem_v2_1 ($mem_v2) has a clocked read port, which has no Verilog form here; its outputs are left undriven']);
+    expect(clocked.code).not.toContain('reg [3:0] m ');
+  }, 60_000);
+
+  it('writes a ROM, which has no write ports to draw', async () => {
+    const files = {
+      'rom.v': `module rom (input [1:0] a, output [7:0] q);
+        reg [7:0] t [0:3];
+        initial begin t[0] = 8'h3F; t[1] = 8'h06; t[2] = 8'h5B; t[3] = 8'h4F; end
+        assign q = t[a];
+      endmodule`,
+    };
+    const before = await design(files);
+    const d = buildDiagram(before, 'rom', DEFAULT_RULES);
+    expect(d.nodes.find((n) => n.cellType === '$mem_v2')?.ports.map((p) => p.name)).toEqual(['RD_ADDR', 'RD_DATA']);
+    expect(d.nodes.some((n) => n.kind === 'const')).toBe(false);
+    const { code, warnings } = diagramToVerilog(d, 'rom');
+    expect(warnings).toEqual([]);
+    expect(code).toContain('assign q = t[a];');
+    expect(memories(await design({ 'rom.v': code }), 'rom')[0].parameters.INIT).toBe(memories(before, 'rom')[0].parameters.INIT);
+    await expectEquivalent(files, { 'rom.v': code }, 'rom', 2);
+  }, 60_000);
+
+  it.each(ruleSets)('draws a case table as compares and a MUX, not a memory, and writes it (%s)', async (_name, rules) => {
+    const files = {
+      'seg7.v': `module seg7 (input [3:0] x, output reg [6:0] seg);
+        always @* begin
+          case (x)
+            4'h0: seg = 7'b1000000;
+            4'h1: seg = 7'b1111001;
+            4'h2: seg = 7'b0100100;
+            4'h3: seg = 7'b0110000;
+            4'h4: seg = 7'b0011001;
+            4'h5: seg = 7'b0010010;
+            4'h6: seg = 7'b0000010;
+            4'h7: seg = 7'b1111000;
+            4'h8: seg = 7'b0000000;
+            4'h9: seg = 7'b0010000;
+            default: seg = 7'b1111111;
+          endcase
+        end
+      endmodule`,
+    };
+    const before = await design(files);
+    expect(memories(before, 'seg7')).toEqual([]);
+    expect(cellTypes(before, 'seg7')).toEqual([...Array(10).fill('$eq'), '$pmux']);
+    const d = buildDiagram(before, 'seg7', rules);
+    // The MUX gets one constant per case (4'h0: 7'b1000000 is 7'd64), not one 70-bit number.
+    const consts = d.nodes.filter((n) => n.kind === 'const').map((n) => n.label);
+    expect(consts.filter((l) => l.startsWith("7'"))).toHaveLength(11);
+    expect(consts).toContain("7'd64");
+    const { code, warnings } = diagramToVerilog(d, 'seg7');
+    expect(warnings).toEqual([]);
+    // Each case reads its own compare and value, not slices of the bars that feed the MUX.
+    expect(code).toMatch(/assign seg = eq\d+_Y \? 7'd16 : /);
+    expect(code).toContain("? 7'd64 : 7'd127;");
+    expect(code).not.toContain('cat');
+    await expectEquivalent(files, { 'seg7.v': code }, 'seg7');
+  }, 60_000);
+});
+
 describe('edits of imported sheets', () => {
   it('keeps the ×4 scale of an imported wire when its label is renamed or cleared', async () => {
     const files = { 'sc.v': "module sc(input [3:0] a, b, output [5:0] y); assign y = a + {b, 2'b00}; endmodule" };
@@ -744,6 +923,31 @@ endmodule
       expect(r.warnings, text).toEqual([]);
       expect(r.code, text).toContain('assign y = a & b;');
     }
+  }, 60_000);
+
+  it('uses the hand-drawn driver of an input that a re-import drives too', async () => {
+    const t = (expr: string) => ({ 't.v': `module t(input a, b, c, output y); assign y = ${expr}; endmodule` });
+    const first = buildDiagram(await design(t('a | b')), 't');
+    // The user replaces the OR by an AND of their own.
+    const or = first.nodes.find((n) => n.cellType === '$or')!;
+    const wire = (id: string, from: string, fp: string, to: string, tp: string) => ({
+      id,
+      source: { node: from, port: `${from}.${fp}` },
+      target: { node: to, port: `${to}.${tp}` },
+    });
+    const edits = {
+      ...emptyEdits(),
+      hidden: [or.id],
+      nodes: [newUserNode('u:1', 'and')],
+      edges: [wire('w:1', 'in:a', 'out', 'u:1', 'A'), wire('w:2', 'in:b', 'out', 'u:1', 'B'), wire('w:3', 'u:1', 'Y', 'out:y', 'in')],
+    };
+    // The new code has an OR with the same text inside (still deleted), and one around it that drives y again.
+    const d = effectiveDiagram('t', buildDiagram(await design(t('a | b | c')), 't'), edits, () => undefined);
+    expect(d.edges.filter((e) => e.target.node === 'out:y')).toHaveLength(2);
+    const { code, warnings } = diagramToVerilog(d, 't');
+    expect(warnings).toContainEqual("Output 'y' is driven by 2 wires; only the one from and1 ($and) is used");
+    expect(code).toContain('assign and1_Y = a & b;');
+    expect(code).toContain('assign y = and1_Y;');
   }, 60_000);
 
   it('names a renamed imported instance by its new name', async () => {
