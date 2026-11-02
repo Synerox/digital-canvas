@@ -273,7 +273,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
     const def = user ? SYMBOL_BY_KEY[user.sym] : undefined;
     const title = user
       ? user.sym === 'raw'
-        ? `Copied symbol (${node.cellType ?? node.kind})`
+        ? `Copied symbol (${moduleTitle(node.cellType ?? node.kind)})`
         : (def?.title ?? user.sym)
       : node.kind === 'instance'
         ? node.attrs?.auto

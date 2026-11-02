@@ -11,6 +11,7 @@
  * Symbols Yosys has no cell for use `dc:` types (dc:nand, dc:mux, dc:decoder…).
  */
 import type { DNode, DPort, Side } from '../core/diagram';
+import { moduleTitle } from '../core/names';
 
 export type SymKey =
   | 'input'
@@ -305,7 +306,8 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
       return {
         id,
         kind: 'instance',
-        label: info?.label ?? (module || '(no module)'),
+        // A module that is missing is named as the user wrote it (`baud_gen #(DIV=10)`), as the panels name it.
+        label: info?.label ?? (module ? moduleTitle(module) : '(no module)'),
         subLabel: name || undefined,
         cellType: module,
         moduleName: module || undefined,

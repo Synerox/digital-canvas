@@ -1311,6 +1311,45 @@ endmodule
     expect(exportCurrent()).toEqual(before);
   }, 60_000);
 
+  it('keeps a copy to a new drawing following new parameters after the code renamed the copied instance', async () => {
+    // With `half` left off, the copy keeps the instance as it is drawn instead of as a block.
+    const code = (name: string, div = '', half = true) => `module baud_gen #(parameter DIV = 10) (input wire clk, input wire en, output wire tick, output wire half);
+  reg [3:0] cnt;
+  always @(posedge clk) cnt <= (cnt == DIV - 1) ? 4'd0 : cnt + 4'd1;
+  assign tick = en && (cnt == DIV - 1);
+  assign half = cnt[3];
+endmodule
+module uart_top (input wire clk, input wire en, output wire tick${half ? ', output wire half' : ''});
+  baud_gen ${div}${name} (.clk(clk), .en(en), .tick(tick)${half ? ', .half(half)' : ''});
+endmodule
+`;
+    for (const half of [true, false]) {
+      await open({ 'uart.v': code('u_baud', '', half) });
+      await st().convertToDrawing();
+      await settle();
+      const copies = () => st().doc.sheets['d:uart_top_drawing'].nodes.filter((n) => n.sym === 'block' || n.raw?.kind === 'instance');
+      const modules = () => copies().map((n) => `${n.id} ${n.sym} ${moduleTitle(n.sym === 'block' ? n.params.module! : n.raw!.moduleName!)}`);
+      const sym = half ? 'block' : 'raw';
+      expect(modules()).toEqual([`cell:u_baud ${sym} baud_gen`]);
+      // The copy keeps the instance's old name (and ID).
+      await st().setFiles({ 'uart.v': code('u_b', '', half) }, false, { newVersion: true });
+      await settle();
+      expect(modules()).toEqual([`cell:u_baud ${sym} baud_gen`]);
+      await st().setFiles({ 'uart.v': code('u_b', '#(.DIV(12)) ', half) }, false, { newVersion: true });
+      await settle();
+      expect(modules()).toEqual([`cell:u_baud ${sym} baud_gen #(DIV=12)`]);
+      expect(st().notice).toBe('The blocks of baud_gen on uart_top_drawing now use baud_gen #(DIV=12).');
+      await st().openPath([{ instance: 'uart_top_drawing', module: 'uart_top_drawing', drawn: true }]);
+      await settle();
+      expect(st().netlist!.nodes.filter((n) => n.attrs?.missingModule)).toEqual([]);
+      expect(st().netlist!.edges.length).toBe(half ? 4 : 3);
+      expect(st().issues.messages).toEqual([]);
+      const out = exportCurrent();
+      expect(out.code).toMatch(/^\s*paramod_baud_gen_DIV_s32_0+1100 u_baud \(/m);
+      expect(out.warnings).toEqual([]);
+    }
+  }, 60_000);
+
   it('makes room for the wider blocks of a copy to a new drawing (H8)', async () => {
     await open({ 'uart.v': UART_FSM });
     await st().openPath([{ instance: 'uart_tx_fsm', module: 'uart_tx_fsm' }]);

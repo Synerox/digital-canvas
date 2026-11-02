@@ -692,12 +692,11 @@ export function followParamods(doc: EditDoc, before: IRDesign, after: IRDesign):
   const moved = [...target].flatMap(([from, to]) => (to && claims(to) === 1 ? [{ from, to }] : []));
   // A module used with its defaults is gone too when its instances are deleted: that is no change of parameters.
   const lost = [...target.keys()].filter((g) => !moved.some((m) => m.from === g) && (g.startsWith('$paramod') || same.get(g)!.size > 0));
-  // Copy to new drawing keeps the IDs of the instances it copies (`cell:u_baud`): a sheet with a copy of an instance of
-  // the old module is a copy of a module with that instance, and its blocks of the old module follow the instances.
-  const instances = new Map(
-    gone.map((g) => [g, new Set(Object.values(before.modules).flatMap((m) => m.cells.filter((c) => c.isInstance && c.type === g).map((c) => `cell:${c.id}`)))]),
-  );
-  const copied = (e: SheetEdits, g: string) => e.nodes.some((n) => instanceModule(n) === g && instances.get(g)!.has(n.id));
+  // Copy to new drawing keeps the IDs of the instances it copies (`cell:u_baud`), and nothing else gives a symbol such
+  // an ID (placed and pasted ones get `u:<n>`): a sheet with a copy of an instance of the old module is a copy of a
+  // module with that instance, and its blocks of the old module follow the instances. Also when the code has renamed
+  // the instance since: the copy keeps the name it had.
+  const copied = (e: SheetEdits, g: string) => e.nodes.some((n) => instanceModule(n) === g && n.id.startsWith('cell:'));
   /** The old module whose instances a symbol on sheet `e` follows (it names that module or one of its automatic blocks). */
   const followed = (n: UserNode, e: SheetEdits) => {
     const m = instanceModule(n);

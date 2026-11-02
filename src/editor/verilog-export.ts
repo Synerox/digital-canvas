@@ -21,6 +21,7 @@
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
 import { formatConst } from '../core/ir';
+import { moduleTitle } from '../core/names';
 import { AUTO_SEPARATOR } from '../core/partition';
 import { ARITHMETIC } from '../core/rules';
 
@@ -497,12 +498,20 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     instName.set(n.id, takeNamed(raw, 'Instance', n.kind === 'instance' && n.subLabel === undefined));
   }
 
+  /**
+   * An instance's module as the user wrote it (`baud_gen #(DIV=10)`), not as Yosys names it, nor as the code writes
+   * it (`paramod_baud_gen_DIV_…`, which the caller may give as `moduleName`; `cellType` keeps Yosys's name).
+   */
+  const moduleTitleOf = (n: DNode): string => {
+    const m = n.cellType?.startsWith('$paramod') ? n.cellType : (n.moduleName ?? n.cellType);
+    return m === undefined ? 'no module' : moduleTitle(m);
+  };
   const describe = (n: DNode): string => {
     if (isPin(n)) return `${n.kind} '${n.label}'`;
     if (n.kind === 'const') return `constant ${n.label}`;
     if (n.kind === 'join') return `concatenation ${short.get(n.id)}`;
     if (n.kind === 'split') return `split ${short.get(n.id)}`;
-    if (isInstanceNode(n)) return `instance ${instName.get(n.id)} (${n.moduleName ?? n.cellType ?? 'no module'})`;
+    if (isInstanceNode(n)) return `instance ${instName.get(n.id)} (${moduleTitleOf(n)})`;
     // `dc:mux` is the app's own name for a MUX symbol; Yosys types such as `$and` stay as they are.
     return `${short.get(n.id)} (${(n.cellType ?? 'cell').replace(/^dc:/, '')})`;
   };
@@ -1270,7 +1279,7 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
       warn(`${capitalize(describe(n))} has no module; it is left out`);
       return;
     }
-    if (n.attrs?.missingModule) warn(`Module '${mod}' of instance ${inst} does not exist (deleted or renamed); the instance is written without connections`);
+    if (n.attrs?.missingModule) warn(`Module '${moduleTitle(mod)}' of instance ${inst} does not exist (deleted or renamed); the instance is written without connections`);
     const modIdent = verilogIdent(mod);
     if (modIdent !== mod && !isMadeUpModule(mod)) warn(`Module '${mod}' of instance ${inst} is not a legal Verilog name; it is written as ${modIdent}`);
     const conns = n.ports.map((p) => {

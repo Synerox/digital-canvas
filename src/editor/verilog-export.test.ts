@@ -468,6 +468,37 @@ describe('diagramToVerilog', () => {
     await expectEquivalent({ 't.v': gold }, { 'inc.v': incOut.code, 'top.v': topOut.code }, 'top');
   }, 60_000);
 
+  it('names a parameterized module in its warnings as the user wrote it', () => {
+    const paramod = "$paramod\\baud_gen\\DIV=s32'00000000000000000000000000001010";
+    const iface: InterfaceOf = (m) =>
+      m === paramod
+        ? {
+            label: 'baud_gen',
+            ports: [
+              { name: 'clk', dir: 'input', width: 1 },
+              { name: 'tick', dir: 'output', width: 4 },
+            ],
+          }
+        : undefined;
+    const s = new Sheet(iface);
+    const u = s.add('block', 'u_baud', { module: paramod });
+    const y = s.add('output', 'y', { width: 1 });
+    s.wire(u, 'tick', y, 'in');
+    // As the export of a sheet hands it over: the module named as its code defines it (`cellType` keeps Yosys's name).
+    const named = { ...s.diagram('top'), nodes: s.nodes.map((n) => (n.id === u.id ? { ...n, moduleName: verilogIdent(paramod) } : n)) };
+    for (const d of [s.diagram('top'), named]) {
+      const { warnings } = diagramToVerilog(d, 'top');
+      expect(warnings).toContain('Input clk of instance u_baud (baud_gen #(DIV=10)) is not connected; it reads 0');
+      expect(warnings).toContainEqual(expect.stringMatching(/^Width mismatch: output 'y' is 1 bit but its wire from instance u_baud \(baud_gen #\(DIV=10\)\) carries 4 bits/));
+    }
+    // A block whose module is gone: its title on the sheet and the export's warning.
+    const gone = new Sheet();
+    const g = gone.add('block', undefined, { module: paramod });
+    expect(g.label).toBe('baud_gen #(DIV=10)');
+    const out = diagramToVerilog(gone.diagram('top'), 'top');
+    expect(out.warnings).toEqual(["Module 'baud_gen #(DIV=10)' of instance u_1 does not exist (deleted or renamed); the instance is written without connections"]);
+  });
+
   it('warns about open inputs, width mismatches and missing modules, and still elaborates', async () => {
     const s = new Sheet();
     const a = s.add('input', 'a', { width: 4 });
