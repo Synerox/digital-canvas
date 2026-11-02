@@ -75,8 +75,17 @@ const cellTypes = (ir: IRDesign, m: string) => ir.modules[m].cells.map((c) => c.
  * `steps`: check only the first `steps` cycles from the initial state (bounded model checking).
  * Needed for memories: induction never closes on them (two states may differ in a word nobody
  * has read yet), and Yosys then searches forever.
+ *
+ * `clk2fflogic`: model clocks, asynchronous controls and latches exactly, as signals sampled on
+ * every step (edges are detected), instead of as synchronous ones.
  */
-async function expectEquivalent(gold: Record<string, string>, gate: Record<string, string>, top: string, steps?: number): Promise<void> {
+async function expectEquivalent(
+  gold: Record<string, string>,
+  gate: Record<string, string>,
+  top: string,
+  steps?: number,
+  timing: 'async2sync' | 'clk2fflogic' = 'async2sync',
+): Promise<void> {
   const files: Record<string, string> = {};
   const names = (prefix: string, set: Record<string, string>) =>
     Object.entries(set)
@@ -104,7 +113,7 @@ async function expectEquivalent(gold: Record<string, string>, gate: Record<strin
     'miter -equiv -flatten -make_assert gold gate miter',
     'hierarchy -top miter',
     // SAT models only synchronous flip-flops.
-    'async2sync',
+    timing,
     `sat -verify -prove-asserts -set-init-zero ${steps ? `-seq ${steps}` : '-tempinduct'} miter`,
   ].join('; ');
   let log = '';
@@ -552,6 +561,39 @@ describe('diagramToVerilog', () => {
     await design({ 'mem.v': code });
   }, 60_000);
 
+  it('leaves simulation-only statements out, and never calls a cell that drives nothing undriven', async () => {
+    // Check with Yosys fails on warnings that say outputs are left undriven: a $display has no outputs.
+    const files = {
+      'disp.v': `module disp(input clk, input rst, output reg [3:0] q);
+  always @(posedge clk) begin
+    if (rst) q <= 0; else q <= q + 1;
+    $display("q=%d", q);
+  end
+endmodule
+`,
+    };
+    const ir = await design(files);
+    expect(cellTypes(ir, 'disp')).toContain('$print');
+    const { code, warnings } = diagramToVerilog(buildDiagram(ir, 'disp'), 'disp');
+    expect(warnings).toEqual(['Print1 ($print) is a simulation-only statement ($display, assert…); it is left out']);
+    expect(code).toContain('// print1 ($print): simulation-only statement left out');
+    // SAT has no model of $print: compare with the design without it.
+    await expectEquivalent({ 'disp.v': files['disp.v'].replace(/\n\s*\$display.*;/, '') }, { 'disp.v': code }, 'disp');
+
+    // A cell without a Verilog form whose outputs feed no wire is left out; nothing is undriven.
+    const s = new Sheet();
+    const a = s.add('input', 'a', { width: 4 });
+    const odd = s.cell('$fancy', [
+      ['A', 'in', 4],
+      ['Y', 'out', 4],
+    ]);
+    s.wire(a, 'out', odd, 'A');
+    const out = diagramToVerilog(s.diagram('odd'), 'odd');
+    expect(out.warnings).toEqual(['Fancy1 ($fancy) has no Verilog form here; it drives nothing, so it is left out']);
+    expect(out.code).toContain('// fancy1 ($fancy): no Verilog form; left out (it drives nothing)');
+    await design({ 'odd.v': out.code });
+  }, 60_000);
+
   it('makes names legal and unique', async () => {
     const s = new Sheet();
     const pins = ['module', '2x', 'a b', 'a', 'a'].map((n) => s.add('input', n));
@@ -651,6 +693,100 @@ describe('imported cell parameters', () => {
     // The latch is left out of the proof (SAT does not model latches); it only has to elaborate.
     const flopsOnly = diagramToVerilog({ ...s.diagram('regs3'), nodes: s.nodes.filter((n) => n.cellType !== '$dlatch' && n.label !== 'q_dlatch') }, 'regs3');
     await expectEquivalent({ 'r.v': gold }, { 'r.v': flopsOnly.code }, 'regs3');
+  }, 60_000);
+
+  it('writes registers with an asynchronous set and clear, an asynchronous load, or a latch with a reset', async () => {
+    const files = {
+      'sr.v': `module sr(input clk, set, clr, s2, load, en, rst, input [3:0] d, ad, output reg q, output reg [3:0] q4, n, l, lr);
+  always @(posedge clk or posedge set or posedge clr)
+    if (clr) q <= 1'b0; else if (set) q <= 1'b1; else q <= d[0];
+  always @(posedge clk or posedge set or negedge clr)
+    if (!clr) q4 <= 4'b0000; else if (set) q4 <= 4'b1010; else q4 <= d;
+  always @(negedge clk or posedge set or posedge clr or posedge s2)
+    if (clr) n <= 4'd0; else if (set) n <= 4'd15; else if (s2) n <= 4'd6; else n <= d;
+  always @(posedge clk or posedge load) if (load) l <= ad; else l <= d;
+  always @* if (rst) lr = 4'd5; else if (en) lr = d;
+endmodule
+`,
+    };
+    const before = await design(files);
+    const registers = (ir: IRDesign) => [...new Set(cellTypes(ir, 'sr').filter((t) => /dff|latch/.test(t)))];
+    expect(registers(before)).toEqual(['$adlatch', '$aldff', '$dffsr']);
+    const { code, warnings } = diagramToVerilog(buildDiagram(before, 'sr'), 'sr');
+    expect(warnings).toEqual([]);
+    // Clear wins over set; bits with their own set and clear signals get a block each.
+    expect(code).toMatch(/always @\(posedge clk or posedge (\w+) or posedge (\w+)\)\n {4}if \(\1\) (\w+) <= 1'b0;\n {4}else if \(\2\) \3 <= 1'b1;\n {4}else \3 <= d\[0\];/);
+    expect(code).toMatch(/always @\(posedge clk or posedge (\w+)\[2\] or posedge (\w+)\[2\]\)\n {4}if \(\1\[2\]\) (\w+)\[2\] <= 1'b0;/);
+    expect(code).toMatch(/always @\(posedge clk or posedge (\w+)\)\n {4}if \(\1\) \w+ <= ad;\n {4}else \w+ <= d;/);
+    expect(registers(await design({ 'sr.v': code }))).toEqual(['$adlatch', '$aldff', '$dffsr']);
+    // Modelled exactly: with asynchronous controls made synchronous, the hold state of a latch
+    // under reset is invisible for any number of steps, and induction never closes.
+    await expectEquivalent(files, { 'sr.v': code }, 'sr', undefined, 'clk2fflogic');
+  }, 60_000);
+
+  it('writes the set, clear and load polarities of register cells, and latches with a set and clear', async () => {
+    const s = new Sheet();
+    const pins = Object.fromEntries(
+      (
+        [
+          ['clk', 1],
+          ['en', 1],
+          ['ld', 1],
+          ['rst', 1],
+          ['st', 2],
+          ['cl', 2],
+          ['d', 2],
+          ['ad', 2],
+        ] as const
+      ).map(([name, width]) => [name, s.add('input', name, { width })]),
+    );
+    const reg = (type: string, inputs: Record<string, DNode>, params: Record<string, string>, out: string) => {
+      const ports: [string, 'in' | 'out', number][] = [['D', 'in', 2], ['Q', 'out', 2]];
+      for (const [p, from] of Object.entries(inputs)) ports.push([p, 'in', from.ports[0].width]);
+      const r = s.cell(type, ports);
+      r.params = params;
+      s.wire(pins.d, 'out', r, 'D');
+      for (const [p, from] of Object.entries(inputs)) s.wire(from, 'out', r, p);
+      s.wire(r, 'Q', s.add('output', out, { width: 2 }), 'in');
+    };
+    const { clk, en, ld, rst, st, cl, ad } = pins;
+    reg('$dffsr', { CLK: clk, SET: st, CLR: cl }, { CLK_POLARITY: '0', SET_POLARITY: '0', CLR_POLARITY: '0' }, 'q_sr');
+    reg('$dffsre', { CLK: clk, EN: en, SET: st, CLR: cl }, { EN_POLARITY: '0' }, 'q_sre');
+    reg('$aldffe', { CLK: clk, EN: en, ALOAD: ld, AD: ad }, { ALOAD_POLARITY: '0' }, 'q_ld');
+    reg('$adlatch', { EN: en, ARST: rst }, { ARST_POLARITY: '0', ARST_VALUE: '10' }, 'q_al');
+    reg('$dlatchsr', { EN: en, SET: st, CLR: cl }, { CLR_POLARITY: '0' }, 'q_lsr');
+    // A set tied to its inactive level never fires.
+    reg('$dffsr', { CLK: clk, SET: s.add('const', undefined, { value: "2'b00" }), CLR: cl }, {}, 'q_clr');
+    // A set tied to its active level is given a wire, to name in the event control; an idle bit still never fires.
+    reg('$dffsr', { CLK: clk, SET: s.add('const', undefined, { value: "2'b01" }), CLR: cl }, {}, 'q_one');
+
+    const { code, warnings } = diagramToVerilog(s.diagram('regs4'), 'regs4');
+    expect(warnings).toEqual([]);
+    expect(code).toContain("always @(negedge clk or negedge cl[0] or negedge st[0])\n    if (!cl[0]) dffsr1_Q[0] <= 1'b0;\n    else if (!st[0]) dffsr1_Q[0] <= 1'b1;\n    else dffsr1_Q[0] <= d[0];");
+    expect(code).toContain("always @(posedge clk or posedge cl[1] or posedge st[1])\n    if (cl[1]) dffsre1_Q[1] <= 1'b0;\n    else if (st[1]) dffsre1_Q[1] <= 1'b1;\n    else if (!en) dffsre1_Q[1] <= d[1];");
+    expect(code).toContain('always @(posedge clk or negedge ld)\n    if (!ld) aldffe1_Q <= ad;\n    else if (en) aldffe1_Q <= d;');
+    expect(code).toContain("always @*\n    if (!rst) adlatch1_Q = 2'd2;\n    else if (en) adlatch1_Q = d;");
+    expect(code).toContain("always @*\n    if (!cl[0]) dlatchsr1_Q[0] = 1'b0;\n    else if (st[0]) dlatchsr1_Q[0] = 1'b1;\n    else if (en) dlatchsr1_Q[0] = d[0];");
+    expect(code).toContain("always @(posedge clk or posedge cl[0])\n    if (cl[0]) dffsr2_Q[0] <= 1'b0;\n    else dffsr2_Q[0] <= d[0];");
+    expect(code).toContain("always @(posedge clk or posedge cl[0] or posedge dffsr3_SET[0])\n    if (cl[0]) dffsr3_Q[0] <= 1'b0;\n    else if (dffsr3_SET[0]) dffsr3_Q[0] <= 1'b1;");
+    expect(code).toContain("always @(posedge clk or posedge cl[1])\n    if (cl[1]) dffsr3_Q[1] <= 1'b0;\n    else dffsr3_Q[1] <= d[1];");
+    const gold = `module regs4(input clk, en, ld, rst, input [1:0] st, cl, d, ad, output reg [1:0] q_sr, q_sre, q_ld, q_al, q_lsr, q_clr, q_one);
+      wire one = 1'b1;
+      genvar i;
+      for (i = 0; i < 2; i = i + 1) begin : bits
+        always @(negedge clk or negedge st[i] or negedge cl[i])
+          if (!cl[i]) q_sr[i] <= 1'b0; else if (!st[i]) q_sr[i] <= 1'b1; else q_sr[i] <= d[i];
+        always @(posedge clk or posedge st[i] or posedge cl[i])
+          if (cl[i]) q_sre[i] <= 1'b0; else if (st[i]) q_sre[i] <= 1'b1; else if (!en) q_sre[i] <= d[i];
+        always @* if (!cl[i]) q_lsr[i] = 1'b0; else if (st[i]) q_lsr[i] = 1'b1; else if (en) q_lsr[i] = d[i];
+        always @(posedge clk or posedge cl[i]) if (cl[i]) q_clr[i] <= 1'b0; else q_clr[i] <= d[i];
+      end
+      always @(posedge clk or negedge ld) if (!ld) q_ld <= ad; else if (en) q_ld <= d;
+      always @(posedge clk or posedge cl[0] or posedge one) if (cl[0]) q_one[0] <= 1'b0; else if (one) q_one[0] <= 1'b1; else q_one[0] <= d[0];
+      always @(posedge clk or posedge cl[1]) if (cl[1]) q_one[1] <= 1'b0; else q_one[1] <= d[1];
+      always @* if (!rst) q_al = 2'b10; else if (en) q_al = d;
+    endmodule`;
+    await expectEquivalent({ 'r.v': gold }, { 'r.v': code }, 'regs4', undefined, 'clk2fflogic');
   }, 60_000);
 
   it.each(ruleSets)('keep signed operands (%s)', async (_name, rules) => {

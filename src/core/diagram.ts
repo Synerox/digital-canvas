@@ -150,7 +150,13 @@ const CELL_SYMBOL: Record<string, string> = {
   $dffe: 'DFF',
   $adffe: 'DFF',
   $sdffe: 'DFF',
+  $dffsr: 'DFF',
+  $dffsre: 'DFF',
+  $aldff: 'DFF',
+  $aldffe: 'DFF',
   $dlatch: 'LATCH',
+  $adlatch: 'LATCH',
+  $dlatchsr: 'LATCH',
   $mem: 'MEM',
   $mem_v2: 'MEM',
   'dc:decoder': 'DEC',
@@ -166,7 +172,7 @@ export function cellSymbol(type: string): string {
 }
 
 /** Port ordering for primitive cells so the drawing reads naturally. */
-const PORT_ORDER = ['A', 'B', 'C', 'D', 'S', 'EN', 'CLK', 'ARST', 'SRST', 'Y', 'Q'];
+const PORT_ORDER = ['A', 'B', 'C', 'D', 'AD', 'S', 'EN', 'CLK', 'ARST', 'SRST', 'ALOAD', 'SET', 'CLR', 'Y', 'Q'];
 
 function sortPorts(type: string, names: string[]): string[] {
   if (!type.startsWith('$') && !type.startsWith('dc:')) return names;
@@ -178,7 +184,19 @@ function sortPorts(type: string, names: string[]): string[] {
 }
 
 /** Yosys parameters that change what a primitive cell computes (see DNode.params). */
-const SEMANTIC_PARAMS = ['CLK_POLARITY', 'EN_POLARITY', 'ARST_POLARITY', 'SRST_POLARITY', 'ARST_VALUE', 'SRST_VALUE', 'A_SIGNED', 'B_SIGNED'];
+const SEMANTIC_PARAMS = [
+  'CLK_POLARITY',
+  'EN_POLARITY',
+  'ARST_POLARITY',
+  'SRST_POLARITY',
+  'ALOAD_POLARITY',
+  'SET_POLARITY',
+  'CLR_POLARITY',
+  'ARST_VALUE',
+  'SRST_VALUE',
+  'A_SIGNED',
+  'B_SIGNED',
+];
 
 /** The semantic parameters of a primitive cell that differ from the defaults, or undefined when none do. */
 function semanticParams(c: IRCell): Record<string, string> | undefined {
@@ -213,7 +231,7 @@ function portSide(cell: IRCell, port: string, dir: 'in' | 'out'): Side {
   // Module instances (including $paramod ones, whose type also starts with '$') keep all inputs on the left.
   if (cell.isInstance) return 'WEST';
   if ((cell.type === '$mux' || cell.type === '$pmux' || cell.type === '$bmux') && port === 'S') return 'SOUTH';
-  if (/dff|dlatch/.test(cell.type) && ['CLK', 'EN', 'ARST', 'SRST'].includes(port)) return 'SOUTH';
+  if (/dff|dlatch/.test(cell.type) && ['CLK', 'EN', 'ARST', 'SRST', 'ALOAD', 'SET', 'CLR'].includes(port)) return 'SOUTH';
   return 'WEST';
 }
 
@@ -283,8 +301,13 @@ export function buildDiagram(
      * one case. Constants are cut there, so a case table shows one value per case, not one long number.
      */
     piece?: number;
+    /** For the B input of a $pmux: its select bits, one per case, to name the constants of each case by. */
+    select?: Bit[];
   }
   const sinks: Sink[] = [];
+
+  /** The cell that drives each bit, to read what selects a case of a $pmux. */
+  const cellOf = new Map<number, IRCell>();
 
   const addDriver = (d: Driver, bit: number) => {
     const first = drivers.get(bit);
@@ -338,11 +361,13 @@ export function buildDiagram(
       ports.push(port);
       if (dir === 'out') {
         bits.forEach((b, i) => {
-          if (typeof b === 'number') addDriver({ node: id, port: port.id, index: i, width: bits.length, bits }, b);
+          if (typeof b !== 'number') return;
+          addDriver({ node: id, port: port.id, index: i, width: bits.length, bits }, b);
+          if (!cellOf.has(b)) cellOf.set(b, c);
         });
       } else {
         const piece = c.type === '$pmux' && pname === 'B' ? c.connections.A?.length : undefined;
-        sinks.push({ node: id, port: port.id, bits, cellType: c.type, ...(piece ? { piece } : {}) });
+        sinks.push({ node: id, port: port.id, bits, cellType: c.type, ...(piece ? { piece, select: c.connections.S ?? [] } : {}) });
         if (direction === 'inout') {
           bits.forEach((b, i) => {
             if (typeof b === 'number') fallbackDrivers.push({ node: id, port: port.id, index: i, width: bits.length, bits });
@@ -428,9 +453,10 @@ export function buildDiagram(
     return nameBits(m.nets, bits)?.name;
   };
 
-  const connectRun = (r: Run, target: DEndpoint, fullSink: boolean, note?: string, shift?: number) => {
+  /** `constId`: the ID of the constant node a constant run becomes (by default, named by the port and bit it feeds). */
+  const connectRun = (r: Run, target: DEndpoint, fullSink: boolean, note?: string, shift?: number, constId?: string) => {
     if (r.kind === 'const') {
-      const cid = `const:${target.port}[${r.lo}]`;
+      const cid = constId ?? `const:${target.port}[${r.lo}]`;
       const cport: DPort = { id: `${cid}.out`, name: 'out', dir: 'out', side: 'EAST', width: r.bits.length };
       nodes.push({ id: cid, kind: 'const', label: formatConst(r.bits), ports: [cport], src: [] });
       edges.push({
@@ -470,9 +496,42 @@ export function buildDiagram(
     return a === b ? `[${a}]` : `[${a}:${b}]`;
   };
 
+  /**
+   * The value the select bit of a case compares the case expression with (`4'd7`, or `3'd0,3'd1` for
+   * an item with two labels), when a compare drives it; undefined otherwise (a casez bit, own logic).
+   */
+  const compareValue = (b: Bit, depth = 0): string | undefined => {
+    const c = typeof b === 'number' ? cellOf.get(b) : undefined;
+    if (!c || depth > 1) return undefined;
+    if (c.type === '$eq' || c.type === '$eqx') {
+      const k = [c.connections.B, c.connections.A].find((x) => x?.length && x.every((y) => typeof y !== 'number'));
+      return k && formatConst(k);
+    }
+    if (c.type !== '$reduce_or' && c.type !== '$or' && c.type !== '$logic_or') return undefined;
+    const labels = [...(c.connections.A ?? []), ...(c.connections.B ?? [])].map((x) => compareValue(x, depth + 1));
+    return labels.length && labels.every(Boolean) ? labels.join(',') : undefined;
+  };
+  /**
+   * What names the constants of each case of a $pmux: the value the case is selected by, so that
+   * they keep their IDs (and the edits saved for them) when other cases are added, removed,
+   * reordered or given other values. The case index when the select is not a compare.
+   */
+  const caseNames = (select: Bit[]): string[] => {
+    const values = select.map((b) => compareValue(b));
+    return values.map((v, k) => (v && values.indexOf(v) === values.lastIndexOf(v) ? v : String(k)));
+  };
+
   for (const s of sinks) {
     let runs = runsOf(s.bits, s.port, s.node);
     const piece = s.piece;
+    const cases = s.select && caseNames(s.select);
+    /** The constants of a case table are named by the case they belong to, and where in it they start. */
+    const constId = (r: Run): string | undefined => {
+      if (!piece || !cases || r.kind !== 'const') return undefined;
+      const k = Math.floor(r.lo / piece);
+      const at = r.lo - k * piece;
+      return `const:${s.port}[${cases[k] ?? k}]${at ? `[${at}]` : ''}`;
+    };
     if (piece) {
       runs = runs.flatMap((r): Run[] => {
         if (r.kind !== 'const') return [r];
@@ -503,7 +562,7 @@ export function buildDiagram(
       }
     } else if (runs.length <= 1) {
       for (const r of runs) {
-        connectRun(r, { node: s.node, port: s.port }, r.lo === 0 && (zeroExtended || r.bits.length === s.bits.length));
+        connectRun(r, { node: s.node, port: s.port }, r.lo === 0 && (zeroExtended || r.bits.length === s.bits.length), undefined, undefined, constId(r));
       }
     } else {
       // Several pieces feed one port: draw a concatenation bar, MSB on top.
@@ -515,7 +574,7 @@ export function buildDiagram(
       });
       const out: DPort = { id: `${jid}.out`, name: 'out', dir: 'out', side: 'EAST', width: s.bits.length };
       nodes.push({ id: jid, kind: 'join', label: '{ }', ports: [...ports, out], src: [] });
-      ordered.forEach((r, k) => connectRun(r, { node: jid, port: ports[k].id }, true));
+      ordered.forEach((r, k) => connectRun(r, { node: jid, port: ports[k].id }, true, undefined, undefined, constId(r)));
       edges.push({
         id: '',
         source: { node: jid, port: out.id },

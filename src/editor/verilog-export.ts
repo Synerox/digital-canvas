@@ -349,9 +349,34 @@ const SELECTS = new Set(['$mux', 'dc:mux', '$pmux', '$bmux', '$demux', '$tribuf'
 
 /**
  * Registers. Drawn ones have a rising clock and active-high enable and reset, and reset to 0;
- * imported ones may say otherwise in their params (CLK_POLARITY, ARST_VALUE…).
+ * imported ones may say otherwise in their params (CLK_POLARITY, ARST_VALUE…). Yosys makes a
+ * $dffsr of a block with two asynchronous controls (`posedge set or posedge clr`), and an
+ * $aldff of one whose asynchronous branch loads a signal rather than a constant.
  */
-const REGISTERS = new Set(['$dff', '$dffe', '$adff', '$adffe', '$sdff', '$sdffe', '$dlatch']);
+const REGISTERS = new Set([
+  '$dff',
+  '$dffe',
+  '$adff',
+  '$adffe',
+  '$sdff',
+  '$sdffe',
+  '$dffsr',
+  '$dffsre',
+  '$aldff',
+  '$aldffe',
+  '$dlatch',
+  '$adlatch',
+  '$dlatchsr',
+]);
+
+/** Registers with an enable (EN). */
+const ENABLED = new Set(['$dffe', '$adffe', '$sdffe', '$dffsre', '$aldffe', '$dlatch', '$adlatch', '$dlatchsr']);
+
+/**
+ * Statements that only mean something in simulation (`$display`, `assert`…). Yosys keeps them as
+ * cells without outputs: they change nothing the circuit computes, so the export leaves them out.
+ */
+const SIMULATION_ONLY = new Set(['$print', '$check', '$assert', '$assume', '$cover', '$live', '$fair']);
 
 /** A 1-bit Yosys parameter of a cell, e.g. CLK_POLARITY; `dflt` when the cell does not set it. */
 function paramFlag(n: DNode, name: string, dflt: boolean): boolean {
@@ -905,6 +930,72 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     return render(constVec(padTo(ok ? ([...v].reverse() as ConstBit[]) : [], width, '0')));
   };
 
+  /**
+   * An asynchronous control (reset, load) for an event control: a net bit, or 'idle' when it is a
+   * constant at its inactive level (it never fires). One tied to its active level is given a wire,
+   * so that the event control names a signal.
+   */
+  const eventName = (n: DNode, name: string, activeHigh: boolean): string | 'idle' => {
+    const e = eventSignal(n, name, activeHigh);
+    if (e) return e === 'idle' ? e : e.text;
+    const wire = take(verilogIdent(`${short.get(n.id)}_${name}`));
+    decls.push(`  wire ${wire};`);
+    assigns.push(`  assign ${wire} = ${render(input(n, name))};`);
+    return wire;
+  };
+  /**
+   * The bits of the SET or CLR input of a register, one per bit of Q (each bit has its own): a net
+   * bit, or 'idle' for a constant at the inactive level. For a flip-flop, a port with a constant at
+   * its active level is given a wire, so that the event control names a signal.
+   */
+  const controlBits = (n: DNode, name: string, width: number, activeHigh: boolean, clocked: boolean): string[] => {
+    const v = input(n, name, width);
+    const inactive = activeHigh ? '0' : '1';
+    const bits = [...Array(width).keys()];
+    const idle = bits.map((i) => slice(v, i, 1).every((s) => s.kind === 'const' && s.bits.every((b) => b === inactive)));
+    let named = v;
+    if (clocked && bits.some((i) => !idle[i] && isConstant(slice(v, i, 1)))) {
+      const wire = take(verilogIdent(`${short.get(n.id)}_${name}`));
+      decls.push(`  wire ${rangeText(width)}${wire};`);
+      assigns.push(`  assign ${wire} = ${render(v)};`);
+      named = netVec(wire, width);
+    }
+    return bits.map((i) => (idle[i] ? 'idle' : render(slice(named, i, 1))));
+  };
+  /**
+   * A register with a set and a clear input per bit ($dffsr, $dffsre, $dlatchsr), written as Yosys
+   * defines it: clear wins over set, set over the clock (or enable). Bits that share their set and
+   * clear signals share one block; the others get a block each.
+   */
+  const emitSetClear = (n: DNode, q: Net, d: Vec, en: string | undefined, onClk: string | undefined) => {
+    const setHigh = paramFlag(n, 'SET_POLARITY', true);
+    const clrHigh = paramFlag(n, 'CLR_POLARITY', true);
+    const sets = controlBits(n, 'SET', q.width, setHigh, !!onClk);
+    const clrs = controlBits(n, 'CLR', q.width, clrHigh, !!onClk);
+    const op = onClk ? '<=' : '=';
+    for (let lo = 0; lo < q.width; ) {
+      let hi = lo;
+      while (hi + 1 < q.width && sets[hi + 1] === sets[lo] && clrs[hi + 1] === clrs[lo]) hi++;
+      const width = hi - lo + 1;
+      const target = width === q.width ? q.name : lo === hi ? `${q.name}[${lo}]` : `${q.name}[${hi}:${lo}]`;
+      const steps: string[] = [];
+      const events = onClk ? [onClk] : [];
+      if (clrs[lo] !== 'idle') {
+        steps.push(`if (${active(clrs[lo], clrHigh)}) ${target} ${op} ${render(zeros(width))};`);
+        events.push(`${edgeOf(clrHigh)} ${clrs[lo]}`);
+      }
+      if (sets[lo] !== 'idle') {
+        steps.push(`if (${active(sets[lo], setHigh)}) ${target} ${op} ${render(constVec(Array<ConstBit>(width).fill('1')))};`);
+        events.push(`${edgeOf(setHigh)} ${sets[lo]}`);
+      }
+      steps.push(`${en ? `if (${en}) ` : ''}${target} ${op} ${render(slice(d, lo, width))};`);
+      const head = onClk ? `  always @(${events.join(' or ')})` : '  always @*';
+      if (steps.length === 1) blocks.push(`${head} ${steps[0]}`);
+      else blocks.push(head, `    ${steps[0]}`, ...steps.slice(1).map((s) => `    else ${s}`));
+      lo = hi + 1;
+    }
+  };
+
   const emitRegister = (n: DNode, type: string) => {
     const qPort = n.ports.find((p) => p.dir === 'out' && p.name === 'Q') ?? n.ports.find((p) => p.dir === 'out');
     const q = netOf(n, qPort);
@@ -912,11 +1003,23 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
       warn(`${capitalize(describe(n))} has no connected output; it is left out`);
       return;
     }
-    const dv = render(input(n, 'D', q.width));
-    const hasEn = type === '$dffe' || type === '$adffe' || type === '$sdffe' || type === '$dlatch';
-    const en = hasEn ? active(render(input(n, 'EN')), paramFlag(n, 'EN_POLARITY', true)) : undefined;
+    const d = input(n, 'D', q.width);
+    const dv = render(d);
+    const en = ENABLED.has(type) ? active(render(input(n, 'EN')), paramFlag(n, 'EN_POLARITY', true)) : undefined;
     if (type === '$dlatch') {
       blocks.push(`  always @* if (${en}) ${q.name} = ${dv};`);
+      return;
+    }
+    if (type === '$adlatch') {
+      // A latch with an asynchronous reset: the reset wins over the enable.
+      const high = paramFlag(n, 'ARST_POLARITY', true);
+      const arst = render(input(n, 'ARST'));
+      if (eventSignal(n, 'ARST', high) === 'idle') blocks.push(`  always @* if (${en}) ${q.name} = ${dv};`);
+      else blocks.push('  always @*', `    if (${active(arst, high)}) ${q.name} = ${resetValue(n, 'ARST_VALUE', q.width)};`, `    else if (${en}) ${q.name} = ${dv};`);
+      return;
+    }
+    if (type === '$dlatchsr') {
+      emitSetClear(n, q, d, en, undefined);
       return;
     }
     const clkHigh = paramFlag(n, 'CLK_POLARITY', true);
@@ -927,23 +1030,22 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
     }
     const onClk = `${edgeOf(clkHigh)} ${clk.text}`;
     const load = `${en ? `if (${en}) ` : ''}${q.name} <= ${dv};`;
-    if (type === '$adff' || type === '$adffe') {
-      const high = paramFlag(n, 'ARST_POLARITY', true);
-      const reset = `${q.name} <= ${resetValue(n, 'ARST_VALUE', q.width)};`;
-      const arst = eventSignal(n, 'ARST', high);
-      if (arst === 'idle') {
-        // A reset tied to its inactive level never fires: a plain register.
+    if (type === '$dffsr' || type === '$dffsre') {
+      emitSetClear(n, q, d, en, onClk);
+      return;
+    }
+    if (type === '$adff' || type === '$adffe' || type === '$aldff' || type === '$aldffe') {
+      // An asynchronous reset loads ARST_VALUE; an asynchronous load ($aldff) loads its AD input.
+      const loads = type === '$aldff' || type === '$aldffe';
+      const high = paramFlag(n, loads ? 'ALOAD_POLARITY' : 'ARST_POLARITY', true);
+      const name = eventName(n, loads ? 'ALOAD' : 'ARST', high);
+      if (name === 'idle') {
+        // A reset (or load) tied to its inactive level never fires: a plain register.
         blocks.push(`  always @(${onClk}) ${load}`);
         return;
       }
-      let name = arst?.text;
-      if (name === undefined) {
-        // A reset tied to its active level: give it a wire so the event control names a signal.
-        name = take(verilogIdent(`${short.get(n.id)}_ARST`));
-        decls.push(`  wire ${name};`);
-        assigns.push(`  assign ${name} = ${render(input(n, 'ARST'))};`);
-      }
-      blocks.push(`  always @(${onClk} or ${edgeOf(high)} ${name})`, `    if (${active(name, high)}) ${reset}`, `    else ${load}`);
+      const value = loads ? render(input(n, 'AD', q.width)) : resetValue(n, 'ARST_VALUE', q.width);
+      blocks.push(`  always @(${onClk} or ${edgeOf(high)} ${name})`, `    if (${active(name, high)}) ${q.name} <= ${value};`, `    else ${load}`);
       return;
     }
     if (type === '$sdff' || type === '$sdffe') {
@@ -1081,9 +1183,20 @@ export function diagramToVerilog(d: Diagram, moduleName: string): VerilogExport 
   const emitCell = (n: DNode) => {
     const type = n.cellType ?? '';
     const outs = n.ports.filter((p) => p.dir === 'out');
+    if (SIMULATION_ONLY.has(type)) {
+      warn(`${capitalize(describe(n))} is a simulation-only statement ($display, assert…); it is left out`);
+      assigns.push(`  // ${oneLine(describe(n))}: simulation-only statement left out`);
+      return;
+    }
     const unwritable = type === '$mem_v2' ? emitMemory(n) : isSupported(type) ? undefined : 'has no Verilog form here';
     if (type === '$mem_v2' && !unwritable) return;
     if (unwritable) {
+      // Only a cell that drives a wire leaves something undriven: one that drives nothing is just left out.
+      if (!outs.some((p) => netOf(n, p))) {
+        warn(`${capitalize(describe(n))} ${unwritable}; it drives nothing, so it is left out`);
+        assigns.push(`  // ${oneLine(describe(n))}: no Verilog form; left out (it drives nothing)`);
+        return;
+      }
       warn(`${capitalize(describe(n))} ${unwritable}; its outputs are left undriven`);
       assigns.push(`  // ${oneLine(describe(n))}: no Verilog form; outputs left undriven`);
       return;

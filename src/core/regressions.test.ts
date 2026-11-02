@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { runYosys } from '@yowasp/yosys';
 import { buildDiagram } from './diagram';
+import type { IRDesign } from './ir';
 import { design } from './test-utils';
 import { layoutDiagram } from '../layout/elk-layout';
 import { errorLine, stripAnsi } from '../yosys/runner';
@@ -165,6 +166,135 @@ endmodule
 `;
     const d = await design({ 'fsm.v': src });
     expect(d.modules.fsm.cells.find((c) => c.type === '$adff')?.id).toBe('$adff{Q=state}');
+  }, T);
+
+  // A case table is a $pmux whose inputs are the values of its cases: an ID made of them changed with
+  // every edited entry, and the moves of the MUX, the wires drawn from it and the edits of its
+  // constants were lost.
+  const seg7 = (seven: string) => ({
+    'seg7.v': `module seg7(input [3:0] bcd, output reg [6:0] seg);
+  always @*
+    case (bcd)
+      4'h0: seg = 7'b1000000; 4'h1: seg = 7'b1111001; 4'h2: seg = 7'b0100100; 4'h3: seg = 7'b0110000;
+      4'h4: seg = 7'b0011001; 4'h5: seg = 7'b0010010; 4'h6: seg = 7'b0000010; 4'h7: seg = ${seven};
+      4'h8: seg = 7'b0000000; 4'h9: seg = 7'b0010000; 4'hA: seg = 7'b0001000; 4'hB: seg = 7'b0000011;
+      4'hC: seg = 7'b1000110; 4'hD: seg = 7'b0100001; 4'hE: seg = 7'b0000110; 4'hF: seg = 7'b0001110;
+    endcase
+endmodule
+`,
+  });
+  const edgeIds = (d: ReturnType<typeof buildDiagram>) => d.edges.map((e) => e.id).sort();
+
+  it('names a case table MUX by the signal it drives, so a changed entry keeps it and its constants', async () => {
+    const before = buildDiagram(await design(seg7("7'b1111000")), 'seg7');
+    const after = buildDiagram(await design(seg7("7'b1011000")), 'seg7');
+    expect(before.nodes.filter((n) => n.cellType === '$pmux').map((n) => n.id)).toEqual(['cell:$pmux{Y=seg}']);
+    expect(nodeIds(after)).toEqual(nodeIds(before));
+    expect(edgeIds(after)).toEqual(edgeIds(before));
+    // Each constant is named by the case it belongs to: the edited one keeps its ID with the new value.
+    expect(consts(before).get("const:cell:$pmux{Y=seg}.B[4'd7]")).toBe("7'd120");
+    expect(consts(after).get("const:cell:$pmux{Y=seg}.B[4'd7]")).toBe("7'd88");
+    expect(consts(after).get("const:cell:$pmux{Y=seg}.B[4'd8]")).toBe("7'd0");
+    const unchanged = (d: ReturnType<typeof buildDiagram>) => [...consts(d)].filter(([id]) => !id.endsWith("[4'd7]"));
+    expect(unchanged(after)).toEqual(unchanged(before));
+  }, T);
+
+  it('keeps the constants of a case with its value when other cases are added or reordered', async () => {
+    const table = (items: string[]) => ({
+      't.v': `module t(input [1:0] s, output reg [3:0] y);\n  always @* case (s)\n${items.join('\n')}\n    default: y = 4'd0;\n  endcase\nendmodule\n`,
+    });
+    const before = consts(buildDiagram(await design(table(["    2'd0: y = 4'd5;", "    2'd1: y = 4'd9;"])), 't'));
+    const after = consts(buildDiagram(await design(table(["    2'd1: y = 4'd9;", "    2'd2: y = 4'd3;", "    2'd0: y = 4'd5;"])), 't'));
+    expect(after.get("const:cell:$pmux{Y=y}.B[2'd0]")).toBe("4'd5");
+    expect(before.get("const:cell:$pmux{Y=y}.B[2'd0]")).toBe("4'd5");
+    expect(after.get("const:cell:$pmux{Y=y}.B[2'd1]")).toBe("4'd9");
+    expect(after.get("const:cell:$pmux{Y=y}.B[2'd2]")).toBe("4'd3");
+    // An item with two labels is named by both; a casez bit that is no compare, by its case index.
+    const z = consts(
+      buildDiagram(
+        await design({
+          'z.v': `module z(input [2:0] s, output reg [1:0] a, output reg [3:0] b);
+  always @* begin
+    casez (s) 3'b1??: a = 2'd1; 3'b01?: a = 2'd2; default: a = 2'd3; endcase
+    case (s) 3'd0, 3'd1: b = 4'd3; 3'd5: b = 4'd9; default: b = 4'd0; endcase
+  end
+endmodule
+`,
+        }),
+        'z',
+      ),
+    );
+    expect(z.get("const:cell:$pmux{Y=a}.B[2'd1]")).toBe("2'd2");
+    expect(z.get('const:cell:$pmux{Y=a}.B[1]')).toBe("2'd1");
+    expect(z.get("const:cell:$pmux{Y=b}.B[3'd0,3'd1]")).toBe("4'd3");
+  }, T);
+
+  it('names the case MUXes of a state machine by what they drive, and leaves the other IDs alone', async () => {
+    const fsm = (redCode: string, next: string) => ({
+      'fsm.v': `module fsm(input clk, rst, car, output reg [2:0] ew);
+  reg [1:0] state;
+  always @(posedge clk or posedge rst)
+    if (rst) state <= 2'd0;
+    else case (state)
+      2'd0: if (car) state <= ${next};
+      2'd1: state <= 2'd2;
+      default: state <= 2'd0;
+    endcase
+  always @* case (state) 2'd0: ew = ${redCode}; 2'd1: ew = 3'b100; default: ew = 3'b001; endcase
+endmodule
+`,
+    });
+    const before = await design(fsm("3'b100", "2'd1"));
+    const after = await design(fsm("3'b010", "2'd2"));
+    const ids = (d: typeof before) => d.modules.fsm.cells.map((c) => c.id).sort();
+    // The next-state MUX of the clocked block drives no named signal: it is named by proc's wire for the next state.
+    expect(ids(before)).toEqual(expect.arrayContaining(['$pmux{Y=$0\\state}', '$pmux{Y=ew}', '$mux{car}', "$eq{A=state,B=2'd0,Y=}", '$adff{Q=state}']));
+    expect(ids(after)).toEqual(ids(before));
+    expect(nodeIds(buildDiagram(after, 'fsm'))).toEqual(nodeIds(buildDiagram(before, 'fsm')));
+  }, T);
+
+  it('names a case nested in another case by the MUX it feeds, so an item added to one swaps no IDs', async () => {
+    const nested = (extra: string) => {
+      const item = (k: number) =>
+        `      2'd${k}: case (s) ${[0, 1, 2].map((j) => `2'd${j}: y = 4'd${(k * 3 + j) % 16};`).join(' ')} ${k ? '' : extra}default: y = 4'd${k}; endcase`;
+      return { 'n.v': `module n(input [1:0] m, s, output reg [3:0] y);\n  always @* case (m)\n${[0, 1, 2, 3].map(item).join('\n')}\n  endcase\nendmodule\n` };
+    };
+    // Each inner case by the line it is on: their Yosys cell names change order when the first one grows.
+    const inner = (d: IRDesign) =>
+      d.modules.n.cells
+        .filter((c) => c.type === '$pmux' && c.id !== '$pmux{Y=y}')
+        .map((c) => `${c.src[1]?.startLine}:${c.id}`)
+        .sort();
+    const before = inner(await design(nested('')));
+    expect(before).toEqual(['3:$pmux{Y>$mux.B>Y=$2\\y}', '4:$pmux{Y>$mux.B>Y=$3\\y}', '5:$pmux{Y>$mux.B>Y=$4\\y}', '6:$pmux{Y>$mux.B>Y=$5\\y}']);
+    expect(inner(await design(nested("2'd3: y = 4'd15; ")))).toEqual(before);
+    // `case (1'b1)` makes a chain of MUXes: each is named by the inputs down the chain.
+    const onehot = await design({
+      'h.v': `module h(input clk, reset, go, output reg [3:0] st);
+  always @(posedge clk)
+    if (reset) st <= 4'b0001;
+    else case (1'b1)
+      st[0]: if (go) st <= 4'b0010;
+      st[1]: st <= 4'b0100;
+      st[2]: st <= 4'b1000;
+      default: st <= 4'b0001;
+    endcase
+endmodule
+`,
+    });
+    expect(onehot.modules.h.cells.map((c) => c.id)).toEqual(
+      expect.arrayContaining(['$mux{Y>$mux.A>Y=$0\\st}', '$mux{Y>$mux.A>$mux.A>Y=$0\\st}', '$mux{reset}', '$mux{go}']),
+    );
+  }, T);
+
+  it('names the enable logic of a latch by the latch it serves, not by the text of its always block', async () => {
+    const latch = (body: string) =>
+      design({ 'l.v': `module l(input en, input [3:0] d, e, output reg [3:0] q, r);\n  always @* if (en) ${body}\nendmodule\n` });
+    const helpers = (d: IRDesign) => d.modules.l.cells.filter((c) => /;Q=/.test(c.id)).map((c) => c.id).sort();
+    const before = helpers(await latch('q = d;'));
+    expect(before).toEqual(['$and{A=,B=,Y=;Q=q}', '$not{A=en,Y=;Q=q}', '$reduce_or{A=,Y=;Q=q}', "$reduce_or{A=1'b1,Y=;Q=q}"]);
+    expect(helpers(await latch('q = d ^ e;'))).toEqual(before);
+    expect(helpers(await latch('begin q = d; r = e; end'))).toEqual(before);
   }, T);
 
   it('leaves comments out of the source text an ID is made of', async () => {

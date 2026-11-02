@@ -162,6 +162,35 @@ const REGISTER_CELL = /^\$(\w*dff\w*|\w*dlatch\w*|sr|ff)$/;
 const PROCESS_TEXT = /^(always(_ff|_comb|_latch)?|initial|final)\b/;
 
 /**
+ * The MUX of a case statement: a `$pmux`, or a `$mux` Yosys makes for a case with one item (or for
+ * each item of a case whose items are signals, such as `case (1'b1)`).
+ * Yosys gives it no source text of its own, and the values of its cases are constant inputs, so
+ * an ID made of what it connects to changed with every edited table entry.
+ */
+function isCaseMux(type: string, name: string, expr: string | undefined): boolean {
+  return !expr && (type === '$pmux' || (type === '$mux' && name.startsWith('$procmux$')));
+}
+
+/** proc's wire for the value a process gives a signal at one level of its if/case nesting: `$0\state[1:0]`, `$2\y[3:0]`. */
+const STAGE_WIRE = /^(\$\d+\\.+?)(\[\d+(:\d+)?\])?$/;
+
+/**
+ * `$2\y`: the stage wire of a process that carries exactly these bits, or a slice of one. It names the
+ * MUX of a case nested in another case or in an if, whose output has no name of its own.
+ */
+function stageSignal(nets: IRNet[], bits: Bit[]): string | undefined {
+  const nums = bits.filter((b): b is number => typeof b === 'number');
+  if (nums.length === 0 || nums.length !== bits.length) return undefined;
+  for (const n of nets) {
+    const m = n.hidden ? STAGE_WIRE.exec(n.name) : null;
+    const start = m ? n.bits.indexOf(nums[0]) : -1;
+    if (!m || start < 0 || !nums.every((b, i) => n.bits[start + i] === b)) continue;
+    return sliceLabel({ ...n, name: m[1] }, start, start + nums.length - 1);
+  }
+  return undefined;
+}
+
+/**
  * The name of the signal some bits carry: `q`, or `q[3:2]` for part of it, preferring a net
  * that has exactly these bits; otherwise the names of the nets they touch. Undefined when no
  * public net carries any of them.
@@ -196,21 +225,78 @@ function signalName(nets: IRNet[], bits: Bit[], code: string): string | undefine
   return names.size ? [...names].join('+') : undefined;
 }
 
-/** `Q=q`: the signals the outputs of a cell drive, for its fingerprint ('' when none has a name). */
+/**
+ * `Q=q`: the signals the outputs of a cell drive, for its fingerprint ('' when none has a name).
+ * `stages`: also name an output by the process stage wire it drives (`Y=$2\y`), for case MUXes.
+ */
 function drivenSignals(
   nets: IRNet[],
   connections: Record<string, Bit[]>,
   directions: Record<string, YosysDirection>,
   code: string,
+  stages = false,
 ): string {
   return Object.keys(connections)
     .filter((p) => directions[p] === 'output')
     .sort()
     .flatMap((p) => {
-      const name = signalName(nets, connections[p], code);
+      const name = signalName(nets, connections[p], code) ?? (stages ? stageSignal(nets, connections[p]) : undefined);
       return name === undefined ? [] : [`${p}=${name}`];
     })
     .join(',');
+}
+
+/**
+ * `Q=q`: what the register nearest downstream of a cell drives, following its outputs through the
+ * cells they feed; undefined when no named register is reached in a few steps. When it serves
+ * several, the first by name: another latch of the same block then renames it only if its name
+ * comes first.
+ */
+function servedRegister(cells: IRCell[], readers: Map<number, number[]>, named: Map<number, string>, start: number): string | undefined {
+  const seen = new Set([start]);
+  let frontier = [start];
+  for (let depth = 0; depth < 8 && frontier.length; depth++) {
+    const next: number[] = [];
+    const found = new Set<string>();
+    for (const i of frontier) {
+      const c = cells[i];
+      for (const [p, bits] of Object.entries(c.connections)) {
+        if (c.directions[p] !== 'output') continue;
+        for (const b of bits) {
+          for (const k of typeof b === 'number' ? (readers.get(b) ?? []) : []) {
+            if (seen.has(k)) continue;
+            seen.add(k);
+            const drives = named.get(k);
+            if (drives) found.add(drives);
+            else next.push(k);
+          }
+        }
+      }
+    }
+    if (found.size) return [...found].sort()[0];
+    frontier = next;
+  }
+  return undefined;
+}
+
+/** The only cell input that reads the outputs of a cell, when one input of one cell reads them all. */
+function soleReader(cells: IRCell[], readers: Map<number, number[]>, index: number): { cell: number; port: string } | undefined {
+  const c = cells[index];
+  let found: { cell: number; port: string } | undefined;
+  for (const [p, bits] of Object.entries(c.connections)) {
+    if (c.directions[p] !== 'output') continue;
+    for (const b of bits) {
+      if (typeof b !== 'number') continue;
+      for (const k of readers.get(b) ?? []) {
+        for (const [q, read] of Object.entries(cells[k].connections)) {
+          if (cells[k].directions[q] === 'output' || !read.includes(b)) continue;
+          if (found && (found.cell !== k || found.port !== q)) return undefined;
+          found = { cell: k, port: q };
+        }
+      }
+    }
+  }
+  return found;
 }
 
 function buildModule(
@@ -243,8 +329,13 @@ function buildModule(
     for (const b of n.bits) if (typeof b === 'number' && !bitName.has(b)) bitName.set(b, n.name);
   }
 
-  const used = new Map<string, number>();
-  const cells: IRCell[] = Object.entries(m.cells).map(([cname, c]) => {
+  /** Cells made of a whole always block that drive no named signal, with the signals they touch. */
+  const helpers: { index: number; touched: string }[] = [];
+  /** Registers named by the signals they drive (`$dlatch{Q=q}`), with those signals. */
+  const namedRegisters = new Map<number, string>();
+  /** Case MUXes whose output has no name, not even a stage wire (a case nested in another case or an if). */
+  const unnamedCaseMuxes = new Set<number>();
+  const cells: IRCell[] = Object.entries(m.cells).map(([cname, c], index) => {
     const hidden = !!c.hide_name || cname.startsWith('$');
     const src = parseSrc(c.attributes?.src);
     const directions = cellDirections(c.type, c.connections, c.port_directions);
@@ -259,8 +350,16 @@ function buildModule(
       // A register (or any cell made from a whole always block) is told apart by what it drives:
       // the block's text changes with every statement or comment in it, and is the same for every
       // register the block makes. Edits saved for `$dff{Q=q}` then survive changes to the block.
+      // So is the MUX of a case statement (`$pmux{Y=seg}`): its inputs are the values of the case
+      // table, and edits saved for it must survive a change to one of them.
+      const caseMux = isCaseMux(c.type, cname, expr);
+      // The code that made the cell, to pick among several names of the same bits: for a case MUX,
+      // its case statement (Yosys gives it the position of an item, then the range of the statement).
+      const code = caseMux ? stripComments(sourceText(sources, src[1]) ?? '') : (expr ?? '');
       const drives =
-        REGISTER_CELL.test(c.type) || PROCESS_TEXT.test(expr ?? '') ? drivenSignals(nets, c.connections, directions, expr ?? '') : '';
+        REGISTER_CELL.test(c.type) || PROCESS_TEXT.test(expr ?? '') || caseMux
+          ? drivenSignals(nets, c.connections, directions, code, caseMux)
+          : '';
       const touched = Object.keys(c.connections)
         .sort()
         .map((p) => {
@@ -268,21 +367,22 @@ function buildModule(
           // A constant operand tells apart cells that read the same signals, such as the `sel == 2'd0`,
           // `sel == 2'd1`… compares of a case statement (Yosys gives them no source text). Without it
           // they differ only by Yosys' cell order, so after the case items are reordered an edit
-          // saved for one of them would move or hide another.
-          if (bits.length > 0 && bits.every((b) => typeof b !== 'number')) return `${p}=${formatConst(bits)}`;
+          // saved for one of them would move or hide another. The constants of a case MUX are the
+          // values of its table, which are edited: they are left out.
+          if (bits.length > 0 && bits.every((b) => typeof b !== 'number')) return `${p}=${caseMux ? '' : formatConst(bits)}`;
           const names = new Set<string>();
           for (const b of bits) if (typeof b === 'number' && bitName.has(b)) names.add(bitName.get(b)!);
           return `${p}=${[...names].join('+')}`;
         })
         .join(',');
       base = `${c.type}{${drives || (expr ?? touched)}}`;
+      if (drives && REGISTER_CELL.test(c.type)) namedRegisters.set(index, drives);
+      else if (!drives && PROCESS_TEXT.test(expr ?? '')) helpers.push({ index, touched });
+      else if (!drives && caseMux) unnamedCaseMuxes.add(index);
     }
-    const n = used.get(base) ?? 0;
-    used.set(base, n + 1);
-    const id = n === 0 ? base : `${base}#${n}`;
     const isInstance = allModules.has(c.type);
     return {
-      id,
+      id: base,
       name: cname,
       hidden,
       type: c.type,
@@ -294,6 +394,54 @@ function buildModule(
       src,
     };
   });
+
+  if (helpers.length || unnamedCaseMuxes.size) {
+    const readers = new Map<number, number[]>();
+    cells.forEach((c, i) => {
+      for (const [p, bits] of Object.entries(c.connections)) {
+        if (c.directions[p] === 'output') continue;
+        for (const b of bits) {
+          if (typeof b !== 'number') continue;
+          const list = readers.get(b);
+          if (list) list.push(i);
+          else readers.set(b, [i]);
+        }
+      }
+    });
+    // The logic Yosys adds for the enable of a latch has the source range of the whole always block.
+    // It is named by what it touches and the register it serves (`$not{A=en,Y=;Q=q}`) instead, so that
+    // another statement in the block does not change its ID.
+    for (const h of helpers) {
+      const served = servedRegister(cells, readers, namedRegisters, h.index);
+      if (served) cells[h.index].id = `${cells[h.index].type}{${h.touched};${served}}`;
+    }
+    // A case nested in another case or in an if drives a wire of Yosys' own (`$procmux$12_Y`). Without
+    // its values, its fingerprint can be the same as that of the other nested cases, and Yosys' cell
+    // order would tell them apart: one more item in one of them could swap their IDs. It is named by
+    // the MUX inputs its value goes through to the first signal with a name: `$pmux{Y>$mux.B>Y=$2\y}`,
+    // or `$mux{Y>$mux.A>$mux.A>Y=$0\st}` for the chain of MUXes of a `case (1'b1)`.
+    for (const i of unnamedCaseMuxes) {
+      const path: string[] = [];
+      const seen = new Set([i]);
+      for (let feeds = soleReader(cells, readers, i); feeds && !seen.has(feeds.cell) && path.length < 16; ) {
+        const r = cells[feeds.cell];
+        seen.add(feeds.cell);
+        path.push(`${r.type}.${feeds.port}`);
+        const drives = drivenSignals(nets, r.connections, r.directions, '', true);
+        if (drives) {
+          cells[i].id = `${cells[i].type}{Y>${path.join('>')}>${drives}}`;
+          break;
+        }
+        feeds = soleReader(cells, readers, feeds.cell);
+      }
+    }
+  }
+  const used = new Map<string, number>();
+  for (const c of cells) {
+    const n = used.get(c.id) ?? 0;
+    used.set(c.id, n + 1);
+    if (n > 0) c.id = `${c.id}#${n}`;
+  }
 
   return {
     name,
