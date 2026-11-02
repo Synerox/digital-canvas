@@ -320,6 +320,13 @@ let clipboard: { clip: Clip; box: Box; sheet: string } | undefined;
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
 /** What this tab last wrote to the browser's copy, or read from it (see copyKeys). */
 let copied: { work: string; view: string } | undefined;
+/**
+ * The work as it was then (`doc`, and the objects that hold the rest of it), and the document as only
+ * this tab's drawing of its sheets has changed it since (`derived`: the places of symbols added since
+ * the sheet was last edited, routes found; see refresh). While the work is still this, the tab has
+ * changed nothing.
+ */
+let copiedWork: { doc: EditDoc; derived: EditDoc; files: Record<string, string>; rules: ReadonlySet<RuleId>; putAside: PutAside } | undefined;
 
 const measures = new Map<string, MeasureText>();
 /** Text measurement for a theme's font (one canvas per font). */
@@ -619,68 +626,101 @@ function modulesByPath(design: IRDesign): Map<string, string> {
 
 export interface ParamodFollow {
   doc: EditDoc;
-  /** Parameterized modules whose edits now belong to the module that took their place. */
+  /** Modules whose edits now belong to the module that took their place. */
   moved: { from: string; to: string }[];
-  /** Parameterized modules with edits that the design no longer has, and that nothing took the place of. */
+  /** Modules that blocks name (a copy's, say), whose blocks now name the module that took their place; `on`: their sheets. */
+  blocks: { from: string; to: string; on: string[] }[];
+  /**
+   * Modules with edits that the design no longer has, and that nothing took the place of: a parameterized
+   * module, or a module used with its default parameters whose instances all give it parameters now.
+   */
   lost: string[];
+  /** Modules that blocks name, which the design no longer has, and that nothing took the place of; `on`: their sheets. */
+  stranded: { module: string; on: string[] }[];
 }
+
+/** Whether a module is `module` or one of its automatic blocks (`<module>/<block>`). */
+const isOrIn = (name: string, module: string) => name === module || name.startsWith(`${module}/`);
 
 /**
  * Yosys names its copy of a parameterized module after the parameters
- * (`$paramod\baud_gen\DIV=…`), and the edits of its sheets are keyed by that
- * name. When new code gives the instances other parameters, the edits follow
- * the module to its new name: to the module that is now at all the instances
- * of the old one, if that is the same Verilog module, new in the design and
- * has no edits of its own. The others are `lost` (they stay in the document:
- * code with the old parameters shows them again). Nothing moves or is lost
- * when the design has another top. Returns `doc` itself when nothing moves.
+ * (`$paramod\baud_gen\DIV=…`; with the default parameters it keeps the
+ * module's name), and the edits of its sheets are keyed by that name, as are
+ * the blocks a copy to a new drawing makes of its instances. When new code
+ * gives the instances other parameters (or gives them some, or takes them
+ * away), the edits follow the module to its new name: to the module that is
+ * now at the instances of the old one, if that is the same Verilog module, new
+ * in the design and has no edits of its own. Blocks follow it whether it had
+ * edits or not. The others are `lost` and `stranded` (they stay in the
+ * document: code with the old parameters shows them again). Nothing moves or
+ * is lost when the design has another top. Returns `doc` itself when nothing
+ * moves.
  */
 export function followParamods(doc: EditDoc, before: IRDesign, after: IRDesign): ParamodFollow {
   // Under another top, the modules of the old one are only out of sight (Top brings them back).
-  if (before.top !== after.top) return { doc, moved: [], lost: [] };
+  if (before.top !== after.top) return { doc, moved: [], blocks: [], lost: [], stranded: [] };
   const edited = (m: string) => Object.keys(doc.sheets).some((k) => ofModules(k, [m]) && !isEmptyEdits(doc.sheets[k]));
+  const names = (n: UserNode, m: string) => n.sym === 'block' && !!n.params.module && isOrIn(n.params.module, m);
+  /** The sheets with blocks of a module (or of its automatic blocks). */
+  const users = (m: string) => [...new Set(Object.entries(doc.sheets).flatMap(([k, e]) => (e.nodes.some((n) => names(n, m)) ? [k.replace(/^d:|^v:[a-z]+:/, '')] : [])))];
   const was = modulesByPath(before);
   const now = modulesByPath(after);
-  const gone = Object.keys(before.modules).filter((m) => m.startsWith('$paramod') && !after.modules[m] && edited(m));
-  const target = new Map<string, string | undefined>();
+  const gone = Object.keys(before.modules).filter((m) => !after.modules[m] && (edited(m) || users(m).length > 0));
+  /** The modules now at the instances of a gone one that are the same Verilog module. */
+  const same = new Map(
+    gone.map((g) => [
+      g,
+      new Set(
+        [...was]
+          .filter(([, m]) => m === g)
+          .map(([p]) => now.get(p))
+          .filter((m): m is string => m !== undefined && displayModuleName(m) === displayModuleName(g)),
+      ),
+    ]),
+  );
+  // The one that took its place: new in the design, and alone there.
+  const successor = new Map<string, string>();
   for (const g of gone) {
-    const at = new Set(
-      [...was]
-        .filter(([, m]) => m === g)
-        .map(([p]) => now.get(p))
-        .filter((m): m is string => m !== undefined && !before.modules[m] && displayModuleName(m) === displayModuleName(g)),
-    );
-    const to = at.size === 1 ? [...at][0] : undefined;
-    target.set(g, to && !edited(to) ? to : undefined);
+    const at = [...same.get(g)!].filter((m) => !before.modules[m]);
+    if (at.length === 1) successor.set(g, at[0]);
   }
+  const target = new Map(
+    gone.filter(edited).map((g) => {
+      const to = successor.get(g);
+      return [g, to && !edited(to) ? to : undefined];
+    }),
+  );
   // Two old modules that end up as one: whose edits would it show?
   const claims = (to: string) => [...target.values()].filter((t) => t === to).length;
-  const moved = gone.flatMap((g) => {
-    const to = target.get(g);
-    return to && claims(to) === 1 ? [{ from: g, to }] : [];
-  });
-  const lost = gone.filter((g) => !moved.some((m) => m.from === g));
-  if (moved.length === 0) return { doc, moved, lost };
-  const rename = new Map(moved.map((m) => [m.from, m.to]));
+  const moved = [...target].flatMap(([from, to]) => (to && claims(to) === 1 ? [{ from, to }] : []));
+  // A module used with its defaults is gone too when its instances are deleted: that is no change of parameters.
+  const lost = [...target.keys()].filter((g) => !moved.some((m) => m.from === g) && (g.startsWith('$paramod') || same.get(g)!.size > 0));
+  const blocks = gone.flatMap((g) => (successor.has(g) && users(g).length ? [{ from: g, to: successor.get(g)!, on: users(g) }] : []));
+  const stranded = gone.flatMap((g) => (!successor.has(g) && users(g).length ? [{ module: g, on: users(g) }] : []));
+  if (moved.length === 0 && blocks.length === 0) return { doc, moved, blocks, lost, stranded };
+  /** A module's new name (its automatic blocks go along). */
+  const renamed = (rename: ReadonlyMap<string, string>, m: string) => {
+    for (const [from, to] of rename) if (isOrIn(m, from)) return to + m.slice(from.length);
+    return m;
+  };
+  const keys = new Map(moved.map((m) => [m.from, m.to]));
   const keyOf = (k: string) => {
     const m = /^(v:[a-z]+:)(.*)$/.exec(k);
-    if (!m) return k;
-    for (const [from, to] of rename) {
-      if (m[2] === from) return m[1] + to;
-      // Its automatic blocks (`<module>/<block>`) go along.
-      if (m[2].startsWith(`${from}/`)) return m[1] + to + m[2].slice(from.length);
-    }
-    return k;
+    return m ? m[1] + renamed(keys, m[2]) : k;
+  };
+  const modules = new Map(blocks.map((b) => [b.from, b.to]));
+  const follow = (e: SheetEdits): SheetEdits => {
+    const nodes = e.nodes.map((n) => {
+      const to = n.sym === 'block' && n.params.module ? renamed(modules, n.params.module) : undefined;
+      return to && to !== n.params.module ? { ...n, params: { ...n.params, module: to } } : n;
+    });
+    return nodes.some((n, i) => n !== e.nodes[i]) ? { ...e, nodes } : e;
   };
   const sheets: EditDoc['sheets'] = {};
-  const follow = (e: SheetEdits): SheetEdits =>
-    e.nodes.some((n) => n.sym === 'block' && rename.has(n.params.module ?? ''))
-      ? { ...e, nodes: e.nodes.map((n) => (n.sym === 'block' && rename.has(n.params.module ?? '') ? { ...n, params: { ...n.params, module: rename.get(n.params.module!) } } : n)) }
-      : e;
   // The moved edits take the place of what the new module's sheets hold (nothing: it has no edits).
   for (const [k, e] of Object.entries(doc.sheets)) if (keyOf(k) === k) sheets[k] = follow(e);
   for (const [k, e] of Object.entries(doc.sheets)) if (keyOf(k) !== k) sheets[keyOf(k)] = follow(e);
-  return { doc: { drawn: doc.drawn, sheets }, moved, lost };
+  return { doc: { drawn: doc.drawn, sheets }, moved, blocks, lost, stranded };
 }
 
 /**
@@ -844,6 +884,19 @@ export function planDrop(open: Record<string, string>, putAside: PutAside, dropp
 }
 
 /**
+ * What File › Open Verilog files does with the files picked: a set with a file
+ * named like an open file (or like a removed one whose edits are put aside) is
+ * a new version of the design, all of it. Its other files are new parts of it
+ * (a file split in two, say), so an open file whose modules they declare again
+ * gives way to them, as on Import (see planImport): unlike a drop (planDrop),
+ * nothing is left declared twice. Undefined for another design, opened in
+ * place of the open files.
+ */
+export function planOpen(open: Record<string, string>, putAside: PutAside, picked: Record<string, string>): ImportPlan | undefined {
+  return Object.keys(picked).some((f) => f in open || f in putAside) ? planImport(open, picked) : undefined;
+}
+
+/**
  * The route of a wire drawn through bends, from points[0] to the last point.
  * At a pin (when its side is given) the wire first leaves the symbol on a short
  * stub, and the leg next to the stub turns across it, so the wire never runs
@@ -942,6 +995,7 @@ export const useStore = create<State>((set, get) => {
     if (!opts.fast && (placed.length || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
       const stored: SheetEdits = { ...e, pos, routes: { ...e.routes, ...g.routed } };
       patch.doc = { ...s.doc, sheets: { ...s.doc.sheets, [key]: stored } };
+      if (copiedWork?.derived === s.doc) copiedWork = { ...copiedWork, derived: patch.doc };
     }
     set(patch);
   };
@@ -951,8 +1005,13 @@ export const useStore = create<State>((set, get) => {
     clearTimeout(autosaveTimer);
     autosaveTimer = undefined;
     if (get().autosavePaused) return;
+    const s = get();
+    // A tab that has changed nothing of the work since it read or wrote the copy (it only looked) writes the work as
+    // it was then: what drawing its sheets added (see copiedWork) would be other work to the tab working on it, which
+    // would stop keeping the copy.
+    const looked = !force && copiedWork && s.doc === copiedWork.derived && s.files === copiedWork.files && s.rules === copiedWork.rules && s.putAside === copiedWork.putAside;
     // Whether the work is saved to a file goes along (only here, not in saved files): see restoreAutosave.
-    const text = JSON.stringify({ ...get().savedFile(), ...(get().dirty ? {} : { saved: true }) });
+    const text = JSON.stringify({ ...s.savedFile(), ...(looked ? { doc: compactDoc(copiedWork!.doc) } : {}), ...(s.dirty ? {} : { saved: true }) });
     const keys = copyKeys(text);
     // Nothing changed since this tab read or wrote the copy (it was only opened): writing it again would tell other
     // tabs it changed.
@@ -960,6 +1019,7 @@ export const useStore = create<State>((set, get) => {
     try {
       localStorage.setItem(AUTOSAVE_KEY, text);
       copied = keys;
+      if (!looked) copiedWork = { doc: s.doc, derived: s.doc, files: s.files, rules: s.rules, putAside: s.putAside };
     } catch {
       set({ notice: 'Could not keep a copy in this browser (storage is full or blocked). Use File › Save drawing.' });
     }
@@ -1125,8 +1185,11 @@ export const useStore = create<State>((set, get) => {
     scheduleAutosave();
   };
 
-  /** Start over from a saved file. `dirty`: the work is not saved to a file (it comes from the browser's copy). */
-  const applySaved = async (f: SavedFile, dirty = false, putAside: PutAside = {}) => {
+  /**
+   * Start over from a saved file. `dirty`: the work is not saved to a file (it comes from the browser's copy).
+   * `fromCopy`: it is the browser's copy, which `copied` holds.
+   */
+  const applySaved = async (f: SavedFile, dirty = false, putAside: PutAside = {}, fromCopy = false) => {
     navSeq++;
     cancelLayouts();
     layoutCache.clear();
@@ -1154,6 +1217,10 @@ export const useStore = create<State>((set, get) => {
       blockDesign: undefined,
       hierarchy: undefined,
     });
+    if (fromCopy) {
+      const s = get();
+      copiedWork = { doc: s.doc, derived: s.doc, files: s.files, rules: s.rules, putAside: s.putAside };
+    }
     // The browser's copy is this file now, or a reload brings back the work from before it.
     scheduleAutosave();
     await get().rebuild();
@@ -1238,23 +1305,34 @@ export const useStore = create<State>((set, get) => {
   };
 
   /**
-   * After a new version of the files is open: the edits of parameterized modules follow them to
-   * the names new parameters give them (see followParamods), in the import's undo step, and the
-   * notice says so, and whose edits no longer show. `before`: the design before the import, and
-   * the notice then (what the import said itself stays).
+   * After a new version of the files is open: the edits of modules whose instances have other
+   * parameters now follow them to the names those give them, and so do the blocks that name them
+   * (see followParamods), in the import's undo step, and the notice says so, and whose edits and
+   * blocks no longer show. `before`: the design before the import, and the notice then (what the
+   * import said itself stays).
    */
   const followParamodEdits = async (before: IRDesign | undefined, files: Record<string, string>, noticeBefore: string | undefined) => {
     const s = get();
     if (!before || !s.design || s.design === before || s.files !== files) return;
     const f = followParamods(s.doc, before, s.design);
-    if (f.moved.length === 0 && f.lost.length === 0) return;
+    if (f.moved.length === 0 && f.blocks.length === 0 && f.lost.length === 0 && f.stranded.length === 0) return;
     const titles = (ms: string[]) => ms.map(moduleTitle).join(', ');
+    const them = (ms: string[]) => (ms.length === 1 ? 'it' : 'them');
+    // A module used with its default parameters has its own name.
+    const copies = f.lost.filter((m) => m.startsWith('$paramod'));
+    const defaults = f.lost.filter((m) => !m.startsWith('$paramod'));
     const said = [
       s.notice !== noticeBefore ? s.notice : undefined,
-      ...f.moved.map((m) => `Your edits on ${moduleTitle(m.from)} now apply to ${moduleTitle(m.to)}, its new parameters.`),
-      f.lost.length
-        ? `Your edits on ${titles(f.lost)} no longer show: no instance uses ${f.lost.length === 1 ? 'it' : 'them'} with those parameters now. Undo brings back the old code with them.`
+      ...f.moved.map(
+        (m) => `Your edits on ${moduleTitle(m.from)} now apply to ${moduleTitle(m.to)}${m.to.startsWith('$paramod') ? ', its new parameters' : ' with its default parameters'}.`,
+      ),
+      ...f.blocks.map((b) => `The blocks of ${moduleTitle(b.from)} on ${titles(b.on)} now use ${moduleTitle(b.to)}.`),
+      copies.length ? `Your edits on ${titles(copies)} no longer show: no instance uses ${them(copies)} with those parameters now.` : undefined,
+      defaults.length
+        ? `Your edits on ${titles(defaults)} no longer show: no instance uses ${them(defaults)} with ${defaults.length === 1 ? 'its' : 'their'} default parameters now.`
         : undefined,
+      ...f.stranded.map((b) => `The blocks of ${moduleTitle(b.module)} on ${titles(b.on)} have no pins now: the design no longer has that module.`),
+      f.lost.length ? 'Undo brings back the old code with them.' : f.stranded.length ? 'Undo brings back the old code.' : undefined,
     ];
     set({ doc: f.doc, notice: said.filter(Boolean).join(' ') });
     if (f.doc === s.doc) return;
@@ -1992,7 +2070,7 @@ export const useStore = create<State>((set, get) => {
       }
       const said = [
         names.size ? `Copied ${module} to ${name}, with its blocks as drawings of their own: ${[...names.values()].join(', ')}.` : '',
-        linked.size ? `Instances of ${[...linked].join(', ')} still use those modules from your Verilog files.` : '',
+        linked.size ? `Instances of ${[...linked].map(moduleTitle).join(', ')} still use those modules from your Verilog files.` : '',
       ].filter(Boolean);
       pushDoc(doc, said.length ? { notice: said.join(' ') } : {});
       void get().openPath([{ instance: name, module: name, drawn: true }]);
@@ -2032,7 +2110,7 @@ export const useStore = create<State>((set, get) => {
         // from here (opening it changes nothing to write).
         set({ autosavePaused: false });
         copied = copyKeys(text);
-        await applySaved(f, !saved, parsePutAside(text));
+        await applySaved(f, !saved, parsePutAside(text), true);
         return true;
       } catch {
         return false;

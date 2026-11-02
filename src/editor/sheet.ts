@@ -6,7 +6,7 @@
  * undo/redo can keep old versions as they are.
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
-import type { LayoutResult, Point } from '../layout/elk-layout';
+import { GRID, type LayoutResult, type Point } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
 import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
@@ -748,8 +748,9 @@ export interface Size {
  * too. A point moves with its column, so routes keep their shapes, and the pins
  * on the symbol's right edge move with that edge. A taller symbol (a longer
  * header) grows upwards, so its pins stay where its wires end, when nothing is
- * there; otherwise downwards, and what is below it in its column moves down.
- * Stored routes that run through a grown symbol are dropped, to be routed again.
+ * there, nor close beside it; otherwise downwards, with a row as high as its
+ * growth put in at its old bottom the same way. Stored routes that run through
+ * a grown symbol are dropped, to be routed again.
  */
 export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: ReadonlyMap<string, Size>): SheetEdits {
   const grown = [...now].filter(([id, s]) => e.pos[id] && was.has(id) && (s.width > was.get(id)!.width || s.height > was.get(id)!.height));
@@ -769,25 +770,28 @@ export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: Rea
   );
   const rect = (id: string) => ({ ...pos[id], ...(now.get(id) ?? was.get(id) ?? { width: 0, height: 0 }) });
   const gap = 5;
+  // Beside it, room for the stub a wire leaves a pin on (two grid steps, as the router snaps it): a pin closer than
+  // that would have its wire start inside the symbol.
+  const side = 2 * GRID;
   const clear = (r: Box, id: string) =>
     Object.keys(pos).every((k) => {
       const q = rect(k);
-      return k === id || r.x >= q.x + q.width + gap || q.x >= r.x + r.width + gap || r.y >= q.y + q.height + gap || q.y >= r.y + r.height + gap;
+      return k === id || r.x >= q.x + q.width + side || q.x >= r.x + r.width + side || r.y >= q.y + q.height + gap || q.y >= r.y + r.height + gap;
     });
   for (const [id, s] of grown.sort(([a], [b]) => pos[a].y - pos[b].y)) {
     const dh = s.height - was.get(id)!.height;
     if (dh <= 0) continue;
-    if (clear({ ...rect(id), y: pos[id].y - dh }, id)) {
+    // Upwards: the band it grows into is free.
+    if (clear({ x: pos[id].x, y: pos[id].y - dh, width: s.width, height: dh }, id)) {
       pos[id] = { ...pos[id], y: pos[id].y - dh };
       continue;
     }
-    // Downwards: what is below it in its column moves down as far (its wires are routed again).
-    const r = rect(id);
-    const bottom = r.y + was.get(id)!.height;
-    for (const k of Object.keys(pos)) {
-      const q = rect(k);
-      if (k !== id && q.y >= bottom - 0.5 && q.x < r.x + r.width && r.x < q.x + q.width) pos[k] = { ...pos[k], y: pos[k].y + dh };
-    }
+    // Downwards (its wires are routed again): everything below its old bottom moves down as far, not only what is in
+    // its column, which could land on what is beside it.
+    const bottom = pos[id].y + was.get(id)!.height;
+    const my = <T extends Point>(p: T): T => (p.y >= bottom - 0.5 ? { ...p, y: p.y + dh } : p);
+    for (const k of Object.keys(pos)) if (k !== id) pos[k] = my(pos[k]);
+    for (const [k, r] of Object.entries(routes)) routes[k] = { ...r, points: r.points.map(my), ...(r.label ? { label: my(r.label) } : {}) };
   }
   const boxes = grown.map(([id]) => rect(id));
   for (const [id, r] of Object.entries(routes)) if (boxes.some((b) => polylineHitsRect(r.points, b))) delete routes[id];

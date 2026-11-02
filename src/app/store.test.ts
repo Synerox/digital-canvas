@@ -29,6 +29,7 @@ import { type Point, sizeNode } from '../layout/elk-layout';
 import {
   AUTOSAVE_KEY,
   changeFiles,
+  copyKeys,
   drawingPorts,
   drawnRoute,
   followPinRenames,
@@ -38,6 +39,7 @@ import {
   pasteSpot,
   planDrop,
   planImport,
+  planOpen,
   renameDrawingIn,
   sheetsUsing,
   useStore,
@@ -639,6 +641,33 @@ describe('store', () => {
     expect(Object.keys(st().files).sort()).toEqual([AUCTION_FILE, 'other.v']);
   }, 60_000);
 
+  it('opens files picked as a new version of the design, with a file split in two, in place of the old file', async () => {
+    const top = 'module top(input a, input b, output y, output z); sub_a u_a(.a(a), .b(b), .y(y)); sub_b u_b(.a(a), .b(b), .z(z)); endmodule\n';
+    const subA = 'module sub_a(input a, input b, output y); assign y = a & b; endmodule\n';
+    const subB = 'module sub_b(input a, input b, output z); assign z = a | b; endmodule\n';
+    await open({ 'top.v': top, 'parts.v': subA + subB });
+    const y0 = input('a').y;
+    st().moveSelection(new Set([input('a').id]), 0, 100);
+    const split = { 'top.v': top, 'sub_a.v': subA, 'sub_b.v': subB };
+    // Dropped, the files of other names would be added as they are, with sub_a and sub_b declared twice.
+    expect(planDrop(st().files, st().putAside, split)).toEqual({ kind: 'add', twice: ['sub_a', 'sub_b'] });
+    // Picked in File › Open Verilog files with top.v, they are parts of the design: parts.v gives way to them.
+    const plan = planOpen(st().files, st().putAside, split);
+    expect(plan).toMatchObject({ replaced: ['parts.v'], trimmed: [], clashes: [] });
+    expect(Object.keys(plan!.files)).toEqual(['top.v', 'sub_a.v', 'sub_b.v']);
+    await st().setFiles(split, false, { newVersion: true });
+    await settle();
+    expect(st().error).toBeUndefined();
+    expect(Object.keys(st().files)).toEqual(['top.v', 'sub_a.v', 'sub_b.v']);
+    expect(input('a').y).toBe(y0 + 100);
+    st().undo();
+    await settle();
+    expect(Object.keys(st().files)).toEqual(['top.v', 'parts.v']);
+    // Files of other names only are another design; a file of a removed one's name is a new version of it.
+    expect(planOpen(st().files, st().putAside, { 'other.v': HALF })).toBeUndefined();
+    expect(planOpen(st().files, { 'gone.v': {} }, { 'gone.v': HALF })).toMatchObject({ replaced: [], trimmed: [] });
+  }, 60_000);
+
   it('drops the edits of the modules a removed file declared, in one undo step (C5)', async () => {
     await open({ 'pasted.v': 'module top(input clk, input rst, output y); assign y = clk & rst; endmodule\n', 'keep.v': 'module keep(input a, output y); assign y = a; endmodule\n' }, { top: 'top' });
     st().select([input('clk').id]);
@@ -963,6 +992,56 @@ describe('store', () => {
     }
   }, 60_000);
 
+  it('does not write what drawing a sheet worked out while the tab only looks, so the tab working on it goes on (H1)', async () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v) });
+    try {
+      const sub = (or: boolean) =>
+        `module sub(input a, input b, output y${or ? ', output z' : ''}); assign y = a & b;${or ? ' assign z = a | b;' : ''} endmodule\n` +
+        `module top(input a, input b, output y${or ? ', output z' : ''}); sub u_sub(.a(a), .b(b), .y(y)${or ? ', .z(z)' : ''}); endmodule\n`;
+      const top = { instance: 'top', module: 'top' };
+      const uSub = [top, { instance: 'u_sub', module: 'sub' }];
+      const stored = () => JSON.parse(store.get(AUTOSAVE_KEY) ?? '{}') as SavedFile;
+      const work = () => copyKeys(store.get(AUTOSAVE_KEY)!)!.work;
+      // The working tab moves the AND on u_sub's sheet, then imports sub with an OR, while it looks at top.
+      await open({ 'm.v': sub(false) });
+      await st().openPath(uSub);
+      await settle();
+      const and = nodeOf((n) => n.kind === 'cell').id;
+      st().moveSelection(new Set([and]), 0, 40);
+      await st().openPath([top]);
+      await settle();
+      await st().setFiles({ 'm.v': sub(true) }, false, { newVersion: true });
+      await settle();
+      st().flushAutosave();
+      const theirs = work();
+      expect(Object.keys(stored().doc.sheets['v:blocks:sub'].pos)).not.toContain('out:z');
+      // Another tab opens the copy and u_sub's sheet, which places the OR and z and stores where (no edit of the user's).
+      await st().restoreAutosave();
+      await st().openPath(uSub);
+      await settle();
+      expect(Object.keys(st().doc.sheets['v:blocks:sub'].pos)).toContain('out:z');
+      // It shows the full circuit: what it writes holds the same work, only another view.
+      await st().setViewMode('flat');
+      await settle();
+      st().flushAutosave();
+      expect(stored().viewMode).toBe('flat');
+      expect(work()).toBe(theirs);
+      st().otherTabSaved(store.get(AUTOSAVE_KEY)!);
+      expect(st().autosavePaused).toBeFalsy();
+      // Once it edits the work, it writes all of it, with the places it worked out.
+      await st().setViewMode('blocks');
+      await st().openPath(uSub);
+      await settle();
+      st().moveSelection(new Set([and]), 0, 10);
+      st().flushAutosave();
+      expect(work()).not.toBe(theirs);
+      expect(Object.keys(stored().doc.sheets['v:blocks:sub'].pos)).toContain('out:z');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 60_000);
+
   it('keeps the edits of a parameterized module when new code gives it other parameters (H7)', async () => {
     const uart = (div: number, div2 = div) => `module baud_gen #(parameter DIV = 10) (input wire clk, input wire en, output wire tick);
   reg [3:0] cnt;
@@ -1014,6 +1093,127 @@ endmodule
     await settle();
     expect(note()).toBeUndefined();
     expect(st().notice).toMatch(/edits on baud_gen #\(DIV=12\) no longer show/);
+  }, 60_000);
+
+  /** uart_top with two baud_gen instances: `undefined` uses the module's default parameters. */
+  const baudUart = (div?: number, div2 = div) => {
+    const params = (d?: number) => (d === undefined ? '' : `#(.DIV(${d})) `);
+    return `module baud_gen #(parameter DIV = 10) (input wire clk, input wire en, output wire tick);
+  reg [3:0] cnt;
+  always @(posedge clk) cnt <= (cnt == DIV - 1) ? 4'd0 : cnt + 4'd1;
+  assign tick = en && (cnt == DIV - 1);
+endmodule
+module uart_top (input wire clk, input wire en, output wire tick, output wire tick2);
+  baud_gen ${params(div)}u_baud (.clk(clk), .en(en), .tick(tick));
+  baud_gen ${params(div2)}u_baud2 (.clk(clk), .en(en), .tick(tick2));
+endmodule
+`;
+  };
+  const baudOf = (instance: string) => st().design!.modules.uart_top.cells.find((c) => c.name === instance)!.type;
+  const openBaud = async (instance = 'u_baud') => {
+    await st().openPath([{ instance: 'uart_top', module: 'uart_top' }, { instance, module: baudOf(instance) }]);
+    await settle();
+  };
+
+  it('keeps the edits of a module used with its defaults when new code gives its instances parameters, and back', async () => {
+    await open({ 'uart.v': baudUart() });
+    await openBaud();
+    expect(st().sheet).toBe('v:blocks:baud_gen');
+    st().startPlacing({ sym: 'text' });
+    st().placeAt({ x: 0, y: -200 });
+    st().renameItem([...st().selection][0], 'Baud tick');
+    const note = () => st().netlist!.nodes.find((n) => n.kind === 'text')?.label;
+    expect(note()).toBe('Baud tick');
+    const baudKeys = () => Object.keys(st().doc.sheets).filter((k) => k.includes('baud_gen'));
+    // Both instances get DIV=12: the edits go to the copy Yosys makes for that, in the import's undo step.
+    await st().setFiles({ 'uart.v': baudUart(12) }, false, { newVersion: true });
+    await settle();
+    expect(moduleTitle(st().path[1].module)).toBe('baud_gen #(DIV=12)');
+    expect(note()).toBe('Baud tick');
+    expect(baudKeys()).toEqual([`v:blocks:${st().path[1].module}`]);
+    expect(st().notice).toBe('Your edits on baud_gen now apply to baud_gen #(DIV=12), its new parameters.');
+    st().undo();
+    await settle();
+    expect(st().path[1].module).toBe('baud_gen');
+    expect(note()).toBe('Baud tick');
+    expect(baudKeys()).toEqual(['v:blocks:baud_gen']);
+    st().redo();
+    await settle();
+    expect(moduleTitle(st().path[1].module)).toBe('baud_gen #(DIV=12)');
+    expect(note()).toBe('Baud tick');
+    // And back to the defaults.
+    await st().setFiles({ 'uart.v': baudUart() }, false, { newVersion: true });
+    await settle();
+    expect(st().path[1].module).toBe('baud_gen');
+    expect(note()).toBe('Baud tick');
+    expect(st().notice).toBe('Your edits on baud_gen #(DIV=12) now apply to baud_gen with its default parameters.');
+    // One instance keeps the defaults: the edits stay with it, and nothing is said.
+    st().setNotice(undefined);
+    await st().setFiles({ 'uart.v': baudUart(undefined, 12) }, false, { newVersion: true });
+    await settle();
+    expect(baudKeys()).toEqual(['v:blocks:baud_gen']);
+    expect(st().notice).toBeUndefined();
+    await openBaud('u_baud');
+    expect(note()).toBe('Baud tick');
+    // Both use the defaults again, then part ways: whose module would the edits be? They stay, and the notice says they
+    // no longer show.
+    await st().setFiles({ 'uart.v': baudUart() }, false, { newVersion: true });
+    await settle();
+    await st().setFiles({ 'uart.v': baudUart(14, 16) }, false, { newVersion: true });
+    await settle();
+    expect(note()).toBeUndefined();
+    expect(baudKeys()).toEqual(['v:blocks:baud_gen']);
+    expect(st().notice).toBe('Your edits on baud_gen no longer show: no instance uses it with its default parameters now. Undo brings back the old code with them.');
+    st().undo();
+    await settle();
+    await openBaud('u_baud');
+    expect(note()).toBe('Baud tick');
+  }, 60_000);
+
+  it('keeps a copy to a new drawing working when new code gives its blocks other parameters, edited or not', async () => {
+    await open({ 'uart.v': baudUart() });
+    await st().convertToDrawing();
+    await settle();
+    expect(st().sheet).toBe('d:uart_top_drawing');
+    // The notice names the modules as the Hierarchy does.
+    expect(st().notice).toBe('Instances of baud_gen still use those modules from your Verilog files.');
+    const blocks = () => st().doc.sheets['d:uart_top_drawing'].nodes.filter((n) => n.sym === 'block').map((n) => moduleTitle(n.params.module!));
+    expect(blocks()).toEqual(['baud_gen', 'baud_gen']);
+    const wires = st().netlist!.edges.length;
+    expect(wires).toBe(6);
+    /** The drawing as it is drawn and exported now. */
+    const check = async () => {
+      await st().openPath([{ instance: 'uart_top_drawing', module: 'uart_top_drawing', drawn: true }]);
+      await settle();
+      expect(st().netlist!.nodes.filter((n) => n.attrs?.missingModule)).toEqual([]);
+      expect(st().layout!.edges.length).toBe(wires);
+      expect(exportCurrent().warnings).toEqual([]);
+    };
+    // No sheet of baud_gen has edits: the blocks follow all the same.
+    await st().setFiles({ 'uart.v': baudUart(12) }, false, { newVersion: true });
+    await settle();
+    expect(blocks()).toEqual(['baud_gen #(DIV=12)', 'baud_gen #(DIV=12)']);
+    expect(st().notice).toBe('The blocks of baud_gen on uart_top_drawing now use baud_gen #(DIV=12).');
+    await check();
+    // From one copy of a parameterized module to another.
+    await st().setFiles({ 'uart.v': baudUart(14) }, false, { newVersion: true });
+    await settle();
+    expect(blocks()).toEqual(['baud_gen #(DIV=14)', 'baud_gen #(DIV=14)']);
+    await check();
+    st().undo();
+    await settle();
+    expect(blocks()).toEqual(['baud_gen #(DIV=12)', 'baud_gen #(DIV=12)']);
+    st().redo();
+    await settle();
+    expect(blocks()).toEqual(['baud_gen #(DIV=14)', 'baud_gen #(DIV=14)']);
+    await check();
+    // The instances part ways: the blocks keep their module, and the notice says where they lost their pins.
+    await st().setFiles({ 'uart.v': baudUart(10, 12) }, false, { newVersion: true });
+    await settle();
+    expect(blocks()).toEqual(['baud_gen #(DIV=14)', 'baud_gen #(DIV=14)']);
+    expect(st().notice).toBe(
+      'The blocks of baud_gen #(DIV=14) on uart_top_drawing have no pins now: the design no longer has that module. Undo brings back the old code.',
+    );
   }, 60_000);
 
   it('makes room for the wider blocks of a copy to a new drawing (H8)', async () => {

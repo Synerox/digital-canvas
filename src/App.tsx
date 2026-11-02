@@ -6,7 +6,7 @@ import { Inspector } from './app/Inspector';
 import { Menu, type MenuItem } from './app/Menu';
 import { Palette } from './app/Palette';
 import { Breadcrumb, CodePanel, Drawings, FileList, HierarchyTree, LogPanel, RulePanel, TopSelector, ViewToggle } from './app/Panels';
-import { AUTOSAVE_KEY, EXAMPLES, type ExampleName, planDrop, useStore } from './app/store';
+import { AUTOSAVE_KEY, EXAMPLES, type ExampleName, type ImportPlan, planDrop, planOpen, useStore } from './app/store';
 import { ui } from './app/ui-events';
 import { FILE_EXTENSION, FileFormatError, isDrawnKey } from './editor/doc';
 import { GRID } from './layout/elk-layout';
@@ -225,6 +225,33 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  /**
+   * Open Verilog files as a new version of the open ones (see planImport): a file of the same name keeps the
+   * edits, as in Import Verilog, and open files of other names that the files cover or share a module with
+   * change too, which the notice says.
+   */
+  const updateVerilog = async (files: Record<string, string>, plan: ImportPlan) => {
+    const st = useStore.getState();
+    const before = st.notice;
+    await st.setFiles(files, false, { newVersion: true });
+    const { replaced, trimmed } = plan;
+    if (!replaced.length && !trimmed.length) return;
+    const names = Object.keys(files).join(', ');
+    const one = Object.keys(files).length === 1;
+    const said = [
+      replaced.length
+        ? `${names} ${one ? 'replaces' : 'replace'} ${replaced.join(', ')}, which ${replaced.length === 1 ? 'declares' : 'declare'} only modules ${one ? 'it declares' : 'they declare'} too.`
+        : '',
+      trimmed.length ? `The modules ${names} ${one ? 'declares' : 'declare'} again are cut out of ${trimmed.join(', ')}.` : '',
+      'Undo brings the old files back.',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    // What the import said itself (the module shown, a drawing renamed, edits that follow new parameters) stays.
+    const now = useStore.getState().notice;
+    st.setNotice([said, now !== before ? now : undefined].filter(Boolean).join(' '));
+  };
+
   /** Dropped Verilog files (see planDrop): never a silent replacement of an open file matched only by its module names. */
   const dropVerilog = async (files: Record<string, string>) => {
     const st = useStore.getState();
@@ -233,30 +260,15 @@ export default function App() {
       setShowImport({ name: drop.name, code: drop.code });
       return;
     }
+    if (drop.kind === 'update') return updateVerilog(files, drop.plan);
     const before = st.notice;
     const names = Object.keys(files).join(', ');
-    let said: string | undefined;
-    if (drop.kind === 'add') {
-      await st.setFiles(files, false);
-      const them = drop.twice.length === 1 ? 'it' : 'them';
-      said = `Added ${names}. ${drop.twice.join(', ')} ${drop.twice.length === 1 ? 'is' : 'are'} declared in an open file too: Yosys reports ${them} declared twice until one of the files no longer declares ${them} (Import Verilog can replace ${them} instead).`;
-    } else {
-      // A new version of an open file of the same name keeps the edits, as in Import Verilog; open files of other names that it covers or shares a module with change too.
-      await st.setFiles(files, false, { newVersion: true });
-      const { replaced, trimmed } = drop.plan;
-      if (replaced.length || trimmed.length) {
-        said = [
-          replaced.length ? `${names} replaces ${replaced.join(', ')}, which ${replaced.length === 1 ? 'declares' : 'declare'} only modules it declares too.` : '',
-          trimmed.length ? `The modules ${names} declares again are cut out of ${trimmed.join(', ')}.` : '',
-          'Undo brings the old files back.',
-        ]
-          .filter(Boolean)
-          .join(' ');
-      }
-    }
+    await st.setFiles(files, false);
+    const them = drop.twice.length === 1 ? 'it' : 'them';
+    const said = `Added ${names}. ${drop.twice.join(', ')} ${drop.twice.length === 1 ? 'is' : 'are'} declared in an open file too: Yosys reports ${them} declared twice until one of the files no longer declares ${them} (Import Verilog can replace ${them} instead).`;
     // What the import said itself (the module shown, a drawing renamed) stays.
     const now = useStore.getState().notice;
-    if (said) st.setNotice([said, now !== before ? now : undefined].filter(Boolean).join(' '));
+    st.setNotice([said, now !== before ? now : undefined].filter(Boolean).join(' '));
   };
 
   const logVisible = showLog ?? status === 'error';
@@ -343,10 +355,11 @@ export default function App() {
             const files = await readFiles(e.target.files ?? []);
             e.target.value = '';
             if (Object.keys(files).length === 0) return;
-            // New versions of open files update those, and the other open files stay, as when they are dropped. Files
-            // of other names are another design, opened in place of the open files.
+            // New versions of open files update those, and the other open files stay (see planOpen). Files of other
+            // names only are another design, opened in place of the open files.
             const st = useStore.getState();
-            if (Object.keys(files).some((f) => f in st.files || f in st.putAside)) await dropVerilog(files);
+            const plan = planOpen(st.files, st.putAside, files);
+            if (plan) await updateVerilog(files, plan);
             else await s.setFiles(files, true);
           }}
         />

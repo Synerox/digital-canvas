@@ -105,17 +105,21 @@ export function Breadcrumb() {
   const mode = useStore((s) => s.viewMode);
   const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
   if (path.length === 0) return null;
+  /** As the Hierarchy names it: an automatic block by its (renamed) name alone, an instance with its module. */
+  const title = (p: PathEntry, i: number) => {
+    if (i === 0) return moduleTitle(p.module);
+    if (p.drawn) return `${p.instance} (${moduleTitle(p.module)})`;
+    const name = instanceName(view, doc, mode, path[i - 1], p.instance);
+    if (view?.modules[p.module]?.auto) return name !== p.instance ? name : view.modules[p.module].displayName;
+    return `${name} (${moduleTitle(p.module)})`;
+  };
   return (
     <nav className="breadcrumb">
       {path.map((p, i) => (
         <span key={i}>
           {i > 0 && <span className="sep">›</span>}
           <button className={i === path.length - 1 ? 'current' : ''} onClick={() => openPath(path.slice(0, i + 1))}>
-            {i === 0
-              ? moduleTitle(p.module)
-              : !p.drawn && view?.modules[p.module]?.auto
-                ? view.modules[p.module].displayName
-                : `${p.drawn ? p.instance : instanceName(view, doc, mode, path[i - 1], p.instance)} (${moduleTitle(p.module)})`}
+            {title(p, i)}
           </button>
         </span>
       ))}

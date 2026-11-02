@@ -32,15 +32,17 @@ describe('makeRoom', () => {
     expect(makeRoom(e, was, new Map([['a', size(100, 50)]]))).toBe(e);
   });
 
-  it('grows a taller symbol upwards when there is room, else downwards, moving what is below it in its column', () => {
+  it('grows a taller symbol upwards when there is room, else downwards, with a row put in at its old bottom', () => {
     const e = {
       ...emptyEdits(),
       pos: { top: { x: 0, y: -40 }, a: { x: 0, y: 0 }, b: { x: 0, y: 60 }, side: { x: 300, y: 60 }, free: { x: 300, y: -200 } },
       routes: {
-        // Between a and b: under a once it is taller.
+        // Between a and b.
         under: { points: [{ x: -50, y: 55 }, { x: 50, y: 55 }] },
-        // Beside the column: stays.
+        // Beside the column.
         beside: { points: [{ x: 200, y: 55 }, { x: 250, y: 55 }] },
+        // Right above free: under it once it is taller.
+        over: { points: [{ x: 280, y: -210 }, { x: 420, y: -210 }] },
       },
     };
     const was = new Map([
@@ -53,11 +55,69 @@ describe('makeRoom', () => {
     const out = makeRoom(e, was, new Map([['a', size(100, 70)], ['free', size(100, 70)]]));
     // free has room above it: its pins stay where they were.
     expect(out.pos.free).toEqual({ x: 300, y: -220 });
-    // top is right above a: a grows down, and b below it moves down as far; side is in another column.
+    // top is right above a: a grows down, and what is below it moves down as far, in its column or not.
     expect(out.pos.a).toEqual({ x: 0, y: 0 });
     expect(out.pos.b).toEqual({ x: 0, y: 80 });
-    expect(out.pos.side).toEqual({ x: 300, y: 60 });
-    // The wire that a covers now is routed again; the other is kept.
-    expect(Object.keys(out.routes)).toEqual(['beside']);
+    expect(out.pos.side).toEqual({ x: 300, y: 80 });
+    // The wire that free covers now is routed again. The others move down with the row: the one between a and b still
+    // runs between them.
+    expect(Object.keys(out.routes)).toEqual(['under', 'beside']);
+    expect(out.routes.under.points).toEqual([
+      { x: -50, y: 75 },
+      { x: 50, y: 75 },
+    ]);
+    expect(out.routes.beside.points).toEqual([
+      { x: 200, y: 75 },
+      { x: 250, y: 75 },
+    ]);
+  });
+
+  it('moves what is below a symbol that grows downwards clear of what is beside it, routes and all', () => {
+    // x is just under a, and y under x but left of a's column; the wire runs between them.
+    const e = {
+      ...emptyEdits(),
+      pos: { top: { x: 0, y: -40 }, a: { x: 0, y: 0 }, x: { x: -30, y: 60 }, y: { x: -60, y: 90 } },
+      routes: {
+        other: { points: [{ x: -100, y: 85 }, { x: 5, y: 85 }], label: { x: -90, y: 75, width: 10, height: 10 } },
+        up: { points: [{ x: -80, y: 85 }, { x: -80, y: 20 }] },
+      },
+    };
+    const was = new Map([
+      ['top', size(100, 30)],
+      ['a', size(100, 50)],
+      ['x', size(40, 20)],
+      ['y', size(40, 20)],
+    ]);
+    const out = makeRoom(e, was, new Map([['a', size(100, 70)]]));
+    // a cannot grow up (top is there): x and y both move down as far, so x does not land on y.
+    expect(out.pos).toEqual({ top: { x: 0, y: -40 }, a: { x: 0, y: 0 }, x: { x: -30, y: 80 }, y: { x: -60, y: 110 } });
+    // Wires keep their shapes: what is below a's old bottom moves down as far (one keeps running between x and y), and
+    // a leg that crosses it grows.
+    expect(out.routes.other.points).toEqual([
+      { x: -100, y: 105 },
+      { x: 5, y: 105 },
+    ]);
+    expect(out.routes.other.label).toEqual({ x: -90, y: 95, width: 10, height: 10 });
+    expect(out.routes.up.points).toEqual([
+      { x: -80, y: 105 },
+      { x: -80, y: 20 },
+    ]);
+  });
+
+  it('grows a symbol downwards when a pin beside the band above it has no room for its stub', () => {
+    const was = new Map([
+      ['a', size(100, 90)],
+      ['pin', size(40, 20)],
+    ]);
+    const grow = new Map([['a', size(100, 110)]]);
+    // The pin's right edge is one grid step left of a, its middle 12 above a's top: its wire would start inside a grown upwards.
+    const tight = makeRoom({ ...emptyEdits(), pos: { a: { x: 0, y: 0 }, pin: { x: -50, y: -22 } } }, was, grow);
+    expect(tight.pos).toEqual({ a: { x: 0, y: 0 }, pin: { x: -50, y: -22 } });
+    // Two grid steps away there is room for the stub: a grows upwards, its pins stay where they are.
+    const roomy = makeRoom({ ...emptyEdits(), pos: { a: { x: 0, y: 0 }, pin: { x: -60, y: -22 } } }, was, grow);
+    expect(roomy.pos).toEqual({ a: { x: 0, y: -20 }, pin: { x: -60, y: -22 } });
+    // Beside a, below the band it grows into, a pin is as close to it either way: a grows upwards.
+    const below = makeRoom({ ...emptyEdits(), pos: { a: { x: 0, y: 0 }, pin: { x: -50, y: 30 } } }, was, grow);
+    expect(below.pos).toEqual({ a: { x: 0, y: -20 }, pin: { x: -50, y: 30 } });
   });
 });
