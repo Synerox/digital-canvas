@@ -701,16 +701,22 @@ function processMuxIds(cells: IRCell[], nets: IRNet[], sources: Record<string, s
   };
 
   const place = (c: IRCell) => [statement(c), c.src[0]].flatMap((r) => (r ? [r.file, r.startLine, r.startCol] : ['', 0, 0]));
-  const places = new Map<string, number>();
+  // What each MUX at a place in the code selects on. The rounds of a for loop share their place but select
+  // on different things; the MUXes of one statement that assigns several signals select on the same thing.
+  const selects = (c: IRCell) => (c.type === '$pmux' ? subject(c) : describe(c.connections.S ?? []));
+  const places = new Map<string, Set<string>>();
   for (const i of muxes) {
     const key = `${place(cells[i])}\n${own(cells[i])}`;
-    places.set(key, (places.get(key) ?? 0) + 1);
+    const set = places.get(key) ?? new Set<string>();
+    set.add(selects(cells[i]));
+    places.set(key, set);
   }
   /**
    * `@in[3]` for a round of a for loop, which has the same place in the code as the other rounds: what it
    * selects on tells it apart, not how many rounds come before it, which changes with the bounds of the loop.
    */
-  const round = (c: IRCell) => (places.get(`${place(c)}\n${own(c)}`)! > 1 ? `@${fold(bare(describe(c.connections.S ?? [])), 24)}` : '');
+  const round = (c: IRCell) =>
+    places.get(`${place(c)}\n${own(c)}`)!.size > 1 ? `@${fold(bare(describe(c.connections.S ?? [])), 24)}` : '';
 
   const parts = new Map<number, { own: string; path: string[] }>();
   /** The branches of each MUX in full, and the MUXes of later statements its value goes through. */

@@ -417,6 +417,31 @@ endmodule
     expectNoSwap(nested, compare, 't');
   }, T);
 
+  it('keeps the IDs of a statement when it starts to assign another signal, and tells for-loop rounds apart by what they select on', async () => {
+    const reg = (body: string, extra = '') => ({
+      't.v': `module t(input clk, rst, en, input [3:0] d, input [1:0] s, output reg [3:0] y${extra});\n  always @(posedge clk) begin\n    ${body}\n  end\nendmodule\n`,
+    });
+    const [one, two, casey, casez] = await designs([
+      reg("if (rst) y <= 4'd5; else if (en) y <= d;"),
+      reg("if (rst) begin y <= 4'd5; v <= 1'b0; end else if (en) begin y <= d; v <= 1'b1; end", ', output reg v'),
+      reg("case (s) 2'd0: y <= 4'd1; 2'd1: y <= 4'd2; default: y <= 4'd3; endcase"),
+      reg("case (s) 2'd0: begin y <= 4'd1; v <= 1'b0; end 2'd1: y <= 4'd2; default: begin y <= 4'd3; v <= 1'b1; end endcase", ', output reg v'),
+    ]);
+    expect(muxWith(two, 't', "4'd5")).toBe(muxWith(one, 't', "4'd5"));
+    expect(muxWith(two, 't', "4'd5")).toBe('$mux{if rst>Y=$0\\y}');
+    expect(muxWith(casez, 't', "4'd3")).toBe(muxWith(casey, 't', "4'd3"));
+    const loop = (n: number) => ({
+      'p.v': `module p(input [7:0] in, output reg [3:0] count);\n  integer i;\n  always @* begin\n    count = 4'd0;\n    for (i = ${8 - n}; i < 8; i = i + 1) if (in[i]) count = count + 4'd1;\n  end\nendmodule\n`,
+    });
+    const [eight, seven] = await designs([loop(8), loop(7)]);
+    const rounds = (d: IRDesign) => d.modules.p.cells.filter((c) => c.name.startsWith('$procmux$')).map((c) => c.id).sort();
+    expect(rounds(eight)).toHaveLength(8);
+    expect(new Set(rounds(eight)).size).toBe(8);
+    // The loop that starts one round later keeps the IDs of the rounds it still has.
+    expect(rounds(seven).every((id) => rounds(eight).includes(id))).toBe(true);
+    expect(rounds(eight).every((id) => id.includes('@in['))).toBe(true);
+  }, T);
+
   it('keeps the IDs of long else-if chains and one-hot cases short', async () => {
     const n = 40;
     const chain = Array.from({ length: n }, (_, k) => `${k ? 'else ' : ''}if (c[${k}]) case (s) 2'd0: y <= 8'd${k}; 2'd1: y <= 8'd${k + 1}; default: y <= 8'd${k + 2}; endcase`);
