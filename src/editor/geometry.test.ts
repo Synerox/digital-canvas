@@ -40,7 +40,8 @@ describe('sheet geometry', () => {
     const dots = (l: { edges: { junctions: { x: number; y: number }[] }[] }) =>
       new Set(l.edges.flatMap((x) => x.junctions.map((j) => `${Math.round(j.x)},${Math.round(j.y)}`)));
     expect(dots(g.layout)).toEqual(dots(elk));
-  });
+    // The first test of the file also starts Yosys, which can take over 5 s on a busy machine.
+  }, 30_000);
 
   it('routes wires again when a symbol moves, around the other symbols', async () => {
     const files = { [AUCTION_FILE]: AUCTION_SOURCE };
