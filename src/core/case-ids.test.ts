@@ -297,3 +297,142 @@ endmodule
     expect(muxWith(ba, 't', "4'd3")).toBe('$pmux{case s>a1>Y=y}');
   }, T);
 });
+
+describe('IDs of statements in sequence that assign the same signal', () => {
+  const block = (clock: boolean, statements: string[]) => ({
+    't.v': `module t(input clk, en, e, b, input [1:0] op, m, a, s, output reg [3:0] y);
+  always ${clock ? '@(posedge clk)' : '@*'} begin
+${clock ? '' : "    y = 4'd0;\n"}${statements.map((x) => `    ${x.replace(/ = /g, clock ? ' <= ' : ' = ')}\n`).join('')}  end
+endmodule
+`,
+  });
+  /** The constants of the case table whose value the MUX with this ID passes on (undefined when there is none). */
+  const tableUnder = (d: IRDesign, id: string) => {
+    const cells = d.modules.t.cells;
+    const bits = cells.find((c) => c.id === id)?.connections.B ?? [];
+    const table = cells.find((c) => c.type === '$pmux' && c.connections.Y.some((b) => bits.includes(b)));
+    return table && tables(d, 't').get(table.id);
+  };
+
+  it('keeps the ID of a statement off a later one on the same selector and condition that keeps its value twice', async () => {
+    // The appended statement keeps the value of the first one in its if and in its case: the first one's IDs ended
+    // in `*` instead of the signal, and the appended table took over `$pmux{case op>en>Y=$0\y}`, the if MUX `$mux{if en>Y=$0\y}`.
+    for (const clock of [true, false]) {
+      const first = "if (en) case (op) 2'd0: y = 4'd1; 2'd1: y = 4'd2; default: y = 4'd3; endcase";
+      const [one, ...more] = await designs([
+        block(clock, [first]),
+        block(clock, [first, "if (en) case (op) 2'd2: y = 4'd7; 2'd3: y = 4'd8; endcase"]),
+        block(clock, [first, "if (en) case (op) 2'd0: y = 4'd7; 2'd1: y = 4'd8; endcase"]),
+      ]);
+      for (const after of more) {
+        expectNoSwap(one, after, 't');
+        expectNoSwap(after, one, 't');
+        for (const c of one.modules.t.cells.filter((x) => x.type === '$mux' && x.name.startsWith('$procmux$'))) {
+          const now = tableUnder(after, c.id);
+          if (now) expect(now).toBe(tableUnder(one, c.id));
+        }
+        expect(after.modules.t.cells.filter((c) => c.name.startsWith('$procmux$') && c.id.includes('*}')).map((c) => c.id)).toEqual([]);
+      }
+    }
+  }, T);
+
+  it('keeps the ID of a statement off a later one that has an if without else or a case without default in an item', async () => {
+    for (const clock of [true, false]) {
+      const first = "case (a) 2'd0: y = 4'd1; 2'd1: y = 4'd2; endcase";
+      const [one, ...more] = await designs([
+        block(clock, [first]),
+        block(clock, [first, "case (a) 2'd2: if (b) y = 4'd5; 2'd3: y = 4'd6; endcase"]),
+        block(clock, [first, "case (a) 2'd2: case (m) 2'd0: y = 4'd5; 2'd1: y = 4'd7; endcase 2'd3: y = 4'd6; endcase"]),
+      ]);
+      for (const after of more) {
+        expectNoSwap(one, after, 't');
+        expectNoSwap(after, one, 't');
+      }
+    }
+  }, T);
+
+  it('never gives the ID of a case statement to an earlier one whose value it overwrote once it is put in an if', async () => {
+    // The first case is dead while the second (with a default) overwrites it, and Yosys drops it. Once the
+    // second was put in `if (e)`, the first appeared with the ID the second had, and took over its edits.
+    for (const clock of [true, false]) {
+      const dead = "case (m) 2'd2: y = 4'd3; 2'd3: y = 4'd4; endcase";
+      const full = "case (m) 2'd0: y = 4'd8; 2'd1: y = 4'd10; default: y = 4'd11; endcase";
+      const [plain, wrapped] = await designs([block(clock, [dead, full]), block(clock, [dead, `if (e) ${full}`])]);
+      expectNoSwap(plain, wrapped, 't');
+      expectNoSwap(wrapped, plain, 't');
+      expect(muxWith(wrapped, 't', "4'd3")).not.toBe(muxWith(plain, 't', "4'd8"));
+    }
+  }, T);
+
+  it('keeps the IDs of case statements on the same selector with the same labels when a value changes', async () => {
+    // They were told apart by their values: changing 4'd6 renamed that table and every later one.
+    for (const clock of [true, false]) {
+      const edits = await designs([
+        block(clock, ["case (a) 2'd0: y = 4'd1; 2'd1: y = 4'd2; endcase", "case (a) 2'd0: y = 4'd5; 2'd1: y = 4'd6; endcase"]),
+        block(clock, ["case (a) 2'd0: y = 4'd1; 2'd1: y = 4'd2; endcase", "case (a) 2'd0: y = 4'd5; 2'd1: y = 4'd7; endcase"]),
+        block(clock, ["case (a) 2'd0: y = 4'd9; 2'd1: y = 4'd2; endcase", "case (a) 2'd0: y = 4'd5; 2'd1: y = 4'd6; endcase"]),
+      ]);
+      const ids = (d: IRDesign) => d.modules.t.cells.map((c) => c.id).sort();
+      for (const d of edits) {
+        expect(ids(d)).toEqual(ids(edits[0]));
+        expect(numbered(d, 't')).toEqual([]);
+      }
+      const second = muxWith(edits[0], 't', "4'd5");
+      expect(muxWith(edits[1], 't', "4'd5")).toBe(second);
+      expect(consts(edits[0], 't').get(`const:cell:${second}.B[2'd1]`)).toBe("4'd6");
+      expect(consts(edits[1], 't').get(`const:cell:${second}.B[2'd1]`)).toBe("4'd7");
+      expect(muxWith(edits[2], 't', "4'd9")).toBe(muxWith(edits[0], 't', "4'd1"));
+    }
+  }, T);
+
+  it('renames case statements alike but for their values when one is added or removed, instead of moving their IDs', async () => {
+    const twin = (v: number) => `case (a) 2'd0: y = 4'd${v}; 2'd1: y = 4'd${v + 1}; endcase`;
+    const other = "case (a) 2'd0: case (s) 2'd0: y = 4'd13; 2'd1: y = 4'd14; endcase 2'd1: y = 4'd15; endcase";
+    for (const clock of [true, false]) {
+      const [two, three, more] = await designs([
+        block(clock, [twin(1), other, twin(5)]),
+        block(clock, [twin(9), twin(1), other, twin(5)]),
+        block(clock, [twin(1), other, twin(5), twin(3)]),
+      ]);
+      for (const [a, b] of [
+        [two, three],
+        [two, more],
+      ]) {
+        expectNoSwap(a, b, 't');
+        expectNoSwap(b, a, 't');
+        expect(numbered(b, 't')).toEqual([]);
+        // The statement of another shape keeps its ID.
+        expect(muxWith(b, 't', "4'd15")).toBe(muxWith(a, 't', "4'd15"));
+      }
+    }
+  }, T);
+
+  it('does not read a condition with > in it as two nested ifs', async () => {
+    const [nested, compare] = await designs([
+      block(false, ["if (b) begin if (a) case (s) 2'd0: y = 4'd1; 2'd1: y = 4'd2; default: y = 4'd3; endcase end"]),
+      block(false, ["if (a>b) case (s) 2'd0: y = 4'd5; 2'd1: y = 4'd6; default: y = 4'd7; endcase"]),
+    ]);
+    expect(muxWith(compare, 't', "4'd7")).toBe('$pmux{case s>a\\>b>Y=y}');
+    expect(muxWith(nested, 't', "4'd3")).toBe('$pmux{case s>a>b>Y=y}');
+    expectNoSwap(nested, compare, 't');
+  }, T);
+
+  it('keeps the IDs of long else-if chains and one-hot cases short', async () => {
+    const n = 40;
+    const chain = Array.from({ length: n }, (_, k) => `${k ? 'else ' : ''}if (c[${k}]) case (s) 2'd0: y <= 8'd${k}; 2'd1: y <= 8'd${k + 1}; default: y <= 8'd${k + 2}; endcase`);
+    const items = Array.from({ length: n }, (_, k) => `st[${k}]: case (s) 2'd0: y = 8'd${k}; 2'd1: y = 8'd${k + 1}; default: y = 8'd${k + 2}; endcase`);
+    const [ifs, onehot] = await designs([
+      { 'c.v': `module c(input clk, input [${n - 1}:0] c, input [1:0] s, output reg [7:0] y);\n  always @(posedge clk)\n    ${chain.join('\n    ')}\nendmodule\n` },
+      { 'o.v': `module o(input [${n - 1}:0] st, input [1:0] s, output reg [7:0] y);\n  always @* begin\n    y = 8'd0;\n    case (1'b1)\n      ${items.join('\n      ')}\n    endcase\n  end\nendmodule\n` },
+    ]);
+    for (const [d, module] of [
+      [ifs, 'c'],
+      [onehot, 'o'],
+    ] as const) {
+      const ids = d.modules[module].cells.filter((c) => c.name.startsWith('$procmux$') && c.type.endsWith('mux')).map((c) => c.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(Math.max(...ids.map((x) => x.length))).toBeLessThanOrEqual(160);
+      expect(numbered(d, module)).toEqual([]);
+    }
+  }, T);
+});
