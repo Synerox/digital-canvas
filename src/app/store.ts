@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { type DNode, type DPort, type Diagram, type Side, buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES, RULES, type RuleId } from '../core/rules';
 import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy, displayModuleName } from '../core/ir';
+import { moduleTitle } from '../core/names';
 import { parseYosysJson } from '../core/yosys-json';
 import { flatCellCount, withFlattened } from '../core/flatten';
 import { withAutoBlocks } from '../core/partition';
@@ -387,31 +388,8 @@ function uniqueModuleName(want: string, taken: Set<string>): string {
   for (let i = 2; ; i++) if (!taken.has(`${base}_${i}`)) return `${base}_${i}`;
 }
 
-/**
- * A module name as the user wrote it. Yosys names its copy of a parameterized
- * module `$paramod\ripple\N=s32'00…01000`; that reads `ripple #(N=8)`. Long
- * parameter lists are hashed (`$paramod$3f…\ripple`): `ripple #(…)`.
- */
-export function moduleTitle(name: string): string {
-  const m = /^\$paramod(\$[0-9a-f]+)?\\([^\\]+)((?:\\.*)?)$/.exec(name);
-  if (!m) return name;
-  if (m[1] || !m[3]) return `${m[2]} #(…)`;
-  const value = (v: string) => {
-    const c = /^(s?)(\d+)'([01]+)$/.exec(v);
-    if (!c) return v;
-    let n = BigInt(`0b${c[3]}`);
-    if (c[1] && c[3].length > 0 && c[3][0] === '1') n -= 1n << BigInt(c[3].length);
-    return String(n);
-  };
-  const params = m[3]
-    .slice(1)
-    .split('\\')
-    .map((p) => {
-      const i = p.indexOf('=');
-      return i < 0 ? p : `${p.slice(0, i)}=${value(p.slice(i + 1))}`;
-    });
-  return `${m[2]} #(${params.join(', ')})`;
-}
+// The panels name modules as the user wrote them; so do the sheet checks (editor/check), which share it.
+export { moduleTitle };
 
 /** The view a Verilog sheet key belongs to (undefined for a drawing or no sheet). */
 export function viewModeOf(key: string): ViewMode | undefined {
@@ -628,30 +606,44 @@ export interface ParamodFollow {
   doc: EditDoc;
   /** Modules whose edits now belong to the module that took their place. */
   moved: { from: string; to: string }[];
-  /** Modules that blocks name (a copy's, say), whose blocks now name the module that took their place; `on`: their sheets. */
+  /**
+   * Modules that blocks name on drawings made by Copy to new drawing of a module with their instances, whose blocks
+   * there now name the module that took their place; `on`: those sheets.
+   */
   blocks: { from: string; to: string; on: string[] }[];
   /**
    * Modules with edits that the design no longer has, and that nothing took the place of: a parameterized
    * module, or a module used with its default parameters whose instances all give it parameters now.
    */
   lost: string[];
-  /** Modules that blocks name, which the design no longer has, and that nothing took the place of; `on`: their sheets. */
-  stranded: { module: string; on: string[] }[];
+  /**
+   * Modules that blocks name, which the design no longer has, and whose blocks lost their pins: nothing took the place
+   * of the module, or their sheets are no copies of a module with its instances; `on`: their sheets. `parameters`: its
+   * instances are there, with other parameters.
+   */
+  stranded: { module: string; on: string[]; parameters: boolean }[];
 }
 
 /** Whether a module is `module` or one of its automatic blocks (`<module>/<block>`). */
 const isOrIn = (name: string, module: string) => name === module || name.startsWith(`${module}/`);
 
+/** The module an instance on a sheet names: a block's, or that of an instance copied as it was drawn (`raw`). */
+const instanceModule = (u: UserNode) => (u.sym === 'block' ? u.params.module : u.sym === 'raw' && u.raw?.kind === 'instance' ? u.raw.moduleName : undefined);
+
 /**
  * Yosys names its copy of a parameterized module after the parameters
  * (`$paramod\baud_gen\DIV=…`; with the default parameters it keeps the
  * module's name), and the edits of its sheets are keyed by that name, as are
- * the blocks a copy to a new drawing makes of its instances. When new code
- * gives the instances other parameters (or gives them some, or takes them
- * away), the edits follow the module to its new name: to the module that is
- * now at the instances of the old one, if that is the same Verilog module, new
- * in the design and has no edits of its own. Blocks follow it whether it had
- * edits or not. The others are `lost` and `stranded` (they stay in the
+ * the copies Copy to new drawing makes of its instances (blocks, or instances
+ * kept as they were drawn). When new code gives the instances other parameters
+ * (or gives them some, or takes them away), the edits follow the module to its
+ * new name: to the module that is now at the instances of the old one, if that
+ * is the same Verilog module, new in the design and has no edits of its own.
+ * On a copy of a module with those instances, its blocks of the old module
+ * follow them whether the module had edits or not. Another drawing's blocks
+ * are no copies: they use the module as the Library offers it, and the new
+ * parameters of an instance elsewhere are not theirs, so they keep their
+ * module. The others are `lost` and `stranded` (they stay in the
  * document: code with the old parameters shows them again). Nothing moves or
  * is lost when the design has another top. Returns `doc` itself when nothing
  * moves.
@@ -660,9 +652,14 @@ export function followParamods(doc: EditDoc, before: IRDesign, after: IRDesign):
   // Under another top, the modules of the old one are only out of sight (Top brings them back).
   if (before.top !== after.top) return { doc, moved: [], blocks: [], lost: [], stranded: [] };
   const edited = (m: string) => Object.keys(doc.sheets).some((k) => ofModules(k, [m]) && !isEmptyEdits(doc.sheets[k]));
-  const names = (n: UserNode, m: string) => n.sym === 'block' && !!n.params.module && isOrIn(n.params.module, m);
-  /** The sheets with blocks of a module (or of its automatic blocks). */
-  const users = (m: string) => [...new Set(Object.entries(doc.sheets).flatMap(([k, e]) => (e.nodes.some((n) => names(n, m)) ? [k.replace(/^d:|^v:[a-z]+:/, '')] : [])))];
+  const names = (n: UserNode, m: string) => {
+    const x = instanceModule(n);
+    return !!x && isOrIn(x, m);
+  };
+  /** The sheets with instances of a module (or of its automatic blocks), of those that `pick` takes. */
+  const users = (m: string, pick: (n: UserNode, e: SheetEdits) => boolean = () => true) => [
+    ...new Set(Object.entries(doc.sheets).flatMap(([k, e]) => (e.nodes.some((n) => names(n, m) && pick(n, e)) ? [k.replace(/^d:|^v:[a-z]+:/, '')] : []))),
+  ];
   const was = modulesByPath(before);
   const now = modulesByPath(after);
   const gone = Object.keys(before.modules).filter((m) => !after.modules[m] && (edited(m) || users(m).length > 0));
@@ -695,8 +692,26 @@ export function followParamods(doc: EditDoc, before: IRDesign, after: IRDesign):
   const moved = [...target].flatMap(([from, to]) => (to && claims(to) === 1 ? [{ from, to }] : []));
   // A module used with its defaults is gone too when its instances are deleted: that is no change of parameters.
   const lost = [...target.keys()].filter((g) => !moved.some((m) => m.from === g) && (g.startsWith('$paramod') || same.get(g)!.size > 0));
-  const blocks = gone.flatMap((g) => (successor.has(g) && users(g).length ? [{ from: g, to: successor.get(g)!, on: users(g) }] : []));
-  const stranded = gone.flatMap((g) => (!successor.has(g) && users(g).length ? [{ module: g, on: users(g) }] : []));
+  // Copy to new drawing keeps the IDs of the instances it copies (`cell:u_baud`): a sheet with a copy of an instance of
+  // the old module is a copy of a module with that instance, and its blocks of the old module follow the instances.
+  const instances = new Map(
+    gone.map((g) => [g, new Set(Object.values(before.modules).flatMap((m) => m.cells.filter((c) => c.isInstance && c.type === g).map((c) => `cell:${c.id}`)))]),
+  );
+  const copied = (e: SheetEdits, g: string) => e.nodes.some((n) => instanceModule(n) === g && instances.get(g)!.has(n.id));
+  /** The old module whose instances a symbol on sheet `e` follows (it names that module or one of its automatic blocks). */
+  const followed = (n: UserNode, e: SheetEdits) => {
+    const m = instanceModule(n);
+    return m === undefined ? undefined : [...successor.keys()].find((g) => isOrIn(m, g) && copied(e, g));
+  };
+  const blocks = gone.flatMap((g) => {
+    const on = users(g, (n, e) => followed(n, e) === g);
+    return on.length ? [{ from: g, to: successor.get(g)!, on }] : [];
+  });
+  // An instance copied as it was drawn keeps its pins.
+  const stranded = gone.flatMap((g) => {
+    const on = users(g, (n, e) => n.sym === 'block' && followed(n, e) === undefined);
+    return on.length ? [{ module: g, on, parameters: same.get(g)!.size > 0 }] : [];
+  });
   if (moved.length === 0 && blocks.length === 0) return { doc, moved, blocks, lost, stranded };
   /** A module's new name (its automatic blocks go along). */
   const renamed = (rename: ReadonlyMap<string, string>, m: string) => {
@@ -708,11 +723,19 @@ export function followParamods(doc: EditDoc, before: IRDesign, after: IRDesign):
     const m = /^(v:[a-z]+:)(.*)$/.exec(k);
     return m ? m[1] + renamed(keys, m[2]) : k;
   };
-  const modules = new Map(blocks.map((b) => [b.from, b.to]));
   const follow = (e: SheetEdits): SheetEdits => {
-    const nodes = e.nodes.map((n) => {
-      const to = n.sym === 'block' && n.params.module ? renamed(modules, n.params.module) : undefined;
-      return to && to !== n.params.module ? { ...n, params: { ...n.params, module: to } } : n;
+    const nodes = e.nodes.map((n): UserNode => {
+      const g = followed(n, e);
+      if (g === undefined) return n;
+      const to = renamed(new Map([[g, successor.get(g)!]]), instanceModule(n)!);
+      if (n.sym === 'block') return { ...n, params: { ...n.params, module: to } };
+      // Its pins take the widths the new parameters give them, as a block's do.
+      const width = new Map((after.modules[to]?.ports ?? []).map((p) => [p.name, p.bits.length]));
+      const ports = n.raw!.ports.map((p) => {
+        const w = width.get(p.name);
+        return w === undefined || w === p.width ? p : { ...p, width: w };
+      });
+      return { ...n, raw: { ...n.raw!, cellType: to, moduleName: to, ports } };
     });
     return nodes.some((n, i) => n !== e.nodes[i]) ? { ...e, nodes } : e;
   };
@@ -1331,7 +1354,16 @@ export const useStore = create<State>((set, get) => {
       defaults.length
         ? `Your edits on ${titles(defaults)} no longer show: no instance uses ${them(defaults)} with ${defaults.length === 1 ? 'its' : 'their'} default parameters now.`
         : undefined,
-      ...f.stranded.map((b) => `The blocks of ${moduleTitle(b.module)} on ${titles(b.on)} have no pins now: the design no longer has that module.`),
+      ...f.stranded.map(
+        (b) =>
+          `The blocks of ${moduleTitle(b.module)} on ${titles(b.on)} have no pins now: ${
+            !b.parameters
+              ? 'the design no longer has that module'
+              : b.module.startsWith('$paramod')
+                ? 'no instance uses it with those parameters now'
+                : 'no instance uses it with its default parameters now'
+          }.`,
+      ),
       f.lost.length ? 'Undo brings back the old code with them.' : f.stranded.length ? 'Undo brings back the old code.' : undefined,
     ];
     set({ doc: f.doc, notice: said.filter(Boolean).join(' ') });
@@ -1961,9 +1993,8 @@ export const useStore = create<State>((set, get) => {
       // Automatic blocks are cut out of the Verilog by this app, so another design (or a changed file)
       // takes them away. The copy gets a drawing of its own for each one it uses, and for those they use,
       // so it keeps working without them. Instances of Verilog modules still name those modules.
-      const moduleOf = (u: UserNode) => (u.sym === 'block' ? u.params.module : u.sym === 'raw' && u.raw?.kind === 'instance' ? u.raw.moduleName : undefined);
       const autoOf = (u: UserNode) => {
-        const m = moduleOf(u);
+        const m = instanceModule(u);
         return m && blockDesign?.modules[m]?.auto ? m : undefined;
       };
       const subs = new Map<string, SheetEdits>();
@@ -2064,12 +2095,12 @@ export const useStore = create<State>((set, get) => {
       const linked = new Set<string>();
       for (const d of [main, ...subs.values()]) {
         for (const u of d.nodes) {
-          const m = moduleOf(u);
+          const m = instanceModule(u);
           if (m && !autoOf(u) && !drawings.has(m)) linked.add(m);
         }
       }
       const said = [
-        names.size ? `Copied ${module} to ${name}, with its blocks as drawings of their own: ${[...names.values()].join(', ')}.` : '',
+        names.size ? `Copied ${moduleTitle(module)} to ${name}, with its blocks as drawings of their own: ${[...names.values()].join(', ')}.` : '',
         linked.size ? `Instances of ${[...linked].map(moduleTitle).join(', ')} still use those modules from your Verilog files.` : '',
       ].filter(Boolean);
       pushDoc(doc, said.length ? { notice: said.join(' ') } : {});

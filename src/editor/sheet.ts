@@ -749,8 +749,9 @@ export interface Size {
  * on the symbol's right edge move with that edge. A taller symbol (a longer
  * header) grows upwards, so its pins stay where its wires end, when nothing is
  * there, nor close beside it; otherwise downwards, with a row as high as its
- * growth put in at its old bottom the same way. Stored routes that run through
- * a grown symbol are dropped, to be routed again.
+ * growth put in at its old bottom the same way, or higher up where something
+ * close beside it starts, which then stays beside its pins. Stored routes that
+ * run through a grown symbol are dropped, to be routed again.
  */
 export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: ReadonlyMap<string, Size>): SheetEdits {
   const grown = [...now].filter(([id, s]) => e.pos[id] && was.has(id) && (s.width > was.get(id)!.width || s.height > was.get(id)!.height));
@@ -787,9 +788,17 @@ export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: Rea
       continue;
     }
     // Downwards (its wires are routed again): everything below its old bottom moves down as far, not only what is in
-    // its column, which could land on what is beside it.
-    const bottom = pos[id].y + was.get(id)!.height;
-    const my = <T extends Point>(p: T): T => (p.y >= bottom - 0.5 ? { ...p, y: p.y + dh } : p);
+    // its column, which could land on what is beside it. Its pins move down too: what starts beside it, too close for
+    // their stubs, moves down with them, and so does everything below that.
+    const top = pos[id].y;
+    const left = pos[id].x;
+    const right = left + s.width;
+    const bottom = top + was.get(id)!.height;
+    const cut = Object.keys(pos).reduce((y, k) => {
+      const q = rect(k);
+      return k !== id && q.y > top && q.y < y && q.x < right + side && left < q.x + q.width + side ? q.y : y;
+    }, bottom);
+    const my = <T extends Point>(p: T): T => (p.y >= cut - 0.5 ? { ...p, y: p.y + dh } : p);
     for (const k of Object.keys(pos)) if (k !== id) pos[k] = my(pos[k]);
     for (const [k, r] of Object.entries(routes)) routes[k] = { ...r, points: r.points.map(my), ...(r.label ? { label: my(r.label) } : {}) };
   }

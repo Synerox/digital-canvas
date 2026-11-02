@@ -104,6 +104,38 @@ describe('makeRoom', () => {
     ]);
   });
 
+  it('moves what starts close beside a symbol that grows downwards down with its pins', () => {
+    // logic is right above a, so a grows downwards and its pins move down 20. tens starts 8 right of a, below a's
+    // output pin (y 40): moved down that far, the pin would face it and its wire would run through tens.
+    const e = (tensX: number) => ({
+      ...emptyEdits(),
+      pos: { logic: { x: 0, y: -60 }, a: { x: 0, y: 0 }, tens: { x: tensX, y: 50 }, far: { x: 400, y: 40 }, below: { x: 0, y: 120 } },
+      routes: { out: { points: [{ x: tensX + 40, y: 80 }, { x: 300, y: 80 }] } },
+    });
+    const was = new Map([
+      ['logic', size(100, 50)],
+      ['a', size(100, 90)],
+      ['tens', size(40, 60)],
+      ['far', size(40, 60)],
+      ['below', size(100, 20)],
+    ]);
+    const grow = new Map([['a', size(100, 110)]]);
+    const close = makeRoom(e(108), was, grow);
+    // tens moves down with a's pins, and so does everything below its top; what is further away stays.
+    expect(close.pos).toEqual({ logic: { x: 0, y: -60 }, a: { x: 0, y: 0 }, tens: { x: 108, y: 70 }, far: { x: 400, y: 40 }, below: { x: 0, y: 140 } });
+    expect(close.routes.out.points).toEqual([
+      { x: 148, y: 100 },
+      { x: 300, y: 100 },
+    ]);
+    // Two grid steps away there is room for the stubs: only what is below a's old bottom moves.
+    const roomy = makeRoom(e(120), was, grow);
+    expect(roomy.pos).toEqual({ logic: { x: 0, y: -60 }, a: { x: 0, y: 0 }, tens: { x: 120, y: 50 }, far: { x: 400, y: 40 }, below: { x: 0, y: 140 } });
+    expect(roomy.routes.out.points).toEqual([
+      { x: 160, y: 80 },
+      { x: 300, y: 80 },
+    ]);
+  });
+
   it('grows a symbol downwards when a pin beside the band above it has no room for its stub', () => {
     const was = new Map([
       ['a', size(100, 90)],

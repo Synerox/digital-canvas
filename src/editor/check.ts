@@ -4,6 +4,7 @@
  * wires, pins left unconnected, and pins the Verilog has to rename.
  */
 import type { DEdge, Diagram } from '../core/diagram';
+import { moduleTitle } from '../core/names';
 import { ARITHMETIC } from '../core/rules';
 import { verilogIdent } from './verilog-export';
 
@@ -133,7 +134,7 @@ export function checkSheet(d: Diagram): SheetIssues {
   messages.push(...clashes.slice(0, 3));
   if (clashes.length > 3) messages.push(`${clashes.length - 3} more repeated pin names.`);
   const missing = d.nodes.filter((n) => n.attrs?.missingModule);
-  for (const n of missing.slice(0, 3)) messages.push(`Block ${n.subLabel ?? n.id} uses ${n.moduleName}, which no longer exists.`);
+  for (const n of missing.slice(0, 3)) messages.push(`Block ${n.subLabel ?? n.id} uses ${moduleTitle(n.moduleName ?? '')}, which no longer exists.`);
   if (missing.length > 3) messages.push(`${missing.length - 3} more blocks of missing modules.`);
   return { flagged, reasons, messages, openPorts };
 }

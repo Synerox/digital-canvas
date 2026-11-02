@@ -1212,8 +1212,103 @@ endmodule
     await settle();
     expect(blocks()).toEqual(['baud_gen #(DIV=14)', 'baud_gen #(DIV=14)']);
     expect(st().notice).toBe(
-      'The blocks of baud_gen #(DIV=14) on uart_top_drawing have no pins now: the design no longer has that module. Undo brings back the old code.',
+      'The blocks of baud_gen #(DIV=14) on uart_top_drawing have no pins now: no instance uses it with those parameters now. Undo brings back the old code.',
     );
+  }, 60_000);
+
+  it('keeps a copied instance that kept its drawing (a frozen copy) working when new code gives it other parameters', async () => {
+    // `half` and `wrap` are left off, so the copy keeps both instances as they are drawn, not as blocks.
+    const code = (div: string, w: string) => `module baud_gen #(parameter DIV = 10) (input wire clk, input wire en, output wire tick, output wire half);
+  reg [3:0] cnt;
+  always @(posedge clk) cnt <= (cnt == DIV - 1) ? 4'd0 : cnt + 4'd1;
+  assign tick = en && (cnt == DIV - 1);
+  assign half = cnt[3];
+endmodule
+module counter #(parameter W = 4) (input wire clk, output reg [W-1:0] q, output wire wrap);
+  always @(posedge clk) q <= q + 1'b1;
+  assign wrap = &q;
+endmodule
+module uart_top (input wire clk, input wire en, output wire tick, output wire [7:0] q);
+  baud_gen ${div}u_baud (.clk(clk), .en(en), .tick(tick));
+  counter ${w}u_cnt (.clk(clk), .q(q));
+endmodule
+`;
+    await open({ 'uart.v': code('#(.DIV(10)) ', '#(.W(8)) ') });
+    await st().convertToDrawing();
+    await settle();
+    const copies = () => st().doc.sheets['d:uart_top_drawing'].nodes.filter((n) => n.raw?.kind === 'instance');
+    const modules = () => copies().map((n) => moduleTitle(n.raw!.moduleName!));
+    const qWidth = () => copies().find((n) => n.raw!.moduleName!.includes('counter'))!.raw!.ports.find((p) => p.name === 'q')!.width;
+    expect(copies().map((n) => n.sym)).toEqual(['raw', 'raw']);
+    expect(modules()).toEqual(['baud_gen #(DIV=10)', 'counter #(W=8)']);
+    /** The drawing as it is exported now. */
+    const exported = async () => {
+      await st().openPath([{ instance: 'uart_top_drawing', module: 'uart_top_drawing', drawn: true }]);
+      await settle();
+      return exportCurrent();
+    };
+    expect((await exported()).warnings).toEqual([]);
+    await st().setFiles({ 'uart.v': code('#(.DIV(12)) ', '#(.W(6)) ') }, false, { newVersion: true });
+    await settle();
+    expect(modules()).toEqual(['baud_gen #(DIV=12)', 'counter #(W=6)']);
+    // Its pins take the widths of the new parameters, as a block's do: the export says the 8-bit output gets 6 bits.
+    expect(qWidth()).toBe(6);
+    expect(st().notice).toBe(
+      'The blocks of baud_gen #(DIV=10) on uart_top_drawing now use baud_gen #(DIV=12). The blocks of counter #(W=8) on uart_top_drawing now use counter #(W=6).',
+    );
+    const out = await exported();
+    expect(out.code).toMatch(/^\s*paramod_baud_gen_DIV_s32_0+1100 u_baud \(/m);
+    expect(out.warnings).toEqual([expect.stringMatching(/^Width mismatch: output 'q' is 8 bits but its wire from instance u_cnt .* carries 6 bits/)]);
+    st().undo();
+    await settle();
+    expect(modules()).toEqual(['baud_gen #(DIV=10)', 'counter #(W=8)']);
+    expect(qWidth()).toBe(8);
+    // To the defaults, which the files define themselves.
+    await st().setFiles({ 'uart.v': code('', '') }, false, { newVersion: true });
+    await settle();
+    expect(modules()).toEqual(['baud_gen', 'counter']);
+    expect(qWidth()).toBe(4);
+    const plain = await exported();
+    expect(plain.code).toMatch(/^\s*baud_gen u_baud \(/m);
+    expect(plain.code).toMatch(/^\s*counter u_cnt \(/m);
+    expect(plain.warnings).toEqual([expect.stringMatching(/^Width mismatch: output 'q' is 8 bits but its wire from instance u_cnt \(counter\) carries 4 bits/)]);
+  }, 60_000);
+
+  it("keeps a block placed by hand on its module when an instance elsewhere gets other parameters", async () => {
+    await open({ 'uart.v': baudUart() });
+    await st().convertToDrawing();
+    await settle();
+    // On the copy, a block placed by hand goes along with the copied ones.
+    st().startPlacing({ sym: 'block', params: { module: 'baud_gen' } });
+    st().placeAt({ x: 0, y: 400 });
+    await settle();
+    st().newDrawing('mine');
+    await settle();
+    st().startPlacing({ sym: 'block', params: { module: 'baud_gen' } });
+    st().placeAt({ x: 0, y: 0 });
+    await settle();
+    const before = exportCurrent();
+    expect(before.code).toMatch(/^\s*baud_gen u1 \(/m);
+    const blocks = (sheet: string) => st().doc.sheets[`d:${sheet}`].nodes.filter((n) => n.sym === 'block').map((n) => moduleTitle(n.params.module!));
+    await st().setFiles({ 'uart.v': baudUart(12) }, false, { newVersion: true });
+    await settle();
+    expect(blocks('uart_top_drawing')).toEqual(['baud_gen #(DIV=12)', 'baud_gen #(DIV=12)', 'baud_gen #(DIV=12)']);
+    // The drawing of one's own is no copy of uart_top: its block keeps baud_gen, which no instance elaborates now, and says so.
+    expect(blocks('mine')).toEqual(['baud_gen']);
+    expect(st().notice).toBe(
+      'The blocks of baud_gen on uart_top_drawing now use baud_gen #(DIV=12). ' +
+        'The blocks of baud_gen on mine have no pins now: no instance uses it with its default parameters now. Undo brings back the old code.',
+    );
+    await st().openPath([{ instance: 'mine', module: 'mine', drawn: true }]);
+    await settle();
+    expect(st().issues.messages).toContain('Block u1 uses baud_gen, which no longer exists.');
+    // Code that uses the defaults again gives it back its pins and wires.
+    await st().setFiles({ 'uart.v': baudUart() }, false, { newVersion: true });
+    await settle();
+    expect(blocks('uart_top_drawing')).toEqual(['baud_gen', 'baud_gen', 'baud_gen']);
+    await st().openPath([{ instance: 'mine', module: 'mine', drawn: true }]);
+    await settle();
+    expect(exportCurrent()).toEqual(before);
   }, 60_000);
 
   it('makes room for the wider blocks of a copy to a new drawing (H8)', async () => {
