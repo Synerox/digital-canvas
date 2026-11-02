@@ -1,0 +1,728 @@
+/**
+ * Sheet geometry: the drawable layout (the same LayoutResult the renderer and
+ * the exporters use) from a netlist, symbol positions and stored wire routes.
+ *
+ * Stored routes are used as long as both of their ends still meet their
+ * ports and no symbol has been put on them since; hand-shaped routes are
+ * stretched when a symbol moves (and routed afresh when that runs them into a
+ * symbol); every other wire is routed again with the orthogonal router.
+ * Junction dots are found from the drawn wires, so they are right whoever
+ * routed them. Wire labels go where they are clear of symbols, wires and
+ * each other, and nearer their own wire than another net's, where they can.
+ * New wires keep off the slice names by split and join bars.
+ */
+import type { DEdge, DNode, Diagram, Side } from '../core/diagram';
+import { FONT, type LEdge, type LNode, type LPort, type LayoutResult, type MeasureText, type Point, approxMeasure, sizeNode } from '../layout/elk-layout';
+import type { Box, RouteRec } from './doc';
+import { type Rect, type RouteEnd, adjustRoute, netJunctions, polylineCrowdsRect, portStub, routeWire, simpleRoute, wiresMeet } from './router';
+
+export interface GeometryInput {
+  netlist: Diagram;
+  /** Top-left corner of every symbol. Symbols without one are placed at the origin. */
+  pos: Record<string, Point>;
+  routes: Record<string, RouteRec>;
+  measure: MeasureText;
+  /** While dragging: wires that need a new route get a quick one instead of a search. */
+  fast?: boolean;
+  /**
+   * Symbols that just moved: automatic wires now running into them are routed again. Symbols that differ
+   * from `previous` (moved, grown, placed, pasted) count as moved too.
+   */
+  moved?: ReadonlySet<string>;
+  /**
+   * The previous geometry of the same sheet: unchanged symbols keep their objects (fewer re-renders), and
+   * stored wires are checked against what changed since.
+   */
+  previous?: LayoutResult;
+}
+
+export interface Geometry {
+  layout: LayoutResult;
+  /** Routes found now, to be stored so they are not searched again. */
+  routed: Record<string, RouteRec>;
+}
+
+const near = (a: Point | undefined, b: Point | undefined) => !!a && !!b && Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5;
+
+const nodeKeys = new WeakMap<LNode, string>();
+
+function nodeKey(n: DNode, x: number, y: number): string {
+  return JSON.stringify([x, y, n.kind, n.label, n.subLabel, n.cellType, n.attrs, n.rule, n.ports.map((p) => [p.id, p.side, p.width, p.dir])]);
+}
+
+/** For a layout drawn while dragging (fast): the layout drawn before the drag began. */
+const beforeDrag = new WeakMap<LayoutResult, LayoutResult>();
+
+const samePoints = (a: Point[], b: Point[]) => a === b || (a.length === b.length && a.every((p, i) => near(p, b[i])));
+
+/** A symbol, its pins, and a box around both and the pins' stubs (with room to spare: the exact tests come after). */
+interface Keep {
+  id: string;
+  rect: Rect;
+  ports: string[];
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+const keepOut = (n: LNode): Keep => ({
+  id: n.id,
+  rect: { x: n.x, y: n.y, width: n.width, height: n.height },
+  ports: n.ports.map((p) => p.id),
+  x0: n.x - 20,
+  y0: n.y - 20,
+  x1: n.x + n.width + 20,
+  y1: n.y + n.height + 20,
+});
+
+type Bounds = ReturnType<typeof boundsOf>;
+const apart = (a: Bounds, b: Bounds) => a.x1 < b.x0 || a.x0 > b.x1 || a.y1 < b.y0 || a.y0 > b.y1;
+
+function boundsOf(points: Point[]): { x0: number; y0: number; x1: number; y1: number } {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const p of points) {
+    x0 = Math.min(x0, p.x);
+    y0 = Math.min(y0, p.y);
+    x1 = Math.max(x1, p.x);
+    y1 = Math.max(y1, p.y);
+  }
+  return { x0, y0, x1, y1 };
+}
+
+/** Unit step of an axis-parallel move from a to b (both components set for a slanted one). */
+const heading = (a: Point, b: Point): [number, number] => [Math.abs(b.x - a.x) < 0.5 ? 0 : Math.sign(b.x - a.x), Math.abs(b.y - a.y) < 0.5 ? 0 : Math.sign(b.y - a.y)];
+
+/**
+ * How far wires w and o, which start at the same point, run together before they part, and whether w is
+ * the one that turns off there (or ends). A wire routed as a branch of o runs along o up to its branch
+ * point; when both turn where they part, either may be the branch.
+ */
+export function runTogether(w: Point[], o: Point[]): { len: number; turnsOff: boolean } {
+  if (w.length < 2 || o.length < 2 || !near(w[0], o[0])) return { len: 0, turnsOff: false };
+  let at: Point = w[0];
+  let i = 1;
+  let j = 1;
+  let len = 0;
+  let dir: [number, number] = [0, 0];
+  for (;;) {
+    while (i < w.length && near(w[i], at)) i++;
+    while (j < o.length && near(o[j], at)) j++;
+    if (i >= w.length || j >= o.length) return { len, turnsOff: i >= w.length };
+    const wd = heading(at, w[i]);
+    const od = heading(at, o[j]);
+    if (wd[0] !== od[0] || wd[1] !== od[1]) return { len, turnsOff: wd[0] !== dir[0] || wd[1] !== dir[1] };
+    // Slanted pieces do not come from the router: stop comparing.
+    if (wd[0] && wd[1]) return { len, turnsOff: true };
+    const step = Math.min(Math.abs(w[i].x - at.x) + Math.abs(w[i].y - at.y), Math.abs(o[j].x - at.x) + Math.abs(o[j].y - at.y));
+    at = { x: at.x + wd[0] * step, y: at.y + wd[1] * step };
+    len += step;
+    dir = wd;
+  }
+}
+
+/** Width of a wire label's box (the same as ELK is given). */
+const labelWidth = (text: string, measure: MeasureText) => Math.ceil(measure(text, FONT.label)) + 4;
+const LABEL_HEIGHT = 13;
+/** Between a label's box and its wire (as ELK is given): descenders of the text stay off the wire. */
+const LABEL_GAP = 3;
+
+// What a spot for a wire label costs. Anything in the way costs more than any spot along the wire, so a
+// label goes anywhere on its wire rather than on a symbol, another label or a wire running through it.
+const ON_SYMBOL = 1000;
+const ON_LABEL = 1000;
+const ON_WIRE = 200;
+/** About as near another net's wire as its own (within LABEL_GAP + 2 px): it could name that wire. */
+const ON_NEAR = 150;
+const NEAR_GAP = LABEL_GAP + 2;
+/** On a stretch the wire shares with others of its net: it could name any of them. */
+const SHARED = 100;
+/** Where a bus wire's width mark goes when nothing is in its way (the mark moves aside, if it can). */
+const ON_MARK = 60;
+/** Beside a vertical stretch rather than over a horizontal one. */
+const BESIDE = 30;
+const BELOW = 4;
+/** Per px of the label past the end of its stretch. */
+const SPILL = 0.5;
+/** Per px of wire between the label and the wire's target. */
+const AWAY = 0.02;
+/** Spots along a stretch are this far apart. */
+const LABEL_STEP = 10;
+
+/** A wire segment as a thin box, with the net it belongs to (when known). */
+export type WireBox = Box & { net?: string };
+
+/** Things wire labels keep off. */
+export interface LabelScene {
+  /** Symbols. */
+  nodes: readonly Box[];
+  /** Wire segments, as thin boxes. A label also keeps a little further from those of other nets than its own. */
+  wires: readonly WireBox[];
+  /** Labels placed already. */
+  labels: readonly Box[];
+  /** Usual spots of bus width marks (see markSpot). */
+  marks?: readonly Box[];
+}
+
+/**
+ * The box a bus wire's width mark covers where DiagramGraphic draws it when nothing is in its way: a
+ * slash across the wire about 12px from the end it is drawn at, its number above and to the right.
+ */
+function markSpot(points: Point[], fromEnd: boolean, text: string, measure: MeasureText): Box {
+  const a = fromEnd ? points[points.length - 1] : points[0];
+  const b = fromEnd ? points[points.length - 2] : points[1];
+  const len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+  const t = len > 0 ? Math.min(12, len / 2) / len : 0;
+  const x = a.x + (b.x - a.x) * t;
+  const y = a.y + (b.y - a.y) * t;
+  const w = measure(text, 10);
+  // Along a vertical stretch the number is written left of the slash.
+  return Math.abs(b.y - a.y) > Math.abs(b.x - a.x) ? { x: x - 6 - w, y: y - 5, width: w + 10, height: 10 } : { x: x - 4, y: y - 15, width: w + 6, height: 20 };
+}
+
+const SLICE_FONT = 9;
+
+/**
+ * The box the slice name of a split's output (right of the bar, above its wire) or of a concatenation's
+ * input (left of the bar, below its wire) covers where DiagramGraphic writes it when nothing is in its way.
+ * Undefined for other pins.
+ */
+export function sliceNameBox(n: LNode, q: LPort): Box | undefined {
+  let x: number;
+  let baseline: number;
+  const w = approxMeasure(q.name, SLICE_FONT);
+  if (n.kind === 'split' && q.side === 'EAST') {
+    x = n.x + n.width + 3;
+    baseline = q.y - 3;
+  } else if (n.kind === 'join' && q.side === 'WEST') {
+    x = n.x - 3 - w;
+    baseline = q.y + 9;
+  } else {
+    return undefined;
+  }
+  return { x, y: baseline - SLICE_FONT * 0.78, width: w, height: SLICE_FONT * 0.88 };
+}
+
+const overlap = (a: Box, b: Box, gap: number) => a.x < b.x + b.width + gap && b.x < a.x + a.width + gap && a.y < b.y + b.height + gap && b.y < a.y + a.height + gap;
+
+/** A wire segment as a thin box (a label just above or below its own wire stays clear of it). */
+const segmentBox = (a: Point, b: Point): Box => ({ x: Math.min(a.x, b.x) - 0.5, y: Math.min(a.y, b.y) - 0.5, width: Math.abs(a.x - b.x) + 1, height: Math.abs(a.y - b.y) + 1 });
+
+/**
+ * What a label box covers: symbols (with a pixel to spare), other labels (two) and wires, and for the label of
+ * `net`, wires of other nets running as close by as its own. Counting stops at `stop`.
+ */
+function clutter(b: Box, scene: LabelScene, stop = Infinity, net?: string): number {
+  let c = 0;
+  for (const n of scene.nodes) if (overlap(b, n, 1) && (c += ON_SYMBOL) >= stop) return c;
+  for (const l of scene.labels) if (overlap(b, l, 2) && (c += ON_LABEL) >= stop) return c;
+  for (const w of scene.wires) {
+    if (overlap(b, w, 0)) c += ON_WIRE;
+    // The box is LABEL_GAP from its own wire's middle; the thin box reaches half a px of the way.
+    else if (net !== undefined && w.net !== undefined && w.net !== net && overlap(b, w, NEAR_GAP - 0.5)) c += ON_NEAR;
+    else continue;
+    if (c >= stop) return c;
+  }
+  for (const m of scene.marks ?? []) if (overlap(b, m, 0) && (c += ON_MARK) >= stop) return c;
+  return c;
+}
+
+/** Distance between two boxes (0 when they meet). */
+function boxDistance(a: Box, b: Box): number {
+  return Math.hypot(Math.max(0, b.x - a.x - a.width, a.x - b.x - b.width), Math.max(0, b.y - a.y - a.height, a.y - b.y - b.height));
+}
+
+/** Whether the wire nearest the box is one of `net`'s: a label there reads as naming it. */
+function nearestIsOwn(b: Box, wires: readonly WireBox[], net: string): boolean {
+  let own = Infinity;
+  let other = Infinity;
+  for (const w of wires) {
+    const d = boxDistance(b, w);
+    if (w.net === net) own = Math.min(own, d);
+    else other = Math.min(other, d);
+  }
+  return own < other;
+}
+
+/**
+ * Spots for a label along a wire, each with what it costs: above (or below) each horizontal stretch,
+ * nearest the target first, or beside a vertical one. `ownFrom` is how far from its start the wire runs
+ * along others of its net.
+ */
+function labelSpots(points: Point[], width: number, ownFrom: number): { box: Box; cost: number }[] {
+  const height = LABEL_HEIGHT;
+  const out: { box: Box; cost: number }[] = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += Math.abs(points[i].x - points[i - 1].x) + Math.abs(points[i].y - points[i - 1].y);
+  let d0 = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const horizontal = Math.abs(a.y - b.y) < 0.5;
+    const len = horizontal ? Math.abs(b.x - a.x) : Math.abs(b.y - a.y);
+    const start = d0;
+    d0 += Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+    if (len < 1 || (!horizontal && Math.abs(a.x - b.x) > 0.5)) continue;
+    // Off the pins at the wire's ends, and off the bends.
+    const endInset = i === points.length - 1 ? 4 : 2;
+    const startInset = i === 1 ? 4 : 2;
+    const size = horizontal ? width : height;
+    const room = len - endInset - startInset;
+    // t: how far the label's end nearest the target is back from the stretch's end.
+    const ts: number[] = [];
+    if (room >= size) {
+      for (let t = endInset; t < len - startInset - size; t += LABEL_STEP) ts.push(t);
+      ts.push(len - startInset - size);
+    } else {
+      // Too short: hang over the stretch's start, or its end.
+      ts.push(endInset, len - startInset - size);
+    }
+    const dir = horizontal ? Math.sign(b.x - a.x) : Math.sign(b.y - a.y);
+    for (const t of ts) {
+      // Distance along the wire of the label's two ends.
+      const near = start + len - t;
+      const far = near - size;
+      let cost = (total - near) * AWAY + Math.max(0, size - room) * SPILL + (far < ownFrom - 0.5 ? SHARED : 0);
+      if (horizontal) {
+        const x = dir > 0 ? b.x - t - width : b.x + t;
+        out.push({ box: { x, y: a.y - height - LABEL_GAP, width, height }, cost });
+        out.push({ box: { x, y: a.y + LABEL_GAP, width, height }, cost: cost + BELOW });
+      } else {
+        cost += BESIDE;
+        const y = dir > 0 ? b.y - t - height : b.y + t;
+        out.push({ box: { x: a.x + LABEL_GAP, y, width, height }, cost });
+        out.push({ box: { x: a.x - LABEL_GAP - width, y, width, height }, cost: cost + BELOW });
+      }
+    }
+  }
+  return out.sort((p, q) => p.cost - q.cost);
+}
+
+/**
+ * Where a wire label goes: the clearest spot along its wire (off symbols, other labels and wires, and
+ * given the wire's `net`, not as close to another net's wire as to its own), nearest its target among
+ * equally clear ones, above a stretch the wire does not share with others of its net. With no scene, the
+ * spot nearest the target on a stretch the label fits on.
+ */
+export function labelBox(points: Point[], text: string, measure: MeasureText, scene?: LabelScene, ownFrom = 0, net?: string): Box {
+  const width = labelWidth(text, measure);
+  const spots = labelSpots(points, width, ownFrom);
+  if (!spots.length) {
+    const end = points[points.length - 1];
+    return { x: end.x + 4, y: end.y - LABEL_HEIGHT - 2, width, height: LABEL_HEIGHT };
+  }
+  if (!scene) return spots[0].box;
+  // Only what is near the wire can be in the way.
+  const b = boundsOf(points);
+  const reach = (x: Box) => x.x < b.x1 + width + 8 && x.x + x.width > b.x0 - width - 8 && x.y < b.y1 + LABEL_HEIGHT + 8 && x.y + x.height > b.y0 - LABEL_HEIGHT - 8;
+  const near: LabelScene = {
+    nodes: scene.nodes.filter(reach),
+    wires: scene.wires.filter(reach),
+    labels: scene.labels.filter(reach),
+    marks: scene.marks?.filter(reach),
+  };
+  let best = spots[0];
+  let bestCost = Infinity;
+  // Cheapest first: once no spot left can beat the best found, stop.
+  for (const s of spots) {
+    if (s.cost >= bestCost) break;
+    const c = s.cost + clutter(s.box, near, bestCost - s.cost, net);
+    if (c < bestCost) {
+      best = s;
+      bestCost = c;
+    }
+  }
+  return best.box;
+}
+
+const DIR: Record<Side, Point> = { EAST: { x: 1, y: 0 }, WEST: { x: -1, y: 0 }, NORTH: { x: 0, y: -1 }, SOUTH: { x: 0, y: 1 } };
+
+export function buildGeometry(input: GeometryInput): Geometry {
+  const { netlist, pos, routes, measure } = input;
+  const fast = !!input.fast;
+  const prev = new Map((input.previous?.nodes ?? []).map((n) => [n.id, n]));
+
+  const nodes: LNode[] = [];
+  const rectOf = new Map<string, Rect>();
+  const ends = new Map<string, RouteEnd>();
+  for (const n of netlist.nodes) {
+    const p = pos[n.id] ?? { x: 0, y: 0 };
+    const key = nodeKey(n, p.x, p.y);
+    const old = prev.get(n.id);
+    let ln: LNode;
+    if (old && nodeKeys.get(old) === key) {
+      ln = old;
+    } else {
+      const s = sizeNode(n, measure);
+      ln = {
+        ...n,
+        x: p.x,
+        y: p.y,
+        width: s.width,
+        height: s.height,
+        ports: n.ports.map((q) => ({
+          id: q.id,
+          name: q.name,
+          side: q.side,
+          dir: q.dir,
+          width: q.width,
+          x: p.x + (s.ports[q.id]?.x ?? 0),
+          y: p.y + (s.ports[q.id]?.y ?? 0),
+        })),
+      };
+      nodeKeys.set(ln, key);
+    }
+    nodes.push(ln);
+    const rect = { x: ln.x, y: ln.y, width: ln.width, height: ln.height };
+    rectOf.set(n.id, rect);
+    for (const q of ln.ports) ends.set(q.id, { point: { x: q.x, y: q.y }, side: q.side, rect });
+  }
+  const obstacles = nodes.map((n) => rectOf.get(n.id)!);
+
+  // What the stored routes were last checked against: the sheet as drawn before this change (before the
+  // drag, for a drag preview, which draws quick stand-in routes).
+  const settled = input.previous && (beforeDrag.get(input.previous) ?? input.previous);
+  const settledNodes = !fast && settled ? new Map(settled.nodes.map((n) => [n.id, n])) : undefined;
+  const settledEdges = !fast && settled ? new Map(settled.edges.map((x) => [x.id, x.points])) : undefined;
+  const netOf = (e: DEdge) => e.source.port;
+  const netEdges = new Map<string, DEdge[]>();
+  for (const e of netlist.edges) {
+    const list = netEdges.get(netOf(e));
+    if (list) list.push(e);
+    else netEdges.set(netOf(e), [e]);
+  }
+  const netPorts = (net: string) => new Set([net, ...(netEdges.get(net) ?? []).map((x) => x.target.port)]);
+
+  // Symbols that are new, moved, grew or shrank since then: wires now running into one are routed again,
+  // those drawn by hand too (the symbol was put there after them).
+  const changed: Keep[] = [];
+  if (settledNodes || input.moved?.size)
+    for (const n of nodes) {
+      const o = settledNodes?.get(n.id);
+      if (input.moved?.has(n.id) || (settledNodes && (!o || o.x !== n.x || o.y !== n.y || o.width !== n.width || o.height !== n.height)))
+        changed.push(keepOut(n));
+    }
+  const changedIds = new Set(changed.map((k) => k.id));
+  let all: Keep[] | undefined;
+  // Stored routes that still meet both of their pins, and whether each one is new here or moved along with
+  // both of its symbols (pasted, or moved as a group): such a route may have landed on any symbol or wire.
+  const fits = new Map<string, boolean>();
+  // Pins whose wire is kept, and those whose wire is kept as it was. Such a wire stands for the pin's stub
+  // (and may be crossed there); a fresh one only for routes that moved along with it.
+  const keptPins = new Set<string>();
+  const steadyPins = new Set<string>();
+  for (const e of netlist.edges) {
+    const s = ends.get(e.source.port);
+    const t = ends.get(e.target.port);
+    const r = routes[e.id];
+    if (!s || !t || !r || !near(r.points[0], s.point) || !near(r.points[r.points.length - 1], t.point)) continue;
+    const old = settledEdges?.get(e.id);
+    // A wire drawn by hand is where the user put it, unless it came along with both of its symbols.
+    const isFresh =
+      !fast &&
+      (r.manual
+        ? changedIds.has(e.source.node) && changedIds.has(e.target.node)
+        : (settledEdges && (!old || !samePoints(old, r.points))) || (!!input.moved?.has(e.source.node) && input.moved.has(e.target.node)));
+    fits.set(e.id, isFresh);
+    keptPins.add(e.source.port);
+    keptPins.add(e.target.port);
+    if (!isFresh) {
+      steadyPins.add(e.source.port);
+      steadyPins.add(e.target.port);
+    }
+  }
+  const stubs = new Map<string, Point[]>();
+  const stubOf = (port: string) => {
+    let line = stubs.get(port);
+    if (!line) {
+      const end = ends.get(port)!;
+      line = [end.point, portStub(end)];
+      stubs.set(port, line);
+    }
+    return line;
+  };
+  /** Whether wire piece a-b runs straight out of the pin (its stub, and maybe on). */
+  const leaves = (port: string, a: Point, b: Point) => {
+    const d = DIR[ends.get(port)!.side];
+    return Math.sign(Math.round(b.x - a.x)) === d.x && Math.sign(Math.round(b.y - a.y)) === d.y;
+  };
+  /**
+   * Whether a wire runs into one of the symbols, or touches the stub of one of their pins (but those in
+   * `drawn`): a wire routed to that pin later would have to start on it. On the wire's own symbols only
+   * the pieces running straight out of its pins are let through: a symbol that grew may have grown over
+   * the rest of it.
+   */
+  const crowds = (e: DEdge, points: Point[], list: Keep[], drawn: Set<string>): boolean => {
+    if (!list.length) return false;
+    const b = boundsOf(points);
+    let mine: Set<string> | undefined;
+    for (const k of list) {
+      if (apart(k, b)) continue;
+      let line = points;
+      if (k.id === e.source.node && leaves(e.source.port, line[0], line[1])) line = line.slice(1);
+      if (k.id === e.target.node && line.length >= 2 && leaves(e.target.port, line[line.length - 1], line[line.length - 2])) line = line.slice(0, -1);
+      if (line.length < 2) continue;
+      if (polylineCrowdsRect(line, k.rect)) return true;
+      mine ??= netPorts(netOf(e));
+      for (const q of k.ports) if (!mine.has(q) && !drawn.has(q) && wiresMeet(line, stubOf(q))) return true;
+    }
+    return false;
+  };
+
+  interface Resolved {
+    points: Point[];
+    label?: Box;
+  }
+  const resolved = new Map<string, Resolved>();
+  const routed: Record<string, RouteRec> = {};
+  const todo: DEdge[] = [];
+  /** Stored routes kept although they are new here or moved: they are checked against the other nets' wires too. */
+  const fresh: DEdge[] = [];
+  /** Wires to route again because their target symbol changed, with the path they had (when known). */
+  const retargeted: [DEdge, Point[]][] = [];
+
+  for (const e of netlist.edges) {
+    const s = ends.get(e.source.port);
+    const t = ends.get(e.target.port);
+    if (!s || !t) continue;
+    const r = routes[e.id];
+    const isFresh = fits.get(e.id);
+    if (r && isFresh !== undefined) {
+      // Any other route can only have run into the symbols that changed.
+      if (!(isFresh ? crowds(e, r.points, (all ??= nodes.map(keepOut)), keptPins) : crowds(e, r.points, changed, steadyPins))) {
+        resolved.set(e.id, { points: r.points, label: r.label });
+        if (isFresh) fresh.push(e);
+        continue;
+      }
+    } else if (r?.manual && r.points.length >= 2) {
+      // Stretched to the pins where they are now; its legs next to them may have moved onto a symbol.
+      const points = adjustRoute(r.points, s, t);
+      if (!crowds(e, points, (all ??= nodes.map(keepOut)), keptPins)) {
+        resolved.set(e.id, { points });
+        if (!fast) routed[e.id] = { points, manual: true };
+        continue;
+      }
+    }
+    // Routed again, a wire drawn by hand becomes an automatic one.
+    todo.push(e);
+    const old = r && r.points.length >= 2 ? r.points : settledEdges?.get(e.id);
+    if (!fast && old && changedIds.has(e.target.node)) retargeted.push([e, old]);
+  }
+
+  // ... or on a wire of another net, which would read as a connection.
+  if (fresh.length) {
+    const isFresh = new Set(fresh.map((x) => x.id));
+    const steady = netlist.edges
+      .filter((x) => resolved.has(x.id) && !isFresh.has(x.id))
+      .map((x) => {
+        const points = resolved.get(x.id)!.points;
+        return { net: netOf(x), points, box: boundsOf(points) };
+      });
+    for (const e of fresh) {
+      const points = resolved.get(e.id)!.points;
+      const b = boundsOf(points);
+      if (!steady.some((o) => o.net !== netOf(e) && !apart(o.box, b) && wiresMeet(points, o.points))) continue;
+      resolved.delete(e.id);
+      todo.push(e);
+    }
+  }
+
+  // A wire routed as a branch of another one runs along that wire up to the branch point. When the other
+  // wire's target has moved, that stretch leads to where the target was: route the branch again as well,
+  // so the net is drawn afresh (nearest sink first) instead of around the old path.
+  for (const [e, old] of retargeted) {
+    const s = ends.get(e.source.port)!;
+    const a = portStub(s);
+    const stub = Math.abs(a.x - s.point.x) + Math.abs(a.y - s.point.y);
+    for (const x of netEdges.get(netOf(e)) ?? []) {
+      const r = resolved.get(x.id);
+      if (!r || routes[x.id]?.manual) continue;
+      const run = runTogether(r.points, old);
+      if (!run.turnsOff || run.len <= stub + 0.5) continue;
+      resolved.delete(x.id);
+      todo.push(x);
+    }
+  }
+
+  // Route what is left net by net, nearest sinks first, so later wires can branch off earlier ones.
+  const dist = (e: DEdge) => {
+    const s = ends.get(e.source.port)!.point;
+    const t = ends.get(e.target.port)!.point;
+    return Math.abs(s.x - t.x) + Math.abs(s.y - t.y);
+  };
+  todo.sort((a, b) => (netOf(a) < netOf(b) ? -1 : netOf(a) > netOf(b) ? 1 : dist(a) - dist(b)));
+
+  const polyOfNet = new Map<string, Point[][]>();
+  const addPoly = (net: string, points: Point[]) => {
+    const list = polyOfNet.get(net);
+    if (list) list.push(points);
+    else polyOfNet.set(net, [points]);
+  };
+  // Pins whose wires are not drawn yet: their stubs are kept clear of other nets' wires.
+  const unwired = new Map(ends);
+  // Slice names by split and join bars, where they are drawn unless a wire is in the way (a join's are left
+  // out when its wire has a label): new wires keep off them, as off the symbols.
+  const texts: Rect[] = [];
+  if (!fast) {
+    const named = new Set(netlist.edges.filter((e) => e.label).map((e) => e.target.port));
+    for (const n of nodes)
+      if (n.kind === 'split' || n.kind === 'join')
+        for (const q of n.ports) {
+          const b = !named.has(q.id) && sliceNameBox(n, q);
+          if (b) texts.push(b);
+        }
+  }
+  for (const e of netlist.edges) {
+    const r = resolved.get(e.id);
+    if (!r) continue;
+    addPoly(netOf(e), r.points);
+    unwired.delete(e.source.port);
+    unwired.delete(e.target.port);
+  }
+
+  for (const e of todo) {
+    const s = ends.get(e.source.port)!;
+    const t = ends.get(e.target.port)!;
+    const net = netOf(e);
+    let points: Point[];
+    if (fast) {
+      points = simpleRoute(s, t);
+    } else {
+      // Every other net: the search may end up using the whole sheet.
+      const otherNets: Point[][] = [];
+      for (const [n, polys] of polyOfNet) if (n !== net) otherNets.push(...polys);
+      const onNet = netPorts(net);
+      const reserved: RouteEnd[] = [];
+      for (const [id, end] of unwired) if (!onNet.has(id)) reserved.push(end);
+      points = routeWire(s, t, { obstacles, ownNet: polyOfNet.get(net) ?? [], otherNets, reserved, texts });
+      routed[e.id] = { points };
+    }
+    resolved.set(e.id, { points });
+    addPoly(net, points);
+    unwired.delete(e.source.port);
+    unwired.delete(e.target.port);
+  }
+
+  // Wire labels. The box a label had last time on the same wire, or else a stored one (ELK's, or one
+  // placed before), is kept while it fits the text (the label may have been renamed since) and nothing is
+  // in its way: labels stay put. The others are placed clear of symbols, wires and the labels placed before.
+  const labelOf = new Map<string, Box>();
+  const labelled = netlist.edges.filter((e) => e.label && resolved.has(e.id));
+  if (labelled.length) {
+    const before = new Map((input.previous?.edges ?? []).map((x) => [x.id, x]));
+    const wires: WireBox[] = [];
+    const marks: Box[] = [];
+    const marked = new Set<string>();
+    for (const e of netlist.edges) {
+      const p = resolved.get(e.id)?.points;
+      if (!p || p.length < 2) continue;
+      const net = netOf(e);
+      for (let i = 1; i < p.length; i++) wires.push({ ...segmentBox(p[i - 1], p[i]), net });
+      // As DiagramGraphic draws them: once at the source for wires carrying their whole port, else at the target.
+      if (e.width > 1 && !(e.fullSource && marked.has(e.source.port))) marks.push(markSpot(p, !e.fullSource, String(e.width), measure));
+      if (e.fullSource) marked.add(e.source.port);
+    }
+    const placed: Box[] = [];
+    const scene: LabelScene = { nodes: obstacles, wires, labels: placed, marks };
+    const later: DEdge[] = [];
+    for (const e of labelled) {
+      const r = resolved.get(e.id)!;
+      const width = labelWidth(e.label!, measure);
+      const last = before.get(e.id);
+      const shown = last?.labelBox && samePoints(last.points, r.points) ? last.labelBox : undefined;
+      // ELK puts a label by its wire without looking at the others: it may sit as close to another net's wire.
+      const net = netOf(e);
+      const keep = [shown, r.label].find((b) => b && Math.abs(b.width - width) < 0.5 && clutter(b, scene, 1, net) === 0 && nearestIsOwn(b, wires, net));
+      if (keep) {
+        labelOf.set(e.id, keep);
+        placed.push(keep);
+      } else {
+        later.push(e);
+      }
+    }
+    for (const e of later) {
+      const points = resolved.get(e.id)!.points;
+      // Where the wire parts from the others of its net: a label before that could name any of them.
+      let ownFrom = 0;
+      for (const x of netEdges.get(netOf(e)) ?? []) {
+        const o = x !== e && resolved.get(x.id);
+        if (o) ownFrom = Math.max(ownFrom, runTogether(points, o.points).len);
+      }
+      const lb = labelBox(points, e.label!, measure, scene, ownFrom, netOf(e));
+      labelOf.set(e.id, lb);
+      placed.push(lb);
+    }
+  }
+
+  // Junction dots, and the final edge list in netlist order.
+  const firstOfNet = new Set<string>();
+  const edges: LEdge[] = [];
+  for (const e of netlist.edges) {
+    const r = resolved.get(e.id);
+    if (!r) continue;
+    const lb = labelOf.get(e.id);
+    if (lb && lb !== r.label && routed[e.id]) routed[e.id] = { ...routed[e.id], label: lb };
+    const net = netOf(e);
+    let junctions: Point[] = [];
+    if (!firstOfNet.has(net)) {
+      firstOfNet.add(net);
+      const polys = polyOfNet.get(net) ?? [];
+      if (polys.length > 1) junctions = netJunctions(polys);
+    }
+    edges.push({ ...e, points: r.points, junctions, labelBox: lb });
+  }
+
+  // Bounds of everything drawn, with a margin (bus marks and labels stick out a little).
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  const see = (x: number, y: number) => {
+    x0 = Math.min(x0, x);
+    y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x);
+    y1 = Math.max(y1, y);
+  };
+  for (const n of nodes) {
+    see(n.x, n.y);
+    see(n.x + n.width, n.y + n.height);
+    // Split labels sit to the right of the bar; join labels to the left.
+    if (n.kind === 'split') see(n.x + n.width + 40, n.y);
+    if (n.kind === 'join') see(n.x - 40, n.y);
+  }
+  for (const e of edges) {
+    for (const p of e.points) {
+      see(p.x, p.y);
+      // Bus width marks are drawn just above the wire.
+      if (e.width > 1) see(p.x, p.y - 14);
+    }
+    if (e.labelBox) {
+      see(e.labelBox.x, e.labelBox.y);
+      see(e.labelBox.x + e.labelBox.width, e.labelBox.y + e.labelBox.height);
+    }
+  }
+  const pad = 24;
+  const layout: LayoutResult =
+    x0 === Infinity
+      ? { module: netlist.module, x: 0, y: 0, width: 48, height: 48, nodes, edges }
+      : {
+          module: netlist.module,
+          x: Math.floor(x0 - pad),
+          y: Math.floor(y0 - pad),
+          width: Math.ceil(x1 - x0 + 2 * pad),
+          height: Math.ceil(y1 - y0 + 2 * pad),
+          nodes,
+          edges,
+        };
+  if (fast && settled) beforeDrag.set(layout, settled);
+  return { layout, routed };
+}
+
+/** Where a port's wire stub ends, for drawing a wire that is being made. */
+export function stubPoint(p: Point, side: Side, len = 10): Point {
+  const d = DIR[side];
+  return { x: p.x + d.x * len, y: p.y + d.y * len };
+}

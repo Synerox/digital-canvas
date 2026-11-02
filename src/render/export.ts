@@ -10,9 +10,11 @@ export function exportSvg(layout: LayoutResult, theme: Theme): string {
   const inner = renderToStaticMarkup(createElement(DiagramGraphic, { layout, theme }));
   const w = Math.ceil(layout.width);
   const h = Math.ceil(layout.height);
+  const x = layout.x ?? 0;
+  const y = layout.y ?? 0;
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
-    `<rect width="${w}" height="${h}" fill="${theme.background}"/>` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="${x} ${y} ${w} ${h}">` +
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${theme.background}"/>` +
     inner +
     `</svg>`
   );

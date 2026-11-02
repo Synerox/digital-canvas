@@ -40,8 +40,13 @@ export function yosysScript(files: Record<string, string>, opts: ScriptOptions =
   return [
     ...reads,
     `hierarchy -check ${opts.top ? `-top ${quote(opts.top)}` : '-auto-top'}`,
-    'proc -noopt',
-    // Merge $memrd/$memwr cells of each memory into one $mem_v2 block.
+    // -norom: a case statement that only picks constants (a 7-segment table) stays compares and a
+    // MUX, as it reads in the code, instead of becoming a ROM: an opaque memory block on the sheet.
+    'proc -noopt -norom',
+    // Initial values of a memory (`initial mem[0] = 8'h3F;`) come out of proc with their enables
+    // tied to a constant through a wire, which memory_collect rejects: fold just those.
+    'opt_expr -keepdc t:$meminit_v2',
+    // Merge $memrd/$memwr/$meminit cells of each memory into one $mem_v2 block.
     'memory_collect',
     'opt_clean',
     `write_json ${JSON_OUT}`,

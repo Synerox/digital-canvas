@@ -1,28 +1,45 @@
 import { useEffect, useMemo, useRef } from 'react';
-import type { HierarchyNode } from '../core/ir';
+import type { HierarchyNode, IRDesign } from '../core/ir';
 import { RULES } from '../core/rules';
-import { type PathEntry, sameFile, useStore } from './store';
+import { type EditDoc, type ViewMode, sheetKey } from '../editor/doc';
+import { type PathEntry, moduleTitle, sameFile, useStore } from './store';
+
+/**
+ * The name an instance has on its parent's sheet in this view: as it was renamed there (the
+ * block shows it, and the Verilog export writes it), or as the Verilog names it.
+ */
+function instanceName(view: IRDesign | undefined, doc: EditDoc, mode: ViewMode, parent: PathEntry, instance: string): string {
+  const cell = view?.modules[parent.module]?.cells.find((c) => c.isInstance && c.name === instance);
+  return (cell && doc.sheets[sheetKey(parent, mode)]?.labels[`cell:${cell.id}`]?.trim()) || instance;
+}
 
 export function HierarchyTree() {
   const hierarchy = useStore((s) => s.hierarchy);
   const path = useStore((s) => s.path);
   const openPath = useStore((s) => s.openPath);
-  if (!hierarchy) return <p className="muted small">No design loaded.</p>;
-  const current = path.map((p) => p.instance).join('/');
+  const doc = useStore((s) => s.doc);
+  const mode = useStore((s) => s.viewMode);
+  const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
+  if (!hierarchy) return <p className="muted small">No Verilog loaded.</p>;
+  const current = path[0]?.drawn ? '' : path.map((p) => p.instance).join('/');
 
   const render = (n: HierarchyNode, prefix: PathEntry[]) => {
     const here = [...prefix, { instance: n.instance, module: n.module }];
     const key = here.map((p) => p.instance).join('/');
+    const name = prefix.length ? instanceName(view, doc, mode, prefix[prefix.length - 1], n.instance) : n.instance;
+    const was = name !== n.instance ? `${n.instance} in the Verilog` : undefined;
     return (
       <li key={key}>
         <button className={`tree-item ${key === current ? 'active' : ''}`} onClick={() => openPath(here)}>
           {prefix.length === 0 ? (
-            <b>{n.module}</b>
+            <b>{moduleTitle(n.module)}</b>
           ) : n.module.startsWith(`${prefix[prefix.length - 1].module}/`) ? (
-            <span className="auto-block">{n.instance}</span>
+            <span className="auto-block" title={was}>
+              {name}
+            </span>
           ) : (
             <>
-              <span>{n.instance}</span> <span className="muted">: {n.module}</span>
+              <span title={was}>{name}</span> <span className="muted" title={n.module}>: {moduleTitle(n.module)}</span>
             </>
           )}
         </button>
@@ -84,19 +101,58 @@ export function ViewToggle() {
 export function Breadcrumb() {
   const path = useStore((s) => s.path);
   const openPath = useStore((s) => s.openPath);
+  const doc = useStore((s) => s.doc);
+  const mode = useStore((s) => s.viewMode);
   const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
   if (path.length === 0) return null;
+  /** As the Hierarchy names it: an automatic block by its (renamed) name alone, an instance with its module. */
+  const title = (p: PathEntry, i: number) => {
+    if (i === 0) return moduleTitle(p.module);
+    if (p.drawn) return `${p.instance} (${moduleTitle(p.module)})`;
+    const name = instanceName(view, doc, mode, path[i - 1], p.instance);
+    if (view?.modules[p.module]?.auto) return name !== p.instance ? name : view.modules[p.module].displayName;
+    return `${name} (${moduleTitle(p.module)})`;
+  };
   return (
     <nav className="breadcrumb">
       {path.map((p, i) => (
         <span key={i}>
           {i > 0 && <span className="sep">›</span>}
           <button className={i === path.length - 1 ? 'current' : ''} onClick={() => openPath(path.slice(0, i + 1))}>
-            {i === 0 ? p.module : view?.modules[p.module]?.auto ? view.modules[p.module].displayName : `${p.instance} (${p.module})`}
+            {title(p, i)}
           </button>
         </span>
       ))}
     </nav>
+  );
+}
+
+/** Modules drawn by hand. */
+export function Drawings() {
+  const drawn = useStore((s) => s.doc.drawn);
+  const path = useStore((s) => s.path);
+  const openPath = useStore((s) => s.openPath);
+  const newDrawing = useStore((s) => s.newDrawing);
+  const current = path.length === 1 && path[0].drawn ? path[0].module : undefined;
+  return (
+    <>
+      {drawn.length === 0 ? (
+        <p className="muted small">None yet.</p>
+      ) : (
+        <ul className="tree">
+          {drawn.map((d) => (
+            <li key={d}>
+              <button className={`tree-item ${d === current ? 'active' : ''}`} onClick={() => openPath([{ instance: d, module: d, drawn: true }])}>
+                {d}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button className="small add-drawing" onClick={() => newDrawing()}>
+        + New drawing
+      </button>
+    </>
   );
 }
 
@@ -114,13 +170,15 @@ export function CodePanel() {
     for (const r of ranges) {
       if (!codeFile) continue;
       if (!sameFile(r.file, codeFile)) continue;
-      for (let l = r.startLine; l <= r.endLine; l++) set.add(l);
+      // Only the file's own lines: a damaged drawing file can give any range (lines 1 to 10⁹).
+      for (let l = Math.max(1, r.startLine); l <= Math.min(r.endLine, lines.length); l++) set.add(l);
     }
     return set;
-  }, [ranges, codeFile]);
+  }, [ranges, codeFile, lines]);
 
   useEffect(() => {
-    const first = Math.min(...marked);
+    let first = Infinity;
+    for (const l of marked) first = Math.min(first, l);
     if (!Number.isFinite(first) || !box.current) return;
     const el = box.current.querySelector(`[data-line="${first}"]`) as HTMLElement | null;
     el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -128,7 +186,8 @@ export function CodePanel() {
 
   if (!codeFile || text === undefined) return <div className="code empty muted small">No source file.</div>;
   return (
-    <div className="code" ref={box}>
+    // Focusable, so that copy and select all act on the code while the user works in it (see App).
+    <div className="code" ref={box} tabIndex={-1}>
       {lines.map((l, i) => (
         <div
           key={i}
@@ -156,7 +215,7 @@ export function LogPanel({ onClose }: { onClose(): void }) {
         </button>
       </div>
       {error && <div className="error">{error}</div>}
-      <pre>{log || 'No output yet.'}</pre>
+      <pre tabIndex={-1}>{log || 'No output yet.'}</pre>
     </div>
   );
 }
