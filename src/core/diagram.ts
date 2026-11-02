@@ -12,6 +12,8 @@ import {
   type IRModule,
   type IRNet,
   type SrcRange,
+  bitDrivers,
+  caseNames,
   displayModuleName,
   formatConst,
   sliceLabel,
@@ -307,7 +309,7 @@ export function buildDiagram(
   const sinks: Sink[] = [];
 
   /** The cell that drives each bit, to read what selects a case of a $pmux. */
-  const cellOf = new Map<number, IRCell>();
+  const cellOf = bitDrivers(m.cells);
 
   const addDriver = (d: Driver, bit: number) => {
     const first = drivers.get(bit);
@@ -363,7 +365,6 @@ export function buildDiagram(
         bits.forEach((b, i) => {
           if (typeof b !== 'number') return;
           addDriver({ node: id, port: port.id, index: i, width: bits.length, bits }, b);
-          if (!cellOf.has(b)) cellOf.set(b, c);
         });
       } else {
         const piece = c.type === '$pmux' && pname === 'B' ? c.connections.A?.length : undefined;
@@ -496,36 +497,14 @@ export function buildDiagram(
     return a === b ? `[${a}]` : `[${a}:${b}]`;
   };
 
-  /**
-   * The value the select bit of a case compares the case expression with (`4'd7`, or `3'd0,3'd1` for
-   * an item with two labels), when a compare drives it; undefined otherwise (a casez bit, own logic).
-   */
-  const compareValue = (b: Bit, depth = 0): string | undefined => {
-    const c = typeof b === 'number' ? cellOf.get(b) : undefined;
-    if (!c || depth > 1) return undefined;
-    if (c.type === '$eq' || c.type === '$eqx') {
-      const k = [c.connections.B, c.connections.A].find((x) => x?.length && x.every((y) => typeof y !== 'number'));
-      return k && formatConst(k);
-    }
-    if (c.type !== '$reduce_or' && c.type !== '$or' && c.type !== '$logic_or') return undefined;
-    const labels = [...(c.connections.A ?? []), ...(c.connections.B ?? [])].map((x) => compareValue(x, depth + 1));
-    return labels.length && labels.every(Boolean) ? labels.join(',') : undefined;
-  };
-  /**
-   * What names the constants of each case of a $pmux: the value the case is selected by, so that
-   * they keep their IDs (and the edits saved for them) when other cases are added, removed,
-   * reordered or given other values. The case index when the select is not a compare.
-   */
-  const caseNames = (select: Bit[]): string[] => {
-    const values = select.map((b) => compareValue(b));
-    return values.map((v, k) => (v && values.indexOf(v) === values.lastIndexOf(v) ? v : String(k)));
-  };
-
   for (const s of sinks) {
     let runs = runsOf(s.bits, s.port, s.node);
     const piece = s.piece;
-    const cases = s.select && caseNames(s.select);
-    /** The constants of a case table are named by the case they belong to, and where in it they start. */
+    const cases = s.select && caseNames(cellOf, s.select);
+    /**
+     * The constants of a case table are named by the case they belong to, and where in it they start, so
+     * that they keep their IDs (and the edits saved for them) when other cases are added or changed.
+     */
     const constId = (r: Run): string | undefined => {
       if (!piece || !cases || r.kind !== 'const') return undefined;
       const k = Math.floor(r.lo / piece);

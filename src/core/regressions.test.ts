@@ -266,7 +266,13 @@ endmodule
         .map((c) => `${c.src[1]?.startLine}:${c.id}`)
         .sort();
     const before = inner(await design(nested('')));
-    expect(before).toEqual(['3:$pmux{Y>$mux.B>Y=$2\\y}', '4:$pmux{Y>$mux.B>Y=$3\\y}', '5:$pmux{Y>$mux.B>Y=$4\\y}', '6:$pmux{Y>$mux.B>Y=$5\\y}']);
+    // Each by the item it is in (`[2'd1]`: in the case of 2'd1 of the outer $pmux, and of the $mux Yosys puts around it).
+    expect(before).toEqual([
+      "3:$pmux{Y>$mux.B[2'd0]>$pmux.B[2'd0]>Y=y}",
+      "4:$pmux{Y>$mux.B[2'd1]>$pmux.B[2'd1]>Y=y}",
+      "5:$pmux{Y>$mux.B[2'd2]>$pmux.B[2'd2]>Y=y}",
+      "6:$pmux{Y>$mux.B[2'd3]>$pmux.B[2'd3]>Y=y}",
+    ]);
     expect(inner(await design(nested("2'd3: y = 4'd15; ")))).toEqual(before);
     // `case (1'b1)` makes a chain of MUXes: each is named by the inputs down the chain.
     const onehot = await design({
