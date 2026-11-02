@@ -500,7 +500,7 @@ export function buildDiagram(
   for (const s of sinks) {
     let runs = runsOf(s.bits, s.port, s.node);
     const piece = s.piece;
-    const cases = s.select && caseNames(cellOf, s.select);
+    const cases = s.select && caseNames(cellOf, s.select, m.nets);
     /**
      * The constants of a case table are named by the case they belong to, and where in it they start, so
      * that they keep their IDs (and the edits saved for them) when other cases are added or changed.

@@ -162,13 +162,15 @@ const REGISTER_CELL = /^\$(\w*dff\w*|\w*dlatch\w*|sr|ff)$/;
 const PROCESS_TEXT = /^(always(_ff|_comb|_latch)?|initial|final)\b/;
 
 /**
- * The MUX of a case statement: a `$pmux`, or a `$mux` Yosys makes for a case with one item (or for
- * each item of a case whose items are signals, such as `case (1'b1)`).
- * Yosys gives it no source text of its own, and the values of its cases are constant inputs, so
- * an ID made of what it connects to changed with every edited table entry.
+ * A MUX proc made for an if or a case statement (`$procmux$12`): the `$pmux` of a case, a `$mux` for an
+ * if, for a case with one item or for each item of a case whose items are signals (`case (1'b1)`), and
+ * the `$mux` Yosys puts around the value a branch of a combinational block gives a signal.
+ * The values of a case table are its constant inputs, and nothing in Yosys' names or source ranges
+ * tells two such MUXes apart in a way that survives an edit elsewhere: they are named by
+ * `processMuxIds` instead.
  */
-function isCaseMux(type: string, name: string, expr: string | undefined): boolean {
-  return !expr && (type === '$pmux' || (type === '$mux' && name.startsWith('$procmux$')));
+function isProcessMux(c: { type: string; name: string }): boolean {
+  return isMux(c.type) && c.name.startsWith('$procmux$');
 }
 
 /**
@@ -338,31 +340,18 @@ function compareValue(drivers: Map<number, IRCell>, b: Bit, depth = 0): string |
 
 /**
  * The name of each case of a $pmux, from its select bits: the value the case is selected by, so that
- * it does not change when other cases are added, removed, reordered or given other values. The case
- * index when the select is not a compare, or when two cases have the same value. It names the
- * constants of a case table, and the case a nested case statement is in.
+ * it does not change when other cases are added, removed, reordered or given other values. When the
+ * select is not a compare with a constant (a casez bit), or two cases have the same value, the case is
+ * named by its condition (`op[2]`, `op[1:0]==2'd1`) when `nets` are given; by its index only when two
+ * cases have the same condition. It names the constants of a case table.
  */
-export function caseNames(drivers: Map<number, IRCell>, select: Bit[]): string[] {
+export function caseNames(drivers: Map<number, IRCell>, select: Bit[], nets?: IRNet[]): string[] {
   const values = select.map((b) => compareValue(drivers, b));
-  return values.map((v, k) => (v && values.indexOf(v) === values.lastIndexOf(v) ? v : String(k)));
-}
-
-/**
- * `[2'd2]`: the case of a MUX that the outputs of a cell feed through its B input, named by the value
- * the case compares with: a case of a $pmux (its index when there is no compare), or the one case of
- * a $mux whose select is a compare. '' for any other input.
- */
-function caseSlot(drivers: Map<number, IRCell>, cell: IRCell, reader: IRCell, port: string): string {
-  if (port !== 'B' || !isMux(reader.type)) return '';
-  const outs = new Set<Bit>();
-  for (const p of Object.keys(cell.connections)) {
-    if (cell.directions[p] === 'output') for (const b of cell.connections[p]) if (typeof b === 'number') outs.add(b);
-  }
-  const k = Math.floor(reader.connections.B.findIndex((b) => outs.has(b)) / Math.max(1, reader.connections.A?.length ?? 1));
-  if (reader.type === '$pmux') return `[${caseNames(drivers, reader.connections.S ?? [])[k] ?? k}]`;
-  const s = reader.connections.S?.[0];
-  const v = s === undefined ? undefined : compareValue(drivers, s);
-  return v ? `[${v}]` : '';
+  const unique = (v: string | undefined, all: (string | undefined)[]) => !!v && all.indexOf(v) === all.lastIndexOf(v);
+  if (values.every((v) => unique(v, values))) return values as string[];
+  const d = nets && describer(nets, drivers);
+  const labels = select.map((b) => d?.caseLabel(b));
+  return values.map((v, k) => (unique(v, values) ? v! : unique(labels[k], labels) ? labels[k]! : String(k)));
 }
 
 /** True when source range `outer` holds `inner`, or when that cannot be told (a range is missing). */
@@ -372,67 +361,344 @@ function encloses(outer: SrcRange | undefined, inner: SrcRange | undefined): boo
   return atOrBefore(outer.startLine, outer.startCol, inner.startLine, inner.startCol) && atOrBefore(inner.endLine, inner.endCol, outer.endLine, outer.endCol);
 }
 
-/**
- * True when two cells come from the same statement (Yosys gives a MUX the range of its if or case
- * last), or when that cannot be told.
- */
-function sameRange(a: SrcRange | undefined, b: SrcRange | undefined): boolean {
-  return encloses(a, b) && encloses(b, a);
+/** True when two cells have the same statement range (both known). */
+function sameStatement(a: SrcRange | undefined, b: SrcRange | undefined): boolean {
+  return !!a && !!b && a.file === b.file && encloses(a, b) && encloses(b, a);
 }
 
 /**
- * A $mux whose A input is undefined: in a combinational block, Yosys puts one around the value each
- * statement in a branch gives a signal (`x` when the branch is not taken). It is part of no statement.
+ * The input of a $mux that is undefined (`x`), if any: in a combinational block, Yosys puts such a MUX
+ * around the value each statement in a branch gives a signal (`x` when the branch is not taken).
  */
-function undefinedDefault(c: IRCell): boolean {
-  return c.type === '$mux' && !!c.connections.A?.length && c.connections.A.every((b) => b === 'x');
+function undefinedSide(c: IRCell): 'A' | 'B' | undefined {
+  if (c.type !== '$mux') return undefined;
+  const undef = (bits: Bit[] | undefined) => !!bits?.length && bits.every((b) => b === 'x');
+  return undef(c.connections.A) ? 'A' : undef(c.connections.B) ? 'B' : undefined;
 }
 
-/** The cell that drives some bits, looking through undefined-default wrappers to the statement they wrap. */
-function statementOf(drivers: Map<number, IRCell>, bits: Bit[] | undefined): IRCell | undefined {
-  const driver = (x: Bit[] | undefined) => {
-    const b = x?.find((y) => typeof y === 'number');
-    return typeof b === 'number' ? drivers.get(b) : undefined;
+const BINARY_OPS: Record<string, string> = {
+  $eq: '==',
+  $eqx: '===',
+  $ne: '!=',
+  $nex: '!==',
+  $lt: '<',
+  $le: '<=',
+  $gt: '>',
+  $ge: '>=',
+  $logic_and: '&&',
+  $logic_or: '||',
+  $and: '&',
+  $or: '|',
+  $xor: '^',
+  $xnor: '~^',
+  $add: '+',
+  $sub: '-',
+  $mul: '*',
+  $shl: '<<',
+  $shr: '>>',
+};
+const UNARY_OPS: Record<string, string> = { $logic_not: '!', $not: '~', $neg: '-', $reduce_or: '|', $reduce_bool: '|', $reduce_and: '&', $reduce_xor: '^' };
+
+/** True when the whole text is one pair of parentheses and what they hold: `(a&&b)`, not `(a)|(b)`. */
+function parenthesized(s: string): boolean {
+  if (!s.startsWith('(') || !s.endsWith(')')) return false;
+  let depth = 0;
+  for (let i = 0; i < s.length - 1; i++) {
+    if (s[i] === '(') depth++;
+    else if (s[i] === ')' && --depth === 0) return false;
+  }
+  return true;
+}
+
+/** `a` stays as it is; anything else is put in parentheses, to negate it or to read it as one operand. */
+function operand(s: string): string {
+  return /^[\w$.\\]+(\[\d+(:\d+)?\])?$/.test(s) || parenthesized(s) ? s : `(${s})`;
+}
+
+/** `a&&b` for `(a&&b)`: a condition on its own needs no parentheses around it. */
+function bare(s: string): string {
+  return parenthesized(s) ? s.slice(1, -1) : s;
+}
+
+/**
+ * Short descriptions of what bits carry, made of the signals, constants and cells they come from
+ * (`sel`, `st[1]`, `(a&&b)`, `{a,1'b0}`): a condition is named by what it is, not by where Yosys put it.
+ * Cells more than a few steps away are left out (`…`), so that a description stays short. Yosys' names
+ * for the variables of a function call carry its line and how many calls came before it: they are no name.
+ */
+function describer(allNets: IRNet[], drivers: Map<number, IRCell>) {
+  const nets = allNets.filter((n) => !n.name.includes('$func$'));
+  const netOf = new Map<number, { net: IRNet; index: number }>();
+  for (const n of nets) {
+    if (n.hidden) continue;
+    n.bits.forEach((b, index) => {
+      if (typeof b === 'number' && !netOf.has(b)) netOf.set(b, { net: n, index });
+    });
+  }
+  const memo = new Map<string, string>();
+  const describe = (x: Bit[], depth = 0): string => {
+    const key = `${depth}:${x.map((b) => (typeof b === 'number' ? b : `'${b}`)).join(',')}`;
+    let out = memo.get(key);
+    if (out === undefined) {
+      out = describeBits(x, depth);
+      memo.set(key, out);
+    }
+    return out;
   };
-  let d = driver(bits);
-  for (let n = 0; d && undefinedDefault(d) && n < 16; n++) d = driver(d.connections.B);
-  return d;
-}
-
-/**
- * True when the value a MUX keeps when it selects nothing (its A input) comes from an earlier statement
- * that assigns the same signal, in the same block or, when `parent` (the range of a statement) is
- * given, in the same branch of that statement. That value comes through a wire of Yosys' own: a
- * signal with a name (`default: y = z;`) is not an earlier statement.
- */
-function followsStatement(nets: IRNet[], drivers: Map<number, IRCell>, c: IRCell, parent?: SrcRange): boolean {
-  if (!isMux(c.type) || signalName(nets, c.connections.A ?? [], '') !== undefined) return false;
-  const d = statementOf(drivers, c.connections.A);
-  const before = d?.src.at(-1);
-  const own = c.src.at(-1);
-  return !!d && isMux(d.type) && !!before && !!own && !encloses(before, own) && !encloses(own, before) && (!parent || encloses(parent, before));
-}
-
-/**
- * What the case or if of a MUX selects on: `op` for the compares of `case (op)`, `en` for `if (en)`,
- * `a+b` for `if (a && b)`; undefined for other cells.
- */
-function selectSubject(nets: IRNet[], drivers: Map<number, IRCell>, c: IRCell): string | undefined {
-  const subject = (bits: Bit[], depth: number): string | undefined => {
-    const name = signalName(nets, bits, '');
-    if (name || depth > 2) return name;
-    const read = new Set<IRCell>();
-    for (const b of bits) if (typeof b === 'number' && drivers.has(b)) read.add(drivers.get(b)!);
-    const inputs = [...read].flatMap((d) =>
-      Object.keys(d.connections)
-        .filter((p) => d.directions[p] !== 'output')
-        .sort()
-        .flatMap((p) => d.connections[p].filter((b) => typeof b === 'number')),
-    );
-    return inputs.length ? subject(inputs, depth + 1) : undefined;
+  const describeBits = (x: Bit[], depth: number): string => {
+    const whole = signalName(nets, x, '');
+    if (whole !== undefined && !whole.includes('+')) return whole;
+    // Runs of constant bits, of bits of one signal and of bits one cell drives, most significant first.
+    const runs: string[] = [];
+    for (let i = 0; i < x.length; ) {
+      const b = x[i];
+      let j = i + 1;
+      if (typeof b !== 'number') {
+        while (j < x.length && typeof x[j] !== 'number') j++;
+        runs.push(formatConst(x.slice(i, j)));
+      } else if (netOf.has(b)) {
+        const { net, index } = netOf.get(b)!;
+        const at = (k: number) => (typeof x[k] === 'number' ? netOf.get(x[k] as number) : undefined);
+        while (j < x.length && at(j)?.net === net && at(j)?.index === index + j - i) j++;
+        runs.push(sliceLabel(net, index, index + j - i - 1));
+      } else {
+        const d = drivers.get(b);
+        while (j < x.length && typeof x[j] === 'number' && !netOf.has(x[j] as number) && drivers.get(x[j] as number) === d) j++;
+        runs.push(d ? describeCell(d, depth) : '?');
+      }
+      i = j;
+    }
+    return runs.length === 1 ? runs[0] : `{${runs.reverse().join(',')}}`;
   };
-  const s = isMux(c.type) ? c.connections.S : undefined;
-  return s?.length ? subject(s.slice(0, 1), 0) : undefined;
+  const describeCell = (d: IRCell, depth: number): string => {
+    // The value of another statement of the process is not followed: its own ID says what it is.
+    if (isProcessMux(d)) return d.type;
+    if (depth >= 3) return '…';
+    const arg = (p: string) => describe(d.connections[p] ?? [], depth + 1);
+    if (BINARY_OPS[d.type]) return `(${operand(arg('A'))}${BINARY_OPS[d.type]}${operand(arg('B'))})`;
+    if (UNARY_OPS[d.type]) return `${UNARY_OPS[d.type]}${operand(arg('A'))}`;
+    const inputs = Object.keys(d.connections)
+      .filter((p) => d.directions[p] !== 'output')
+      .sort();
+    return `${d.type}(${inputs.map(arg).join(',')})`;
+  };
+  /** The compares a case item is selected by: one, or several ORed together for an item with several labels. */
+  const itemCompares = (d: IRCell, depth = 0): IRCell[] | undefined => {
+    if (d.type === '$eq' || d.type === '$eqx') return [d];
+    if (depth > 1 || !(d.type === '$reduce_or' || d.type === '$or' || d.type === '$logic_or')) return undefined;
+    const out: IRCell[] = [];
+    for (const x of [...(d.connections.A ?? []), ...(d.connections.B ?? [])]) {
+      const e = typeof x === 'number' ? drivers.get(x) : undefined;
+      const found = e && itemCompares(e, depth + 1);
+      if (!found) return undefined;
+      out.push(...found);
+    }
+    return out.length ? out : undefined;
+  };
+  /**
+   * `sel==2'd1`: what a select bit of a case MUX stands for, its case expression (Yosys compares it as
+   * A) and the labels of the item (as B): `sel==3'd0,3'd1` for two labels, `1'b1==st[2]` for an item of
+   * `case (1'b1)`, `op[2]` for a casez item that only tests one bit.
+   */
+  const caseLabel = (b: Bit): string => {
+    const d = typeof b === 'number' ? drivers.get(b) : undefined;
+    const compares = d && itemCompares(d);
+    if (!compares) return bare(describe([b]));
+    const subjects = new Set(compares.map((c) => describe(c.connections.A ?? [])));
+    const items = compares.map((c) => describe(c.connections.B ?? []));
+    if (subjects.size === 1) return `${[...subjects][0]}==${[...new Set(items)].sort().join(',')}`;
+    return compares
+      .map((c) => `${describe(c.connections.A ?? [])}==${describe(c.connections.B ?? [])}`)
+      .sort()
+      .join('|');
+  };
+  /**
+   * `sel`: what the items of a case are compared with, from its compares; `a` for `case (x)` in a
+   * function called with `a`. A casez whose items test other bits has several (`op[2],op[2:1]`).
+   */
+  const caseSubject = (select: Bit[]): string => {
+    const found = new Set<string>();
+    for (const b of select) {
+      const d = typeof b === 'number' ? drivers.get(b) : undefined;
+      const compares = d && itemCompares(d);
+      if (compares) for (const c of compares) found.add(describe(c.connections.A ?? []));
+      else found.add(bare(describe([b])));
+    }
+    return [...found].sort().join(',');
+  };
+  return { describe, caseLabel, caseSubject };
+}
+
+/** A short, stable stand-in for a long text (FNV-1a). */
+function hashText(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(36);
+}
+
+/** Steps of a path beyond this many are folded into a hash of them, so that the ID of a MUX deep in a long chain stays short. */
+const SHOWN_STEPS = 12;
+
+/**
+ * IDs for the process MUXes of a module (see `isProcessMux`), made only of what the code says:
+ *
+ * - what the MUX selects on: `case sel` for a case on sel, `if load` for an if, `case sel==2'd1` for a
+ *   case item of its own, `if load else x` for the MUX Yosys puts around a branch of `if (load)`;
+ * - the branches its value goes through to the signal it is assigned to, each named by its condition:
+ *   `load` into the then-branch of `if (load)`, `!load` into its else-branch, `mode==2'd1` into the
+ *   item 2'd1 of `case (mode)`, `mode:default` into its default;
+ * - that signal: `Y=y`, or proc's next-value wire of a register, `Y=$0\y`.
+ *
+ * `$pmux{case sel>mode==2'd1>!rst>Y=$0\y}` is a case on sel in the item 2'd1 of a case on mode, in the else
+ * of `if (rst)`. The value a statement passes on to a later one that assigns the same signal (as what
+ * the later one keeps when it selects nothing) is no branch: that step is left out, so that adding or
+ * removing a statement before or after it renames nothing. Yosys' wire names (`$2\y`), cell numbers
+ * and source lines, and how many MUXes lie on the way, are never part of an ID: those change when
+ * code elsewhere changes, and would hand one table's ID (its place, the wires drawn from it, its edited
+ * constants) to another.
+ *
+ * MUXes that this names alike are told apart by the labels of their items (`case a{a==2'd0,a==2'd1}`,
+ * for case statements in sequence on the same selector), then by their values; only MUXes that are the
+ * same in all of this are numbered in Yosys' order (by the caller). An ID that is not certain to name
+ * the same table again changes, and its edits are dropped: that is better than moving them to another.
+ */
+function processMuxIds(cells: IRCell[], nets: IRNet[], sources: Record<string, string>, readers: Map<number, number[]>, muxes: number[]): Map<number, string> {
+  const drivers = bitDrivers(cells);
+  // Yosys' name for the result of a function call carries its line and how many calls came before it.
+  const named = nets.filter((n) => !n.name.includes('$func$'));
+  const { describe, caseLabel, caseSubject } = describer(nets, drivers);
+  const statement = (c: IRCell) => c.src.at(-1);
+  const code = (c: IRCell) => stripComments(sourceText(sources, statement(c)) ?? '');
+  /** The condition of an if, as written (Yosys gives its MUX that range first); for a case item of its own, its compare. */
+  const ifCondition = (c: IRCell) => normalizeWhitespace(stripComments(sourceText(sources, c.src[0]) ?? ''));
+  const condition = (c: IRCell) => ifCondition(c) || caseLabel(c.connections.S?.[0] ?? 'x');
+  const subject = (c: IRCell) => caseSubject(c.connections.S ?? []);
+  /** The MUX of the same statement that drives the A input of a case item MUX: the next item of a chain. */
+  const nextItem = (c: IRCell): IRCell | undefined => {
+    const b = c.connections.A?.find((x) => typeof x === 'number');
+    const d = typeof b === 'number' ? drivers.get(b) : undefined;
+    return d && d.type === '$mux' && isProcessMux(d) && !undefinedSide(d) && !ifCondition(d) && sameStatement(statement(d), statement(c)) ? d : undefined;
+  };
+  const owns = new Map<IRCell, string>();
+  const own = (c: IRCell): string => {
+    let out = owns.get(c);
+    if (out === undefined) {
+      const side = undefinedSide(c);
+      if (c.type === '$pmux') out = `case ${subject(c)}`;
+      else if (ifCondition(c)) out = `if ${ifCondition(c)}`;
+      else {
+        // An item of a chain (`case (1'b1)`) passes on the value of the items after it: they are part of what it is.
+        const items = [condition(c)];
+        for (let d = side ? undefined : nextItem(c); d && items.length < 64; d = nextItem(d)) items.push(condition(d));
+        out = `case ${items.join(';')}`;
+      }
+      if (side) out += ` ${side === 'A' ? 'else' : 'then'} x`;
+      owns.set(c, out);
+    }
+    return out;
+  };
+  /** The case of a $pmux the outputs of a cell feed through its B input. */
+  const slot = (reader: IRCell, cell: IRCell): string => {
+    const outs = new Set<Bit>();
+    for (const p of Object.keys(cell.connections)) {
+      if (cell.directions[p] === 'output') for (const b of cell.connections[p]) if (typeof b === 'number') outs.add(b);
+    }
+    const k = Math.floor(reader.connections.B.findIndex((b) => outs.has(b)) / Math.max(1, reader.connections.A?.length ?? 1));
+    return caseLabel(reader.connections.S?.[k] ?? 'x');
+  };
+
+  /**
+   * The statement whose value a MUX passes on: itself, or for one of Yosys' x wrappers, the statement it
+   * wraps (looking through other wrappers). A wrapper has the source range of an if around that statement,
+   * and Yosys may put it inside a MUX of a statement nested in that if: its range says nothing.
+   */
+  const wrapped = (c: IRCell): IRCell | undefined => {
+    for (let n = 0; n < 64; n++) {
+      const side = undefinedSide(c);
+      if (!side) return c;
+      const b = c.connections[side === 'A' ? 'B' : 'A'].find((x) => typeof x === 'number');
+      const d = typeof b === 'number' ? drivers.get(b) : undefined;
+      if (!d || !isProcessMux(d)) return undefined;
+      c = d;
+    }
+    return undefined;
+  };
+
+  const parts = new Map<number, { own: string; path: string[] }>();
+  for (const i of muxes) {
+    const m = cells[i];
+    const path: string[] = [];
+    let end = drivenSignals(named, m.connections, m.directions, code(m), true);
+    /** The statement the value is in: the last MUX on the way that is not one of Yosys' x wrappers. */
+    let from = wrapped(m);
+    let prev = m;
+    const seen = new Set([i]);
+    for (let feeds = end ? undefined : soleReader(cells, readers, i); feeds && !seen.has(feeds.cell) && path.length < 256; ) {
+      const r = cells[feeds.cell];
+      seen.add(feeds.cell);
+      if (!isProcessMux(r) || feeds.port === 'S') {
+        path.push(`${r.type}.${feeds.port}`);
+      } else if (undefinedSide(r)) {
+        // Yosys' x wrapper: the MUX of its statement names the branch.
+      } else if (feeds.port === 'A' && !encloses(statement(r), from && statement(from))) {
+        // A later statement that assigns the same signal: not a branch the value is in.
+        from = r;
+      } else if (feeds.port === 'A' && from && sameStatement(statement(r), statement(from))) {
+        // The next item of the same case (Yosys chains the items of `case (1'b1)` one MUX each): an item is
+        // named by its own label, not by the items before it.
+        from = r;
+      } else {
+        if (feeds.port === 'B') path.push(r.type === '$pmux' ? slot(r, prev) : condition(r));
+        else path.push(r.type === '$pmux' ? `${subject(r)}:default` : `!${operand(condition(r))}`);
+        from = r;
+      }
+      end = drivenSignals(named, r.connections, r.directions, code(r), true);
+      if (end) break;
+      prev = r;
+      feeds = soleReader(cells, readers, feeds.cell);
+    }
+    if (path.length > SHOWN_STEPS) path.splice(SHOWN_STEPS - 1, Infinity, `…${hashText(path.slice(SHOWN_STEPS - 1).join('>'))}`);
+    parts.set(i, { own: own(m), path: [...path, end || '*'] });
+  }
+
+  const ids = new Map<number, string>();
+  const name = (i: number) => {
+    const p = parts.get(i)!;
+    ids.set(i, `${cells[i].type}{${[p.own, ...p.path].join('>')}}`);
+  };
+  /** Renames the MUXes that share an ID by `more`, which adds to what they select on. */
+  const tellApart = (more: (c: IRCell) => string) => {
+    const groups = new Map<string, number[]>();
+    for (const [i, id] of ids) groups.set(id, [...(groups.get(id) ?? []), i]);
+    for (const list of groups.values()) {
+      if (list.length < 2) continue;
+      for (const i of list) {
+        parts.get(i)!.own += more(cells[i]);
+        name(i);
+      }
+    }
+  };
+  for (const i of muxes) name(i);
+  // Case statements in sequence on the same selector: by the labels of their items.
+  tellApart((c) => (c.type === '$pmux' ? `{${[...new Set((c.connections.S ?? []).map(caseLabel))].sort().join(',')}}` : ''));
+  // Then by what they pass on: their values, and what the MUXes of the process they read select on and
+  // pass on in turn (for the case and if MUXes of such statements, which have the same items).
+  const content = (c: IRCell, depth: number): string => {
+    const w = Math.max(1, c.connections.Y?.length ?? 1);
+    const value = (x: Bit[]): string => {
+      const b = x.find((y) => typeof y === 'number');
+      const d = typeof b === 'number' ? drivers.get(b) : undefined;
+      if (!d || !isProcessMux(d) || x.some((y) => typeof y === 'number' && drivers.get(y) !== d)) return describe(x);
+      return `(${own(d)}${depth < 2 ? content(d, depth + 1) : ''})`;
+    };
+    const cases =
+      c.type === '$pmux'
+        ? (c.connections.S ?? []).map((s, k) => `${caseLabel(s)}:${value(c.connections.B.slice(k * w, (k + 1) * w))}`).sort()
+        : [value(c.connections.B ?? [])];
+    return `[${cases.join(',')};${value(c.connections.A ?? [])}]`;
+  };
+  tellApart((c) => content(c, 0));
+  return ids;
 }
 
 function buildModule(
@@ -469,8 +735,8 @@ function buildModule(
   const helpers: { index: number; touched: string }[] = [];
   /** Registers named by the signals they drive (`$dlatch{Q=q}`), with those signals. */
   const namedRegisters = new Map<number, string>();
-  /** Case MUXes whose output has no name, not even a stage wire (a case nested in another case or an if). */
-  const unnamedCaseMuxes = new Set<number>();
+  /** The MUXes of if and case statements, named in a second pass by `processMuxIds`. */
+  const processMuxes: number[] = [];
   const cells: IRCell[] = Object.entries(m.cells).map(([cname, c], index) => {
     const hidden = !!c.hide_name || cname.startsWith('$');
     const src = parseSrc(c.attributes?.src);
@@ -478,6 +744,9 @@ function buildModule(
     let base: string;
     if (!hidden) {
       base = cname;
+    } else if (isProcessMux({ type: c.type, name: cname })) {
+      base = c.type;
+      processMuxes.push(index);
     } else {
       // Fingerprint: type + the expression text it came from + named signals it touches.
       // Comments are not part of what a cell computes: adding one must not change its ID.
@@ -486,16 +755,7 @@ function buildModule(
       // A register (or any cell made from a whole always block) is told apart by what it drives:
       // the block's text changes with every statement or comment in it, and is the same for every
       // register the block makes. Edits saved for `$dff{Q=q}` then survive changes to the block.
-      // So is the MUX of a case statement (`$pmux{Y=seg}`): its inputs are the values of the case
-      // table, and edits saved for it must survive a change to one of them.
-      const caseMux = isCaseMux(c.type, cname, expr);
-      // The code that made the cell, to pick among several names of the same bits: for a case MUX,
-      // its case statement (Yosys gives it the position of an item, then the range of the statement).
-      const code = caseMux ? stripComments(sourceText(sources, src[1]) ?? '') : (expr ?? '');
-      const drives =
-        REGISTER_CELL.test(c.type) || PROCESS_TEXT.test(expr ?? '') || caseMux
-          ? drivenSignals(nets, c.connections, directions, code, caseMux)
-          : '';
+      const drives = REGISTER_CELL.test(c.type) || PROCESS_TEXT.test(expr ?? '') ? drivenSignals(nets, c.connections, directions, expr ?? '') : '';
       const touched = Object.keys(c.connections)
         .sort()
         .map((p) => {
@@ -503,9 +763,8 @@ function buildModule(
           // A constant operand tells apart cells that read the same signals, such as the `sel == 2'd0`,
           // `sel == 2'd1`… compares of a case statement (Yosys gives them no source text). Without it
           // they differ only by Yosys' cell order, so after the case items are reordered an edit
-          // saved for one of them would move or hide another. The constants of a case MUX are the
-          // values of its table, which are edited: they are left out.
-          if (bits.length > 0 && bits.every((b) => typeof b !== 'number')) return `${p}=${caseMux ? '' : formatConst(bits)}`;
+          // saved for one of them would move or hide another.
+          if (bits.length > 0 && bits.every((b) => typeof b !== 'number')) return `${p}=${formatConst(bits)}`;
           const names = new Set<string>();
           for (const b of bits) if (typeof b === 'number' && bitName.has(b)) names.add(bitName.get(b)!);
           return `${p}=${[...names].join('+')}`;
@@ -514,7 +773,6 @@ function buildModule(
       base = `${c.type}{${drives || (expr ?? touched)}}`;
       if (drives && REGISTER_CELL.test(c.type)) namedRegisters.set(index, drives);
       else if (!drives && PROCESS_TEXT.test(expr ?? '')) helpers.push({ index, touched });
-      else if (!drives && caseMux) unnamedCaseMuxes.add(index);
     }
     const isInstance = allModules.has(c.type);
     return {
@@ -531,7 +789,7 @@ function buildModule(
     };
   });
 
-  if (helpers.length || unnamedCaseMuxes.size) {
+  if (helpers.length || processMuxes.length) {
     const readers = new Map<number, number[]>();
     cells.forEach((c, i) => {
       for (const [p, bits] of Object.entries(c.connections)) {
@@ -551,57 +809,7 @@ function buildModule(
       const served = servedRegister(cells, readers, namedRegisters, h.index);
       if (served) cells[h.index].id = `${cells[h.index].type}{${h.touched};${served}}`;
     }
-    // A case nested in another case or in an if drives a wire of Yosys' own (`$procmux$12_Y`, or `$2\y`,
-    // numbered by the statements before it). Without its values, its fingerprint can be the same as that
-    // of the other nested cases, and Yosys' cell order would tell them apart: one more item in one of
-    // them could swap their IDs. It is named by the MUX inputs its value goes through to the first signal
-    // with a name: `$pmux{Y>$pmux.B[2'd2]>$mux.A>Y=$0\y}` for a case in the item 2'd2 of a case in the
-    // else of an if, or `$mux{Y>$mux.A>$mux.A>Y=$0\st}` for the chain of MUXes of a `case (1'b1)`.
-    // An item is named by the value it compares with, so items added, removed or changed elsewhere
-    // rename nothing.
-    // The value also goes through the later statements of the block that assign the same signal
-    // (`if (rst) y = 0;` after a case), as what they keep when they select nothing. Those are left out,
-    // so that adding or removing one renames nothing. A statement that comes before or after another
-    // one is named by what it selects on instead (`(op)`), to tell it from them.
-    const drivers = bitDrivers(cells);
-    const subject = (c: IRCell) => `(${selectSubject(nets, drivers, c) ?? ''})`;
-    for (const i of unnamedCaseMuxes) {
-      const path: string[] = [];
-      const seen = new Set([i]);
-      /** The cell whose outputs the next step reads. */
-      let prev = cells[i];
-      /** The last cell of the path that belongs to a statement (a wrapper stands for the statement it wraps). */
-      let from = cells[i];
-      const wrapped = undefinedDefault(from) ? statementOf(drivers, from.connections.B) : undefined;
-      if (wrapped && isMux(wrapped.type)) from = wrapped;
-      /** True after a step into a later statement: the cells from there on are not on the path. */
-      let later = false;
-      for (let feeds = soleReader(cells, readers, i); feeds && !seen.has(feeds.cell) && path.length < 16; ) {
-        const r = cells[feeds.cell];
-        const stmt = r.src.at(-1);
-        const wrapper = undefinedDefault(r);
-        seen.add(feeds.cell);
-        if (feeds.port === 'A' && isMux(r.type) && !encloses(stmt, from.src.at(-1))) {
-          if (!later) path.push(subject(from));
-          later = true;
-          from = r;
-        } else if (!(later && wrapper)) {
-          // Leaving a statement for the one around it: it may come after another one in the same branch.
-          if (!later && !wrapper && !sameRange(stmt, from.src.at(-1)) && followsStatement(nets, drivers, from, stmt)) path.push(subject(from));
-          path.push(`${r.type}.${feeds.port}${caseSlot(drivers, prev, r, feeds.port)}`);
-          later = false;
-          if (!wrapper) from = r;
-        }
-        const drives = drivenSignals(nets, r.connections, r.directions, '', true);
-        if (drives) {
-          if (!later && followsStatement(nets, drivers, r)) path.push(subject(r));
-          cells[i].id = `${cells[i].type}{Y>${path.join('>')}>${drives}}`;
-          break;
-        }
-        prev = r;
-        feeds = soleReader(cells, readers, feeds.cell);
-      }
-    }
+    for (const [i, id] of processMuxIds(cells, nets, sources, readers, processMuxes)) cells[i].id = id;
   }
   const used = new Map<string, number>();
   for (const c of cells) {
