@@ -714,15 +714,47 @@ const inKeepOut = (pt: Point, obstacles: Rect[], own: Rect) =>
   );
 
 /**
+ * The middle of the gap between a pin's own symbol and the nearest other symbol straight out from the pin,
+ * when a wire fits in it clear of both (more than twice the keep-out apart), or undefined.
+ */
+function gapMiddle(end: RouteEnd, obstacles: Rect[]): Point | undefined {
+  const { point: p, rect: own } = end;
+  const vertical = end.side === 'SOUTH' || end.side === 'NORTH';
+  const sign = end.side === 'SOUTH' || end.side === 'EAST' ? 1 : -1;
+  // Along the stub: where it leaves its symbol's box (the pin may sit inside it), and the nearest face ahead.
+  const at = vertical ? p.y : p.x;
+  const edge = vertical ? (sign > 0 ? own.y + own.height : own.y) : sign > 0 ? own.x + own.width : own.x;
+  const start = sign > 0 ? Math.max(at, edge) : Math.min(at, edge);
+  const across = vertical ? p.x : p.y;
+  let face: number | undefined;
+  for (const r of obstacles) {
+    if (sameRect(r, own)) continue;
+    const lo = (vertical ? r.x : r.y) - INFLATE;
+    const hi = (vertical ? r.x + r.width : r.y + r.height) + INFLATE;
+    if (across <= lo || across >= hi) continue;
+    const near = vertical ? (sign > 0 ? r.y : r.y + r.height) : sign > 0 ? r.x : r.x + r.width;
+    if ((near - start) * sign < 0) continue;
+    if (face === undefined || (near - face) * sign < 0) face = near;
+  }
+  if (face === undefined || Math.abs(face - start) <= 2 * INFLATE) return undefined;
+  const mid = (start + face) / 2;
+  return vertical ? { x: p.x, y: mid } : { x: mid, y: p.y };
+}
+
+/**
  * The stub's end for a search: on the grid, unless that is in another symbol's keep-out (a symbol right
  * under a pin on the bottom edge) and the shortest stub ends clear of it. A wire to a grid point in there has to
- * cross into the symbol and runs along its outline, dipping down and back up into the pin.
+ * cross into the symbol and runs along its outline, dipping down and back up into the pin. When the other
+ * symbol is closer than the shortest stub too (one grid step under the pin), the stub ends half way across
+ * the gap, off the grid, so the wire runs between the two outlines rather than along the other one.
  */
 function searchStubEnd(end: RouteEnd, obstacles: Rect[], grid: number): Point {
   const snapped = stubEnd(end, STUB, STUB_CLEAR, grid);
   if (!inKeepOut(snapped, obstacles, end.rect)) return snapped;
   const shortest = stubEnd(end, STUB, STUB_CLEAR, 0);
-  return inKeepOut(shortest, obstacles, end.rect) ? snapped : shortest;
+  if (!inKeepOut(shortest, obstacles, end.rect)) return shortest;
+  const between = gapMiddle(end, obstacles);
+  return between && !inKeepOut(between, obstacles, end.rect) ? between : snapped;
 }
 
 /** Direction of travel from a to an axis-aligned b, or -1 when they are the same point or not aligned. */

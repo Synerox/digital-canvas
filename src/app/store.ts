@@ -27,6 +27,8 @@ import {
   isDrawnKey,
   isEmptyEdits,
   isPinned,
+  markOldOutlines,
+  OUTLINES,
   parseEdits,
   parseSavedFile,
   sheetKey,
@@ -41,6 +43,7 @@ import {
   copyNodes,
   deleteItems,
   effectiveDiagram,
+  fitNewOutlines,
   layoutToEdits,
   makeRoom,
   moveNodes,
@@ -116,6 +119,8 @@ function parsePutAside(text: string): PutAside {
     );
     if (Object.keys(kept).length) out[file] = kept;
   }
+  // Put aside in a file saved with older symbol outlines: they get room when they come back, as the document's do.
+  for (const sheets of Object.values(out)) markOldOutlines(sheets, (JSON.parse(text) as { outlines?: unknown }).outlines);
   return out;
 }
 
@@ -1057,9 +1062,12 @@ export const useStore = create<State>((set, get) => {
     const drawn = isDrawnKey(key);
     // The base of another sheet would be stored under this sheet's key (see loadedSheet).
     if (!drawn && (!s.base || !settled(s))) return;
-    const e = opts.fast ?? edits();
+    let e = opts.fast ?? edits();
     const netlist = effectiveDiagram(currentModule(), drawn ? undefined : s.base, e, interfaceOf);
     const measure = measureFor(s.theme);
+    // Saved with the symbol outlines of before: the symbols that grew since get room, once (stored below).
+    const refitted = !!e.oldOutlines;
+    if (e.oldOutlines) e = fitNewOutlines(e, netlist, measure);
     let pos = e.pos;
     let routes = e.routes;
     let placed: string[] = [];
@@ -1082,7 +1090,7 @@ export const useStore = create<State>((set, get) => {
     if (stale.length) issues = { ...issues, flagged: new Set([...issues.flagged, ...stale.map((w) => w.edge)]), messages: [...issues.messages, ...stale.map((w) => w.text)] };
     const selection = new Set([...s.selection].filter((id) => netlist.nodes.some((n) => n.id === id) || netlist.edges.some((x) => x.id === id)));
     const patch: Partial<State> = { netlist, layout: g.layout, issues, selection: selection.size === s.selection.size ? s.selection : selection };
-    if (!opts.fast && (placed.length || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
+    if (!opts.fast && (refitted || placed.length || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
       const stored: SheetEdits = { ...e, pos, routes: { ...e.routes, ...g.routed } };
       patch.doc = { ...s.doc, sheets: { ...s.doc.sheets, [key]: stored } };
       if (copiedWork?.derived === s.doc) copiedWork = { ...copiedWork, derived: patch.doc };
@@ -1184,9 +1192,11 @@ export const useStore = create<State>((set, get) => {
       base = buildDiagram(blockDesign, module, rules);
       baseCache.set(cacheKey, base);
     }
-    const e = doc.sheets[sheetKey({ instance: module, module }, 'blocks')] ?? emptyEdits();
-    const netlist = effectiveDiagram(module, base, e, interfaceOf);
+    const saved = doc.sheets[sheetKey({ instance: module, module }, 'blocks')] ?? emptyEdits();
+    const netlist = effectiveDiagram(module, base, saved, interfaceOf);
     const measure = measureFor(theme);
+    // As refresh() draws it: with room for the symbols that grew since an older file was saved.
+    const e = saved.oldOutlines ? fitNewOutlines(saved, netlist, measure) : saved;
     let { pos, routes } = e;
     if (!isPinned(e) || netlist.nodes.some((n) => !pos[n.id])) {
       const elk = await elkOf(cacheKey, base);
@@ -2222,6 +2232,7 @@ export const useStore = create<State>((set, get) => {
       return {
         format: FILE_FORMAT,
         version: 1,
+        outlines: OUTLINES,
         files: s.files,
         ...(s.topOverride ? { top: s.topOverride } : {}),
         rules: [...s.rules],

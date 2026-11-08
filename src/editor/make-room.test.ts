@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { emptyEdits } from './doc';
-import { makeRoom } from './sheet';
+import { approxMeasure, type Point, sizeNode } from '../layout/elk-layout';
+import { OUTLINES, type SheetEdits, emptyEdits, parseSavedFile } from './doc';
+import { addNodes, connect, effectiveDiagram, fitNewOutlines, makeRoom, resolveConnection } from './sheet';
+import { type InterfaceOf, type SymKey, type SymParams, newUserNode } from './symbols';
 
 const size = (width: number, height: number) => ({ width, height });
 
@@ -151,5 +153,139 @@ describe('makeRoom', () => {
     // Beside a, below the band it grows into, a pin is as close to it either way: a grows upwards.
     const below = makeRoom({ ...emptyEdits(), pos: { a: { x: 0, y: 0 }, pin: { x: -50, y: 30 } } }, was, grow);
     expect(below.pos).toEqual({ a: { x: 0, y: -20 }, pin: { x: -50, y: 30 } });
+  });
+});
+
+describe('fitNewOutlines', () => {
+  const none: InterfaceOf = () => undefined;
+  /** A drawing saved with the old outlines: symbols at these corners, wires with these saved routes. */
+  const sheet = (items: [string, SymKey, number, number, SymParams?][], routes: Record<string, Point[]> = {}) => {
+    let e = addNodes(
+      emptyEdits(),
+      items.map(([id, sym, x, y, params]) => {
+        const node = newUserNode(id, sym);
+        return { node: params ? { ...node, params: { ...node.params, ...params } } : node, pos: { x, y } };
+      }),
+    );
+    for (const k of Object.keys(routes)) {
+      const [from, to] = k.split('>');
+      const d = effectiveDiagram('m', undefined, e, none);
+      const c = resolveConnection(d, { kind: 'port', node: from.split('.')[0], port: from }, { kind: 'port', node: to.split('.')[0], port: to });
+      if ('error' in c) throw new Error(c.error);
+      let id: string;
+      [id, e] = connect(e, c);
+      e = { ...e, routes: { ...e.routes, [id]: { points: routes[k] } } };
+    }
+    return { ...e, oldOutlines: true as const };
+  };
+  const boxes = (e: SheetEdits) => {
+    const d = effectiveDiagram('m', undefined, e, none);
+    return d.nodes.map((n) => ({ id: n.id, ...e.pos[n.id], ...sizeNode(n, approxMeasure) }));
+  };
+  /** Pairs of symbols that overlap or touch. */
+  const touchingBoxes = (e: SheetEdits) => {
+    const list = boxes(e);
+    const out: string[] = [];
+    for (const a of list) for (const b of list) if (a.id < b.id && a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height) out.push(`${a.id}/${b.id}`);
+    return out;
+  };
+
+  it('makes room under an adder that grew, and over it when that is free', () => {
+    // An inverter 10 px under the old 40x40 adder; nothing over it: the adder grows up, the inverter stays.
+    const up = sheet([
+      ['u:1', 'add', 200, 100],
+      ['u:2', 'not', 200, 150],
+    ]);
+    const a = fitNewOutlines(up, effectiveDiagram('m', undefined, up, none), approxMeasure);
+    expect(a.pos).toEqual({ 'u:1': { x: 200, y: 80 }, 'u:2': { x: 200, y: 150 } });
+    expect(a.oldOutlines).toBeUndefined();
+    expect(touchingBoxes(a)).toEqual([]);
+    // Another inverter right over it: the adder grows down, and what is under it moves down as far.
+    const down = sheet([
+      ['u:1', 'add', 200, 100],
+      ['u:2', 'not', 200, 150],
+      ['u:3', 'not', 200, 50],
+    ]);
+    const b = fitNewOutlines(down, effectiveDiagram('m', undefined, down, none), approxMeasure);
+    expect(b.pos).toEqual({ 'u:1': { x: 200, y: 100 }, 'u:2': { x: 200, y: 170 }, 'u:3': { x: 200, y: 50 } });
+    expect(touchingBoxes(b)).toEqual([]);
+    // Wires of other nets: one 10 px under the old adder moves down with what is under it; one over it, where
+    // the adder grows up into, is dropped (to be routed again); one well clear of it stays.
+    const wires = {
+      'u:2.Y>u:3.A': [{ x: 240, y: 170 }, { x: 260, y: 170 }, { x: 260, y: 150 }, { x: 180, y: 150 }, { x: 180, y: 70 }, { x: 200, y: 70 }],
+    };
+    const near = sheet(
+      [
+        ['u:1', 'add', 200, 100],
+        ['u:2', 'not', 200, 160],
+        ['u:3', 'not', 200, 50],
+        ['u:4', 'input', 0, 300],
+        ['u:5', 'output', 400, 300],
+      ],
+      { ...wires, 'u:4.out>u:5.in': [{ x: 40, y: 310 }, { x: 400, y: 310 }] },
+    );
+    const c = fitNewOutlines(near, effectiveDiagram('m', undefined, near, none), approxMeasure);
+    const [w1, w2] = Object.keys(near.routes);
+    expect(c.routes[w1].points.map((p) => p.y)).toEqual([190, 190, 170, 170, 70, 70]);
+    expect(c.routes[w2].points.map((p) => p.y)).toEqual([330, 330]);
+    const over = sheet(
+      [
+        ['u:1', 'add', 200, 100],
+        ['u:2', 'not', 300, 80],
+        ['u:3', 'not', 100, 80],
+      ],
+      { 'u:3.Y>u:2.A': [{ x: 140, y: 100 }, { x: 160, y: 100 }, { x: 160, y: 90 }, { x: 280, y: 90 }, { x: 280, y: 100 }, { x: 300, y: 100 }] },
+    );
+    const o = fitNewOutlines(over, effectiveDiagram('m', undefined, over, none), approxMeasure);
+    expect(o.pos['u:1']).toEqual({ x: 200, y: 80 });
+    expect(Object.keys(o.routes)).toEqual([]);
+  });
+
+  it('makes room right of a gate with more inputs that got wider, moving the wires there along', () => {
+    // A 4-input AND (40 wide then, 60 now) 20 px left of an inverter; a wire of another net ran down between them.
+    const e = sheet(
+      [
+        ['u:1', 'and', 200, 100, { inputs: 4 }],
+        ['u:2', 'not', 260, 120],
+        ['u:3', 'input', 0, 300],
+        ['u:4', 'output', 400, 300],
+      ],
+      { 'u:3.out>u:4.in': [{ x: 40, y: 310 }, { x: 250, y: 310 }, { x: 250, y: 90 }, { x: 380, y: 90 }, { x: 380, y: 310 }, { x: 400, y: 310 }] },
+    );
+    const out = fitNewOutlines(e, effectiveDiagram('m', undefined, e, none), approxMeasure);
+    expect(out.pos['u:1']).toEqual({ x: 200, y: 100 });
+    // Everything right of the gate's old right edge moved 20 px right, the wire's points there too.
+    expect(out.pos['u:2']).toEqual({ x: 280, y: 120 });
+    expect(out.pos['u:4']).toEqual({ x: 420, y: 300 });
+    expect(touchingBoxes(out)).toEqual([]);
+    const [w] = Object.keys(e.routes);
+    expect(out.routes[w].points.map((p) => p.x)).toEqual([40, 270, 270, 400, 400, 420]);
+  });
+
+  it('changes nothing but the mark where no symbol grew', () => {
+    // A MUX got narrower: nothing moves for it.
+    const e = sheet([
+      ['u:1', 'mux', 200, 100],
+      ['u:2', 'not', 280, 110],
+    ]);
+    const out = fitNewOutlines(e, effectiveDiagram('m', undefined, e, none), approxMeasure);
+    expect(out.pos).toEqual(e.pos);
+    expect(out.routes).toEqual(e.routes);
+    expect(out.oldOutlines).toBeUndefined();
+  });
+});
+
+describe('outline version in saved files', () => {
+  const file = (outlines: number | undefined, sheets: Record<string, unknown>) =>
+    JSON.stringify({ format: 'digital-canvas', version: 1, ...(outlines === undefined ? {} : { outlines }), doc: { sheets, drawn: ['d'] } });
+  const pinned = { pos: { 'u:1': { x: 0, y: 0 } }, nodes: [{ id: 'u:1', sym: 'add', params: { width: 4 } }] };
+
+  it('marks the pinned sheets of a file saved before, and keeps the mark of a sheet not drawn since', () => {
+    const old = parseSavedFile(file(undefined, { 'd:d': pinned, 'v:blocks:top': { labels: { a: 'b' } } })).doc.sheets;
+    expect(old['d:d'].oldOutlines).toBe(true);
+    // A sheet ELK lays out each time has no positions saved: nothing to move.
+    expect(old['v:blocks:top'].oldOutlines).toBeUndefined();
+    expect(parseSavedFile(file(OUTLINES, { 'd:d': pinned })).doc.sheets['d:d'].oldOutlines).toBeUndefined();
+    expect(parseSavedFile(file(OUTLINES, { 'd:d': { ...pinned, oldOutlines: true } })).doc.sheets['d:d'].oldOutlines).toBe(true);
   });
 });

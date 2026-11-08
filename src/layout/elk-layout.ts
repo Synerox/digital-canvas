@@ -267,6 +267,22 @@ export function sizeNode(n: DNode, measure: MeasureText): Sized {
   return { width, height, ports };
 }
 
+/**
+ * The size sizeNode gave a cell before the symbol outlines of version 2 (see OUTLINES in editor/doc), for the
+ * cells whose size changed then: an adder was 40x40, a MUX 60 wide, a gate 40 wide whatever its inputs.
+ * Undefined for other symbols, whose size did not change.
+ */
+export function legacyCellSize(n: DNode, measure: MeasureText): { width: number; height: number } | undefined {
+  const isMux = isMuxType(n.cellType);
+  if (n.kind !== 'cell' || !(isMux || isAluType(n.cellType) || gateShape(n.cellType))) return undefined;
+  const count = (side: Side) => n.ports.filter((p) => p.side === side).length;
+  const rows = Math.max(count('WEST'), count('EAST'), isMux ? 2 : 1);
+  return {
+    width: edgeWidth(Math.max(isMux ? 30 : 40, measure(n.label, FONT.op) + 16), count('SOUTH')),
+    height: Math.max(40, rows * ROW + (isMux ? 20 : 0)),
+  };
+}
+
 export function isMuxType(t: string | undefined): boolean {
   return t === '$mux' || t === '$pmux' || t === '$bmux' || t === 'dc:mux';
 }

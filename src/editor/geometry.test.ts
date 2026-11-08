@@ -515,11 +515,11 @@ describe('stored wires after edits', () => {
     // An adder was 40x40 (B at y+30, Y at y+20) and a 2:1 MUX 60x60 (select at (30, 55), Y at x+60): pins
     // that moved since. Wires saved then end where those pins were; drawn by hand or not, they now end on them.
     const old: Record<string, Point[]> = {
-      'u:1.out>u:4.A': [{ x: 30, y: 110 }, { x: 200, y: 110 }],
-      'u:2.out>u:4.B': [{ x: 30, y: 210 }, { x: 150, y: 210 }, { x: 150, y: 130 }, { x: 200, y: 130 }],
+      'u:1.out>u:4.A': [{ x: 40, y: 110 }, { x: 200, y: 110 }],
+      'u:2.out>u:4.B': [{ x: 40, y: 210 }, { x: 150, y: 210 }, { x: 150, y: 130 }, { x: 200, y: 130 }],
       'u:4.Y>u:5.A': [{ x: 240, y: 120 }, { x: 400, y: 120 }],
-      'u:2.out>u:5.B': [{ x: 30, y: 210 }, { x: 380, y: 210 }, { x: 380, y: 140 }, { x: 400, y: 140 }],
-      'u:3.out>u:5.S': [{ x: 30, y: 310 }, { x: 430, y: 310 }, { x: 430, y: 155 }],
+      'u:2.out>u:5.B': [{ x: 40, y: 210 }, { x: 380, y: 210 }, { x: 380, y: 140 }, { x: 400, y: 140 }],
+      'u:3.out>u:5.S': [{ x: 40, y: 310 }, { x: 430, y: 310 }, { x: 430, y: 155 }],
       'u:5.Y>u:6.in': [{ x: 460, y: 130 }, { x: 600, y: 130 }],
     };
     for (const manual of [false, true]) {
@@ -554,6 +554,31 @@ describe('stored wires after edits', () => {
       expect(crowded(g.layout), label).toEqual([]);
       expect(crowdedOwn(g.layout), label).toEqual([]);
       expect(touching(g.layout), label).toEqual([]);
+      // Wires whose pins did not move come back as they were saved; those drawn by hand stay drawn by hand.
+      const edge = (k: string) => g.layout.edges.find((x) => x.id === ids.find(([, kk]) => kk === k)![0])!;
+      for (const k of ['u:1.out>u:4.A', 'u:2.out>u:5.B']) expect(edge(k).points, `${label}: ${k}`).toEqual(old[k]);
+      if (manual) for (const [id] of ids) expect(g.routed[id]?.manual ?? routes[id].manual, `${label}: ${id}`).toBe(true);
+    }
+  });
+
+  it('wires a MUX select or a register clock between its symbol and one a grid step under it', () => {
+    for (const [sym, pin, h] of [
+      ['mux', 'S', 60],
+      ['dff', 'CLK', 40],
+    ] as const) {
+      for (const below of ['mux', 'add', 'and'] as const) {
+        const s = new Sheet([
+          ['u:1', sym, 300, 100],
+          ['u:2', below, 300, 100 + h + 10],
+          ['u:3', 'input', 0, 400],
+        ]);
+        const w = s.wire('u:3.out', `u:1.${pin}`);
+        const pts = s.points(w);
+        const label = `${sym} over ${below}`;
+        expect(pts[pts.length - 1], label).toEqual(s.pin(`u:1.${pin}`));
+        expect(crowded(s.layout!), label).toEqual([]);
+        expect(crowdedOwn(s.layout!), label).toEqual([]);
+      }
     }
   });
 

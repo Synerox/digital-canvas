@@ -6,7 +6,7 @@
  * undo/redo can keep old versions as they are.
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
-import { GRID, type LayoutResult, type Point } from '../layout/elk-layout';
+import { GRID, type LayoutResult, type MeasureText, type Point, legacyCellSize, sizeNode } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
 import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
@@ -740,6 +740,26 @@ export function toDrawing(d: Diagram, layout: LayoutResult, e: SheetEdits, iface
 export interface Size {
   width: number;
   height: number;
+}
+
+/**
+ * A sheet saved with the symbol outlines of before (oldOutlines, see OUTLINES), drawn with today's: the symbols
+ * that grew get room as a block that grew does (makeRoom), so none covers a neighbour, a pin or a wire. An adder
+ * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right. Wires a grown
+ * symbol covers are routed again; so are those to its pins that moved (their ends no longer meet them).
+ */
+export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText): SheetEdits {
+  const was = new Map<string, Size>();
+  const now = new Map<string, Size>();
+  for (const n of d.nodes) {
+    if (!e.pos[n.id]) continue;
+    const s = sizeNode(n, measure);
+    now.set(n.id, { width: s.width, height: s.height });
+    was.set(n.id, legacyCellSize(n, measure) ?? now.get(n.id)!);
+  }
+  const out = { ...makeRoom(e, was, now) };
+  delete out.oldOutlines;
+  return out;
 }
 
 /**

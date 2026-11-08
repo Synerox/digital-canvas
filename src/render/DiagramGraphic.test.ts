@@ -256,6 +256,23 @@ describe('textbook symbols', () => {
         }
         // No input lands on a corner of a body shorter than the gate.
         if (body < node.height) for (const y of ins) expect(y === top || y === top + body, `${sym} ${inputs}: input at ${y}`).toBe(false);
+        // The body drawn is that tall (its outline starts at its top corner), and the back lines meet it.
+        const m = /<path d="M([-\d.]+),([-\d.]+)/.exec(svg)!;
+        expect([Number(m[1]), Number(m[2])], `${sym} ${inputs} body top`).toEqual([node.x, top]);
+        if (back.length) {
+          expect(back[0][3]).toBe(top);
+          expect(back[1][1]).toBe(top + body);
+        }
+        // An OR or XOR has a curved back: inputs on the body run on to it, the others end on the straight back line.
+        if (sym !== 'and' && sym !== 'nand') {
+          const stubs = lines(svg).filter(([x1, y1, , y2]) => x1 === node.x && y1 === y2);
+          const inside = ins.filter((y) => y > top && y < top + body);
+          expect(stubs.map(([, y]) => y).sort((a, b) => a - b), `${sym} ${inputs} stubs`).toEqual(inside);
+          for (const [, y, x2] of stubs) {
+            const t = (y - top) / body;
+            expect(x2 - node.x, `${sym} ${inputs} stub at ${y}`).toBeCloseTo(2 * (1 - t) * t * Math.min(body, node.width) * 0.25, 6);
+          }
+        }
       }
     }
   });

@@ -21,7 +21,7 @@ vi.mock('../yosys/client', async () => {
 
 import { DEFAULT_RULES, RULES } from '../core/rules';
 import type { EditDoc, SavedFile, SheetEdits } from '../editor/doc';
-import { emptyEdits, parseSavedFile } from '../editor/doc';
+import { OUTLINES, emptyEdits, parseSavedFile } from '../editor/doc';
 import { componentSymbol, parseComponents } from '../editor/components';
 import { polylineHitsRect } from '../editor/router';
 import { effectiveDiagram } from '../editor/sheet';
@@ -62,6 +62,7 @@ async function open(files: Record<string, string>, extra: Partial<SavedFile> = {
   const f: SavedFile = {
     format: 'digital-canvas',
     version: 1,
+    outlines: OUTLINES,
     files,
     rules: [...DEFAULT_RULES],
     viewMode: 'blocks',
@@ -830,6 +831,36 @@ describe('store', () => {
     await st().loadExample('fruit');
     expect(st().putAside).toEqual({});
   }, 60_000);
+
+  it('makes room for the symbols that grew when it opens a drawing saved with the old outlines, once', async () => {
+    // An adder (40x40 then) with an inverter 10 px under it and another right over it, wired as they were drawn.
+    const d: SheetEdits = {
+      ...drawing(
+        [{ ...newUserNode('u:1', 'add'), params: { width: 4 } }, newUserNode('u:2', 'not'), newUserNode('u:3', 'not'), pin('u:4', 'input', 'a')],
+        [{ id: 'w:1', source: { node: 'u:4', port: 'u:4.out' }, target: { node: 'u:1', port: 'u:1.B' } }],
+      ),
+      pos: { 'u:1': { x: 200, y: 100 }, 'u:2': { x: 200, y: 150 }, 'u:3': { x: 200, y: 50 }, 'u:4': { x: 0, y: 120 } },
+      routes: { 'w:1': { points: [{ x: 40, y: 130 }, { x: 200, y: 130 }] } },
+    };
+    await open({}, { outlines: undefined, doc: { drawn: ['old'], sheets: { 'd:old': d } }, path: [{ instance: 'old', module: 'old', drawn: true }] });
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    // The adder grew down and the inverter under it moved down as far; the wire meets the adder's B pin again.
+    expect([box('u:1').y, box('u:1').height]).toEqual([100, 60]);
+    expect(box('u:2').y).toBe(170);
+    expect(box('u:3').y).toBe(50);
+    const w = st().layout!.edges.find((x) => x.id === 'w:1')!;
+    const b = box('u:1').ports.find((q) => q.name === 'B')!;
+    expect(w.points[w.points.length - 1]).toEqual({ x: b.x, y: b.y });
+    // Stored as the drawing is now, and saved with today's outlines: opened again, nothing moves.
+    expect(st().doc.sheets['d:old'].oldOutlines).toBeUndefined();
+    expect(st().doc.sheets['d:old'].pos['u:2']).toEqual({ x: 200, y: 170 });
+    const saved = JSON.parse(JSON.stringify(st().savedFile())) as SavedFile;
+    expect(saved.outlines).toBe(OUTLINES);
+    expect(saved.doc.sheets['d:old'].oldOutlines).toBeUndefined();
+    await st().loadSaved(JSON.stringify(saved));
+    expect(box('u:2').y).toBe(170);
+    expect(box('u:1').y).toBe(100);
+  });
 
   it('pastes onto another sheet where the user looks, and on its own sheet beside the original (F2, N30)', async () => {
     const far = { ...drawing([pin('u:1', 'input', 'a')]), pos: { 'u:1': { x: 1200, y: 600 } } };

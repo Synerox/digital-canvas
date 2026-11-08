@@ -332,6 +332,8 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     const first = Math.min(...inputs.map((q) => q.y));
     const last = Math.max(...inputs.map((q) => q.y));
     const back = [
+      // In the editor the whole symbol is picked by a click, not only its body (what is under the pointer is what is hit).
+      p.interactive && hb < h && <rect key="hit" x={x} y={y} width={w} height={h} fill="transparent" />,
       first < top && <line key="up" x1={x} y1={first} x2={x} y2={top} stroke={s.stroke} strokeWidth={s.width} />,
       last > bottom && <line key="down" x1={x} y1={bottom} x2={x} y2={last} stroke={s.stroke} strokeWidth={s.width} />,
     ];
