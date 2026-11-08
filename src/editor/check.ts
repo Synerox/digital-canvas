@@ -23,6 +23,9 @@ export interface SheetIssues {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/** The line of the sheet's issues about its open inputs (Properties lets it select their symbols). */
+export const openInputsMessage = (n: number) => `${plural(n, 'input')} not connected.`;
+
 /**
  * Low zero bits a wire appends to what it carries (an imported `×4` wire has 2), read as the
  * export reads them: only from its `shift`. Its label is text the user may rename, never logic.
@@ -129,7 +132,7 @@ export function checkSheet(d: Diagram): SheetIssues {
     if (n.kind === 'text') continue;
     for (const p of n.ports) if (p.dir === 'in' && !p.inout && n.kind !== 'inout' && !into.has(p.id)) openPorts.add(p.id);
   }
-  if (openPorts.size) messages.push(`${plural(openPorts.size, 'input')} not connected.`);
+  if (openPorts.size) messages.push(openInputsMessage(openPorts.size));
   const clashes = pinNameClashes(d);
   messages.push(...clashes.slice(0, 3));
   if (clashes.length > 3) messages.push(`${clashes.length - 3} more repeated pin names.`);

@@ -88,8 +88,11 @@ export function Palette() {
   };
 
   const item = (key: string, sym: SymKey, title: string, hint: string, params?: SymParams, component?: string) => {
+    // A symbol placed from a preset follows the preset (a part's block follows it by its module anyway).
+    const preset = component && sym !== 'block' ? component : undefined;
+    const what = { sym, params, ...(preset ? { component: preset } : {}) };
     // A preset is the same symbol as the library's with other parameters: only one of them is on.
-    const active = placing?.sym === sym && sameParams(placing.params, params);
+    const active = placing?.sym === sym && sameParams(placing.params, params) && placing.component === preset;
     return (
       <button
         key={key}
@@ -99,11 +102,11 @@ export function Palette() {
         onDragStart={(ev) => {
           ev.dataTransfer.setData('application/x-dc-symbol', sym);
           ev.dataTransfer.effectAllowed = 'copy';
-          startPlacing({ sym, params });
+          startPlacing(what);
         }}
         data-settings-from={component ? `library:${component}` : undefined}
         onClick={(ev) => {
-          startPlacing(active ? undefined : { sym, params });
+          startPlacing(active ? undefined : what);
           if (component && clicks.click(key, ev.detail)) edit(component, ev);
         }}
         onDoubleClick={component ? (ev) => edit(component, ev) : undefined}

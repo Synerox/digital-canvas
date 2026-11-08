@@ -9,7 +9,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { type ComponentDef, MAX_COMPONENTS, editComponent, freeComponentName, isPart, parseSymbolJson, settingsHint } from '../editor/components';
 import { SYMBOL_BY_KEY, type SymKey, type SymParams } from '../editor/symbols';
 import { MOD, useEscape } from './Dialogs';
-import { sheetsUsing, useStore } from './store';
+import { sheetsPlacing, sheetsUsing, useStore } from './store';
 import { type SettingsRequest, type Subject, subjectOf } from './settings';
 import { ui } from './ui-events';
 
@@ -36,6 +36,10 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
   const setComponents = useStore((s) => s.setComponents);
   const nameTaken = useStore((s) => s.componentNameTaken);
   const doc = useStore((s) => s.doc);
+  // A Verilog module or a drawing of a part's name defines its blocks in its place (see partOfBlock).
+  const shadowed = useStore(
+    (s) => subject.kind === 'component' && isPart(subject.def) && (s.doc.drawn.includes(subject.def.name) || !!s.viewDesign()?.modules[subject.def.name]),
+  );
   const [text, setText] = useState(subject.text);
   const [said, setSaid] = useState<string>();
   const box = useRef<HTMLDivElement>(null);
@@ -66,11 +70,21 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
 
   const apply = () => {
     if (error !== undefined) return;
+    applyTyped();
+    onClose();
+  };
+
+  /** Make what is typed the symbol's settings or the library's component (nothing when it is unchanged). */
+  const applyTyped = () => {
     if (text !== subject.text) {
       if (subject.kind === 'node' && result.params) setNodeParams(subject.id, result.params);
-      else if (result.defs) setComponents(result.defs);
+      else if (subject.kind === 'component' && result.defs) {
+        // In the same place of the list: when its name changed, what was placed from it follows the new name.
+        const from = subject.def.name;
+        const to = result.defs[(doc.components ?? []).findIndex((c) => c.name === from)]?.name;
+        setComponents(result.defs, to && to !== from ? { [from]: to } : undefined);
+      }
     }
-    onClose();
   };
 
   /** Add the settings typed to the library as a component of its own (the symbol stays as it is until Apply). */
@@ -81,9 +95,12 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
       return;
     }
     const p = result.params;
-    const name = freeComponentName(doc.components, `${subject.sym}${p.inputs ?? p.parts ?? (p.width && p.width > 1 ? p.width : '')}`, nameTaken);
+    // and3, add8, mux4x8: the count of inputs (or slices), and the width when it is a bus.
+    const count = p.inputs ?? p.parts;
+    const bits = p.width && p.width > 1 ? `${count !== undefined ? 'x' : ''}${p.width}` : '';
+    const name = freeComponentName(doc.components, `${subject.sym}${count ?? ''}${bits}`, nameTaken);
     setComponents([...(doc.components ?? []), { name, base: subject.sym, params: p }]);
-    setSaid(`Added ${name} to Components.`);
+    setSaid(`Added ${name} to Components.${text !== subject.text ? ' Apply changes this symbol too.' : ''}`);
   };
 
   const symTitle = (sym: SymKey) => SYMBOL_BY_KEY[sym]?.title ?? sym;
@@ -93,20 +110,25 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
   if (subject.kind === 'node') {
     title = symTitle(subject.sym);
     hint = `Sets ${settingsHint(subject.sym)}.`;
+    const from = subject.component;
+    if (from && doc.components?.some((c) => c.name === from && !isPart(c))) note = `Placed from ${from}: a change here is for this symbol only (it stops following ${from}).`;
   } else {
     const d = subject.def;
     title = `${d.title ?? d.name} (component)`;
     hint = isPart(d)
-      ? 'Pins: "inputs", "outputs", "inouts" as names such as "a[7:0]", or a number of pins; "width" is their bits.'
+      ? 'Pins: "inputs", "outputs", "inouts" as names such as "a" or "a[7:0]", or a number of pins; "width" is the bits of every pin written without them ("a").'
       : `Sets ${settingsHint(d.base!)}; "base" is the symbol.`;
     const blocks = isPart(d) ? sheetsUsing(doc, d.name) : [];
+    const placed = isPart(d) ? [] : sheetsPlacing(doc, d.name);
     const kept = result.defs?.find((c) => c.name === d.name);
-    if (blocks.length && result.defs && !(kept && isPart(kept))) {
+    if (shadowed) {
+      note = `A Verilog module or drawing named ${d.name} defines its blocks now: these pins are not used.`;
+    } else if (blocks.length && result.defs && !(kept && isPart(kept))) {
       note = `Blocks of ${d.name} on ${blocks.join(', ')} lose their pins and wires (Undo brings them back).`;
     } else if (blocks.length) {
       note = `Changes every block of ${d.name}.`;
-    } else if (!isPart(d)) {
-      note = 'Symbols placed already keep their settings.';
+    } else if (placed.length) {
+      note = `Changes the symbols placed from ${d.name} on ${placed.join(', ')} (except those changed on their own).`;
     }
   }
 
@@ -122,6 +144,14 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
           .map((el) => el.closest('[data-node-id], [data-settings-from]'))
           .find((el) => el !== null);
         if (from !== undefined && under && (under.getAttribute('data-node-id') ?? under.getAttribute('data-settings-from')) === from) return;
+        // Clicking away keeps what was typed, as a field of Properties does when it is left (Esc or Cancel throws it
+        // away). JSON that is not right yet stays open, with what is wrong, rather than be lost.
+        if (text !== subject.text && error !== undefined) {
+          e.preventDefault();
+          setSaid('Fix the JSON, or press Esc to close without changing anything.');
+          return;
+        }
+        applyTyped();
         onClose();
       }}
     >

@@ -48,7 +48,6 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .files li { display: flex; align-items: center; border-radius: 4px; }
 .files li.active { background: #f1f0eb; }
 .file-name { flex: 1; border: none; background: none; text-align: left; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.help p { margin: 0 0 8px; line-height: 1.45; }
 
 .center { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .center-head { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); min-height: 34px; }

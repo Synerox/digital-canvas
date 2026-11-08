@@ -52,6 +52,9 @@ import {
   resolveConnection,
   restoreHidden,
   setParams,
+  followComponents,
+  keepLinks,
+  unlinkChanged,
   setRoute,
   setSlice,
   toDrawing,
@@ -62,7 +65,7 @@ import { orthogonalize } from '../editor/router';
 import { legContaining } from '../editor/draw-wire';
 import { type SheetIssues, checkSheet } from '../editor/check';
 import { verilogIdent } from '../editor/verilog-export';
-import { type ComponentDef, isPart, partInterface, partNamed } from '../editor/components';
+import { type ComponentDef, componentSymbol, followsPreset, isPart, partInterface, partNamed } from '../editor/components';
 
 export type { PathEntry, ViewMode } from '../editor/doc';
 
@@ -169,6 +172,8 @@ export interface HistoryEntry {
 export interface Placing {
   sym: SymKey;
   params?: SymParams;
+  /** The preset of the library it is placed from: the symbol follows the preset (see followComponents). */
+  component?: string;
 }
 
 interface State {
@@ -308,8 +313,11 @@ interface State {
   undo(): void;
   redo(): void;
   newDrawing(name?: string): void;
-  /** Make these the components of the library (one undo step); the blocks of parts follow their pins. */
-  setComponents(defs: ComponentDef[]): void;
+  /**
+   * Make these the components of the library (one undo step): the blocks of parts follow their pins, the
+   * symbols placed from a preset its settings (and its new name, when `renamed` says it was renamed).
+   */
+  setComponents(defs: ComponentDef[], renamed?: Readonly<Record<string, string>>): void;
   /** Why a part of the library may not be named `name` (a drawing or a Verilog module has the name), or nothing. */
   componentNameTaken(name: string): string | undefined;
   renameDrawing(from: string, to: string): string | undefined;
@@ -557,6 +565,29 @@ export function sheetsUsing(doc: EditDoc, module: string): string[] {
   return [...out];
 }
 
+/** Where symbols placed from the preset `component` (and still following it) are, by sheet name. */
+export function sheetsPlacing(doc: EditDoc, component: string): string[] {
+  const out = new Set<string>();
+  for (const [k, e] of Object.entries(doc.sheets)) {
+    if (e.nodes.some((n) => n.component === component && followsPreset(n, doc.components))) out.add(k.replace(/^d:|^v:[a-z]+:/, ''));
+  }
+  return [...out];
+}
+
+/**
+ * What is being placed once the library is `defs` (its presets renamed as `renamed` says): a preset chosen to be
+ * placed is placed as it is now, or no more when it is gone. `placing` itself when that changes nothing.
+ */
+export function placingNow(placing: Placing | undefined, defs: readonly ComponentDef[] | undefined, renamed?: Readonly<Record<string, string>>): Placing | undefined {
+  if (!placing?.component) return placing;
+  const name = renamed && Object.hasOwn(renamed, placing.component) ? renamed[placing.component] : placing.component;
+  const def = defs?.find((c) => c.name === name);
+  if (!def || isPart(def) || def.base !== placing.sym) return undefined;
+  const now: Placing = { ...componentSymbol(def), component: def.name };
+  // The params exactly as the library writes them (the palette shows the preset chosen by comparing them).
+  return now.component === placing.component && JSON.stringify(now.params ?? {}) === JSON.stringify(placing.params ?? {}) ? placing : now;
+}
+
 /**
  * The document without the edits of Verilog sheets (drawings stay). Those
  * edits are keyed by module name only, so another design must not inherit them.
@@ -609,7 +640,8 @@ export function changeFiles(doc: EditDoc, putAside: PutAside, before: Record<str
     const own = declaredModules({ [f]: text });
     const back = Object.keys(kept).filter((k) => ofModules(k, own) && isEmptyEdits(sheets[k]));
     if (back.length === 0) continue;
-    sheets = { ...sheets, ...Object.fromEntries(back.map((k) => [k, kept[k]])) };
+    // The library may have changed meanwhile: what no longer has its preset's settings stops following it.
+    sheets = { ...sheets, ...Object.fromEntries(back.map((k) => [k, keepLinks(kept[k], doc.components)])) };
     for (const k of back) restored.add(own.find((m) => ofModules(k, [m]))!);
     // What came back is in the document now (and in the undo history): it is not put aside twice.
     const rest = Object.fromEntries(Object.entries(kept).filter(([k]) => !back.includes(k)));
@@ -1812,6 +1844,8 @@ export const useStore = create<State>((set, get) => {
           node.name = `${stem}${k}`;
         }
         if (p.sym === 'text') node.name = 'Note';
+        // Linked to its preset only while it has the preset's settings (see followsPreset).
+        if (p.component && followsPreset({ ...node, component: p.component }, get().doc.components)) node.component = p.component;
         const size = sizeNode(symbolNode(node, interfaceOf), measureFor(get().theme));
         let pos = { x: snap(at.x - size.width / 2), y: snap(at.y - size.height / 2) };
         // A second click on the same spot would put the new symbol exactly over the last one, hiding it: it goes a
@@ -1909,7 +1943,8 @@ export const useStore = create<State>((set, get) => {
 
     setNodeParams(id, params) {
       const before = get().doc;
-      editSheet((e) => setParams(e, id, params));
+      // Changed on its own, a symbol placed from a preset no longer follows the preset.
+      editSheet((e) => unlinkChanged(setParams(e, id, params, interfaceOf), id, get().doc.components));
       // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
       const s = get();
       if (s.doc === before || !s.netlist) return;
@@ -1992,7 +2027,8 @@ export const useStore = create<State>((set, get) => {
         // The sheet's netlist, so imported pins and instances count when pasted names are made unique.
         const [next, ids] = pasteClip(e, clip, at2, d);
         pasted = ids;
-        return next;
+        // A copy follows a preset of this library only while it has its settings (it may come from another file).
+        return keepLinks(next, get().doc.components);
       });
       if (pasted.length) get().select(pasted);
     },
@@ -2016,7 +2052,15 @@ export const useStore = create<State>((set, get) => {
       // The redo entry keeps where the change was made (not where Undo was pressed), so Redo shows it too.
       // A step that changed the files swaps the whole state: Redo comes back here.
       const redo = prev.files ? hereWithFiles() : { ...prev, doc: s.doc, ...(prev.rules ? { rules: [...s.rules] } : {}) };
-      set({ past: s.past.slice(0, -1), future: [redo, ...s.future], doc: prev.doc, dirty: true, ...(prev.rules ? { rules: new Set(prev.rules) } : {}) });
+      set({
+        past: s.past.slice(0, -1),
+        future: [redo, ...s.future],
+        doc: prev.doc,
+        dirty: true,
+        // A preset being placed is placed as the library has it now.
+        placing: placingNow(s.placing, prev.doc.components),
+        ...(prev.rules ? { rules: new Set(prev.rules) } : {}),
+      });
       scheduleAutosave();
       // Other rules redraw the sheet on screen (they apply to all).
       void (prev.files ? reopenFiles(prev) : prev.rules ? get().openPath(get().path) : showAfterHistory(prev));
@@ -2034,7 +2078,14 @@ export const useStore = create<State>((set, get) => {
         return;
       }
       const undo = next.files ? hereWithFiles() : { ...next, doc: s.doc, ...(next.rules ? { rules: [...s.rules] } : {}) };
-      set({ future: s.future.slice(1), past: [...s.past, undo], doc: next.doc, dirty: true, ...(next.rules ? { rules: new Set(next.rules) } : {}) });
+      set({
+        future: s.future.slice(1),
+        past: [...s.past, undo],
+        doc: next.doc,
+        dirty: true,
+        placing: placingNow(s.placing, next.doc.components),
+        ...(next.rules ? { rules: new Set(next.rules) } : {}),
+      });
       scheduleAutosave();
       void (next.files ? reopenFiles(next) : next.rules ? get().openPath(get().path) : showAfterHistory(next));
     },
@@ -2062,13 +2113,16 @@ export const useStore = create<State>((set, get) => {
       return undefined;
     },
 
-    setComponents(defs) {
+    setComponents(defs, renamed) {
       const s = get();
       const doc: EditDoc = { ...s.doc };
       if (defs.length) doc.components = defs;
       else delete doc.components;
-      if (JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
-      pushDoc(doc);
+      // The symbols placed from a preset follow it: one undo step with the change of the library.
+      doc.sheets = followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf);
+      if (doc.sheets === s.doc.sheets && JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
+      const placing = placingNow(s.placing, defs, renamed);
+      pushDoc(doc, placing !== s.placing ? { placing } : {});
       refresh();
     },
 

@@ -15,7 +15,7 @@
  * The text the user writes is read by parseComponents, which explains what is wrong; the
  * file loader reads the saved definitions with loadComponents, which drops what is wrong.
  */
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, literalWidth } from './symbols';
+import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, literalWidth } from './symbols';
 import { verilogIdent } from './verilog-export';
 
 export interface ComponentDef {
@@ -76,19 +76,27 @@ export function partInterface(def: ComponentDef & { pins: ModulePort[] }): Modul
 
 class Bad extends Error {}
 
+/** The part's "width", and whether a pin took it (a pin with bits of its own, `a[7:0]`, does not). */
+interface PartWidth {
+  width: number;
+  used: boolean;
+}
+
 /** A pin given as `"a"`, `"a[7:0]"` or `{ "name": "a", "width": 8 }`. */
-function pinOf(v: unknown, dir: ModulePort['dir'], width: number, where: string): ModulePort {
+function pinOf(v: unknown, dir: ModulePort['dir'], width: PartWidth, where: string): ModulePort {
   if (typeof v === 'string') {
     const m = /^\s*([A-Za-z_][A-Za-z0-9_$]*)\s*(?:\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*$/.exec(v);
     if (!m) throw new Bad(`${where}: "${v}" is not a pin such as "a" or "a[7:0]".`);
+    if (m[2] === undefined) width.used = true;
     // The pins are numbered from 0 ([7:0]): a[8:1] is 8 bits wide too, written a[7:0].
-    const w = m[2] === undefined ? width : Math.abs(Number(m[2]) - Number(m[3])) + 1;
+    const w = m[2] === undefined ? width.width : Math.abs(Number(m[2]) - Number(m[3])) + 1;
     return { name: m[1], dir, width: checkWidth(w, where) };
   }
   if (isObj(v) && typeof v.name === 'string') {
     if (!NAME.test(v.name)) throw new Bad(`${where}: "${v.name}" is not a pin name (letters, digits and _).`);
     for (const k of Object.keys(v)) if (k !== 'name' && k !== 'width') throw new Bad(`${where}: a pin has a "name" and a "width", not "${k}".`);
-    return { name: v.name, dir, width: v.width === undefined ? width : checkWidth(v.width, where) };
+    if (v.width === undefined) width.used = true;
+    return { name: v.name, dir, width: v.width === undefined ? width.width : checkWidth(v.width, where) };
   }
   throw new Bad(`${where}: write a pin as "a", "a[7:0]" or { "name": "a", "width": 8 }.`);
 }
@@ -101,12 +109,13 @@ function checkWidth(w: unknown, where: string): number {
 }
 
 /** The pins of one side: a number of pins (named in0, in1… or out0, out1…) or a list of pins. */
-function pinsOf(v: unknown, dir: ModulePort['dir'], width: number, where: string): ModulePort[] {
+function pinsOf(v: unknown, dir: ModulePort['dir'], width: PartWidth, where: string): ModulePort[] {
   if (v === undefined) return [];
   const stem = dir === 'input' ? 'in' : dir === 'output' ? 'out' : 'io';
   if (typeof v === 'number') {
     if (!Number.isInteger(v) || v < 0 || v > MAX_PINS) throw new Bad(`${where}: a number of pins from 0 to ${MAX_PINS}.`);
-    return Array.from({ length: v }, (_, k) => ({ name: v === 1 && dir === 'output' ? 'out' : `${stem}${k}`, dir, width }));
+    if (v > 0) width.used = true;
+    return Array.from({ length: v }, (_, k) => ({ name: v === 1 && dir === 'output' ? 'out' : `${stem}${k}`, dir, width: width.width }));
   }
   if (!Array.isArray(v)) throw new Bad(`${where}: a number of pins, or a list such as ["a[7:0]", "b"].`);
   return v.map((p, k) => pinOf(p, dir, width, `${where} ${k + 1}`));
@@ -158,13 +167,21 @@ function componentOf(v: unknown, k: number, taken: (name: string) => string | un
   }
   const why = taken(name);
   if (why) throw new Bad(`${where}: ${why}`);
-  const width = v.width === undefined ? 1 : checkWidth(v.width, `${where} "width"`);
+  const width: PartWidth = { width: v.width === undefined ? 1 : checkWidth(v.width, `${where} "width"`), used: false };
   const pins = [
     ...pinsOf(v.inputs, 'input', width, `${where} input`),
     ...pinsOf(v.inouts, 'inout', width, `${where} inout`),
     ...pinsOf(v.outputs, 'output', width, `${where} output`),
   ];
   if (pins.length === 0) throw new Bad(`${where}: give it "inputs" and "outputs" (or a "base" symbol for a preset).`);
+  // A "width" that no pin takes and no pin has would change nothing: say so, rather than leave the pins as they
+  // were (one that some pins have already, as the JSON shown writes it, is as good as left out).
+  if (v.width !== undefined && !width.used && !pins.some((p) => p.width === width.width)) {
+    const own = pins[0];
+    throw new Bad(
+      `${where}: "width" sets the bits of pins written without them, such as "${own.name}"; every pin here has bits of its own (such as "${own.name}[${own.width - 1}:0]"): change those, or write the pins without bits.`,
+    );
+  }
   if (pins.length > MAX_PINS) throw new Bad(`${where}: at most ${MAX_PINS} pins.`);
   const seen = new Set<string>();
   for (const p of pins) {
@@ -212,9 +229,28 @@ function oneLine(o: Record<string, unknown>): string {
   return `{ ${Object.entries(o).map(([k, v]) => `${JSON.stringify(k)}: ${value(v)}`).join(', ')} }`;
 }
 
-/** A pin as the JSON writes it: `a`, or `a[7:0]`. */
-function pinText(p: ModulePort): string {
-  return p.width === 1 ? p.name : `${p.name}[${p.width - 1}:0]`;
+/** A pin as the JSON writes it: `a` when it has the part's `width` (see partWidth), else its bits, `a[7:0]` (or `a[0:0]`). */
+function pinText(p: ModulePort, width: number): string {
+  return p.width === width ? p.name : `${p.name}[${p.width - 1}:0]`;
+}
+
+/**
+ * The "width" the JSON of a part writes once, for the pins that have it: the width of most of its buses
+ * (the wider one of two as common), so that changing it changes the data width and leaves the other pins
+ * (a 3-bit op, a 1-bit flag, written with their bits) as they are. 1 when no pin is a bus.
+ */
+function partWidth(pins: readonly ModulePort[]): number {
+  const count = new Map<number, number>();
+  for (const p of pins) if (p.width > 1) count.set(p.width, (count.get(p.width) ?? 0) + 1);
+  let best = 1;
+  let most = 0;
+  for (const [w, k] of count) {
+    if (k > most || (k === most && w > best)) {
+      best = w;
+      most = k;
+    }
+  }
+  return best;
 }
 
 /**
@@ -224,10 +260,13 @@ function pinText(p: ModulePort): string {
 export function componentJson(d: ComponentDef, multiline = false): string {
   const o: Record<string, unknown> = { name: d.name, ...(d.title ? { title: d.title } : {}) };
   if (isPart(d)) {
+    // The pins of the part's width are written as names and the width once, so that changing "width" changes them.
+    const width = partWidth(d.pins);
     for (const [key, dir] of [['inputs', 'input'], ['inouts', 'inout'], ['outputs', 'output']] as const) {
       const pins = d.pins.filter((p) => p.dir === dir);
-      if (pins.length) o[key] = pins.map(pinText);
+      if (pins.length) o[key] = pins.map((p) => pinText(p, width));
     }
+    if (width > 1) o.width = width;
   } else {
     o.base = d.base;
     Object.assign(o, d.params);
@@ -294,6 +333,78 @@ export function componentSymbol(def: ComponentDef): { sym: SymKey; params: SymPa
   return isPart(def) ? { sym: 'block', params: { module: def.name } } : { sym: def.base!, params: { ...def.params } };
 }
 
+/** Every setting of a `sym` symbol: `params`, with the library's defaults for those it leaves out. */
+export function fullSettings(sym: SymKey, params: SymParams): SymParams {
+  const out: SymParams = {};
+  const def = SYMBOL_BY_KEY[sym];
+  for (const f of presetFields(sym)) {
+    const v = params[f as keyof SymParams] ?? def?.defaults[f as keyof SymParams];
+    if (v !== undefined) (out as Record<string, unknown>)[f] = v;
+  }
+  return out;
+}
+
+/**
+ * Whether the symbol `n` follows the preset it was placed from: the library has that preset, for the same
+ * symbol, with the symbol's settings. A link is kept only while this holds, so that changing a preset never
+ * changes a symbol whose settings are no longer the preset's (one changed on its own, pasted from another file,
+ * or placed again after Undo changed the preset back).
+ */
+export function followsPreset(n: UserNode, defs: readonly ComponentDef[] | undefined): boolean {
+  if (!n.component) return false;
+  const def = defs?.find((c) => c.name === n.component);
+  return !!def && !isPart(def) && def.base === n.sym && sameSettings(n.sym, n.params, componentSymbol(def).params);
+}
+
+/**
+ * The presets renamed from `before` to `after` (old name to new name). The Components window edits the whole
+ * list as text, so it cannot say: a preset whose name is gone was renamed to a new one of the same symbol with
+ * the same settings, when only that one has them (and it only those of that one); otherwise to the new one in
+ * its place, as when its line was edited: the only preset gone and the only one new between the same two
+ * components that stay. Anything else (deleted here, added there) is no rename: what was placed from it keeps
+ * its settings and follows nothing, rather than take another preset's settings.
+ */
+export function renamedPresets(before: readonly ComponentDef[] | undefined, after: readonly ComponentDef[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  const old = before ?? [];
+  const had = new Set(old.map((c) => c.name));
+  const has = new Set(after.map((c) => c.name));
+  let gone = old.filter((c) => !isPart(c) && !has.has(c.name));
+  let fresh = after.filter((c) => !isPart(c) && !had.has(c.name));
+  const same = (a: ComponentDef, b: ComponentDef) => a.base === b.base && sameSettings(a.base!, componentSymbol(a).params, componentSymbol(b).params);
+  const pair = (from: ComponentDef, to: ComponentDef) => {
+    out[from.name] = to.name;
+    gone = gone.filter((c) => c !== from);
+    fresh = fresh.filter((c) => c !== to);
+  };
+  for (const g of [...gone]) {
+    const match = fresh.filter((n) => same(g, n));
+    if (match.length === 1 && gone.filter((o) => same(o, match[0])).length === 1) pair(g, match[0]);
+  }
+  // Its place: the components that stay on either side of it.
+  const stays = (c: ComponentDef) => had.has(c.name) && has.has(c.name);
+  const place = (list: readonly ComponentDef[], c: ComponentDef) => {
+    const k = list.indexOf(c);
+    const prev = list.slice(0, k).findLast(stays)?.name ?? '';
+    const next = list.slice(k + 1).find(stays)?.name ?? '';
+    return `${prev}|${next}`;
+  };
+  for (const g of [...gone]) {
+    const at = place(old, g);
+    const there = fresh.filter((n) => place(after, n) === at);
+    if (there.length === 1 && there[0].base === g.base && gone.filter((o) => place(old, o) === at).length === 1) pair(g, there[0]);
+  }
+  return out;
+}
+
+/** Whether two `sym` symbols have the same settings (a setting left out is the library's default). */
+export function sameSettings(sym: SymKey, a: SymParams, b: SymParams): boolean {
+  const x = fullSettings(sym, a);
+  const y = fullSettings(sym, b);
+  const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+  return [...keys].every((k) => x[k as keyof SymParams] === y[k as keyof SymParams]);
+}
+
 /**
  * The Verilog of a part: a module with its ports and no logic, marked as a black box so that tools
  * read it as a module defined elsewhere.
@@ -326,13 +437,15 @@ export function symbolJson(sym: SymKey, params: SymParams): string {
   return JSON.stringify(o, null, 2);
 }
 
-/** What the JSON of a placed symbol may set, with the numbers each takes: `"inputs" 2–32, "width" 1–256`. */
+/** What the JSON of a placed symbol may set, with the numbers each takes: `"inputs" 2–32, "width" 1–256 bits`. */
 export function settingsHint(sym: SymKey): string {
   return presetFields(sym)
     .map((f) => {
       if (f === 'value') return `"value" a Verilog number such as "4'd2"`;
       const [lo, hi] = PARAM_LIMITS[f as keyof typeof PARAM_LIMITS];
-      return `"${f}" ${lo}–${f === 'width' && sym === 'decoder' ? 8 : hi}`;
+      // "width" is bits, not the size of the drawing: say so (the symbol shows them on its pins).
+      const unit = f === 'width' ? (sym === 'decoder' ? ' select bits' : ' bits') : f === 'shift' ? ' bits of the shift amount' : '';
+      return `"${f}" ${lo}–${f === 'width' && sym === 'decoder' ? 8 : hi}${unit}`;
     })
     .join(', ');
 }
