@@ -11,11 +11,16 @@ import { ui } from './ui-events';
 /** What the window edits: a symbol of the sheet shown, or a component of the library. */
 export type SettingsTarget = { node: string } | { component: string };
 
-/** What asks for the window: `edit-settings` on ui, with the point (in the page) to show it next to. */
+/**
+ * What asks for the window: `edit-settings` on ui, with the point (in the page) to show it next to, and what it was
+ * asked for on (clicks on that leave the window open): a symbol's ID, or `library:<name>` for a component of the
+ * library (its `data-settings-from`).
+ */
 export interface SettingsRequest {
   target: SettingsTarget;
   x: number;
   y: number;
+  from?: string;
 }
 
 /**
@@ -53,9 +58,9 @@ export function doubleClickSettings(s: EditorState, id: string): SettingsTarget 
   return t;
 }
 
-/** Open the window for `target`, next to the point (in the page) where the user asked for it. */
-export function openSettings(target: SettingsTarget, x: number, y: number): void {
-  ui.dispatchEvent(new CustomEvent<SettingsRequest>('edit-settings', { detail: { target, x, y } }));
+/** Open the window for `target`, next to the point (in the page) where the user asked for it, on the symbol `from`. */
+export function openSettings(target: SettingsTarget, x: number, y: number, from?: string): void {
+  ui.dispatchEvent(new CustomEvent<SettingsRequest>('edit-settings', { detail: { target, x, y, from } }));
 }
 
 /** What the window was opened on, as it was then (the window is modal: nothing else changes while it is open). */
@@ -68,5 +73,5 @@ export function subjectOf(s: EditorState, target: SettingsTarget): Subject | und
     return user && PRESET_BASES.includes(user.sym) ? { kind: 'node', id: user.id, sym: user.sym, text: symbolJson(user.sym, user.params) } : undefined;
   }
   const def = s.doc.components?.find((c) => c.name === target.component);
-  return def && { kind: 'component', def, text: componentJson(def) };
+  return def && { kind: 'component', def, text: componentJson(def, true) };
 }

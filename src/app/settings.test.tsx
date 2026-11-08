@@ -60,8 +60,9 @@ describe('what double-clicking a symbol edits', () => {
 
   it('shows the JSON it edits', () => {
     const s = state();
-    expect(subjectOf(s, { node: 'u:1' })).toEqual({ kind: 'node', id: 'u:1', sym: 'and', text: '{ "sym": "and", "inputs": 2, "width": 1 }' });
-    expect(subjectOf(s, { component: 'and5' })?.text).toBe('{ "name": "and5", "base": "and", "inputs": 5 }');
+    // One item to a line.
+    expect(subjectOf(s, { node: 'u:1' })).toEqual({ kind: 'node', id: 'u:1', sym: 'and', text: '{\n  "sym": "and",\n  "inputs": 2,\n  "width": 1\n}' });
+    expect(subjectOf(s, { component: 'and5' })?.text).toBe('{\n  "name": "and5",\n  "base": "and",\n  "inputs": 5\n}');
     expect(subjectOf(s, { node: 'u:3' })).toBeUndefined();
     expect(subjectOf(s, { component: 'gone' })).toBeUndefined();
   });
@@ -74,7 +75,8 @@ describe('the JSON window', () => {
   it("edits a symbol's settings, says what they are, and saves them as a component", () => {
     const html = show({ node: 'u:1' });
     expect(html).toContain('<b>AND</b>');
-    expect(html).toContain('{ &quot;sym&quot;: &quot;and&quot;, &quot;inputs&quot;: 2, &quot;width&quot;: 1 }</textarea>');
+    expect(html).toContain('rows="5"');
+    expect(html).toContain('{\n  &quot;sym&quot;: &quot;and&quot;,\n  &quot;inputs&quot;: 2,\n  &quot;width&quot;: 1\n}</textarea>');
     expect(html).toContain('Sets &quot;inputs&quot; 2–32, &quot;width&quot; 1–256.');
     expect(html).toContain('Save as a component');
   });
@@ -86,7 +88,7 @@ describe('the JSON window', () => {
     expect(preset).not.toContain('Save as a component');
     const part = show({ component: 'alu' });
     expect(part).toContain('Changes every block of alu.');
-    expect(part).toContain('&quot;inputs&quot;: [&quot;a[7:0]&quot;, &quot;b[7:0]&quot;]');
+    expect(part).toContain('&quot;inputs&quot;: [\n    &quot;a[7:0]&quot;,\n    &quot;b[7:0]&quot;\n  ],');
   });
 });
 

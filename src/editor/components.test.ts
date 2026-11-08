@@ -95,7 +95,9 @@ describe('components in JSON', () => {
   });
 
   it('reads the JSON of a placed symbol', () => {
-    expect(symbolJson('and', { inputs: 3 })).toBe('{ "sym": "and", "inputs": 3, "width": 1 }');
+    // One item to a line.
+    expect(symbolJson('and', { inputs: 3 })).toBe('{\n  "sym": "and",\n  "inputs": 3,\n  "width": 1\n}');
+    expect(parseSymbolJson(symbolJson('mux', { inputs: 4, width: 8 }), 'mux')).toEqual({ params: { inputs: 4, width: 8 } });
     expect(parseSymbolJson('{ "sym": "and", "inputs": 5, "width": 1 }', 'and')).toEqual({ params: { inputs: 5, width: 1 } });
     expect(parseSymbolJson('{ "inputs": 5 }', 'and')).toEqual({ params: { inputs: 5 } });
     expect(parseSymbolJson('{ "sym": "or" }', 'and').error).toMatch(/This is an AND: "sym" stays "and"/);
@@ -108,8 +110,13 @@ describe('components in JSON', () => {
     const defs = parseComponents(COMPONENTS_EXAMPLE).defs!;
     expect(componentJson(defs[0])).toBe('{ "name": "and5", "title": "AND (5 inputs)", "base": "and", "inputs": 5 }');
     expect(componentJson(defs[2])).toBe('{ "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }');
-    // Each reads back to itself.
-    for (const d of defs) expect(editComponent(defs, d.name, componentJson(d)).defs).toEqual(defs);
+    // One item to a line, as the window shows one; each reads back to itself either way.
+    expect(componentJson(defs[0], true)).toBe('{\n  "name": "and5",\n  "title": "AND (5 inputs)",\n  "base": "and",\n  "inputs": 5\n}');
+    expect(componentJson(defs[3], true)).toBe('{\n  "name": "lut6",\n  "inputs": [\n    "in0",\n    "in1",\n    "in2",\n    "in3",\n    "in4",\n    "in5"\n  ],\n  "outputs": [\n    "out"\n  ]\n}');
+    for (const d of defs) {
+      expect(editComponent(defs, d.name, componentJson(d)).defs).toEqual(defs);
+      expect(editComponent(defs, d.name, componentJson(d, true)).defs).toEqual(defs);
+    }
     const r = editComponent(defs, 'alu', '{ "name": "alu", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"] }');
     expect(r.defs!.map((d) => d.name)).toEqual(['and5', 'mux4x8', 'alu', 'lut6']);
     expect(r.defs![2].pins!.map((p) => p.name)).toEqual(['a', 'y']);

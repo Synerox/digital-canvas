@@ -15,23 +15,23 @@ import { ui } from './ui-events';
 
 /** Mounted once: shows the window when asked to (see openSettings). */
 export function SettingsPopup() {
-  const [open, setOpen] = useState<{ subject: Subject; x: number; y: number; n: number }>();
+  const [open, setOpen] = useState<{ subject: Subject; x: number; y: number; from?: string; n: number }>();
   useEffect(() => {
     let n = 0;
     const onOpen = (ev: Event) => {
-      const { target, x, y } = (ev as CustomEvent<SettingsRequest>).detail;
+      const { target, x, y, from } = (ev as CustomEvent<SettingsRequest>).detail;
       const subject = subjectOf(useStore.getState(), target);
-      if (subject) setOpen({ subject, x, y, n: ++n });
+      if (subject) setOpen({ subject, x, y, from, n: ++n });
     };
     ui.addEventListener('edit-settings', onOpen);
     return () => ui.removeEventListener('edit-settings', onOpen);
   }, []);
   if (!open) return null;
-  return <SettingsWindow key={open.n} subject={open.subject} x={open.x} y={open.y} onClose={() => setOpen(undefined)} />;
+  return <SettingsWindow key={open.n} subject={open.subject} x={open.x} y={open.y} from={open.from} onClose={() => setOpen(undefined)} />;
 }
 
-/** The window itself, next to the point (x, y) in the page. */
-export function SettingsWindow({ subject, x, y, onClose }: { subject: Subject; x: number; y: number; onClose(): void }) {
+/** The window itself, next to the point (x, y) in the page, asked for on the symbol `from` (if any). */
+export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subject; x: number; y: number; from?: string; onClose(): void }) {
   const setNodeParams = useStore((s) => s.setNodeParams);
   const setComponents = useStore((s) => s.setComponents);
   const nameTaken = useStore((s) => s.componentNameTaken);
@@ -114,7 +114,15 @@ export function SettingsWindow({ subject, x, y, onClose }: { subject: Subject; x
     <div
       className="modal-backdrop popup-backdrop"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target !== e.currentTarget) return;
+        // A click outside closes it, but more clicks on what it was opened on (a symbol, a component of the library)
+        // do not: clicking on after a double-click is not clicking away.
+        const under = document
+          .elementsFromPoint(e.clientX, e.clientY)
+          .map((el) => el.closest('[data-node-id], [data-settings-from]'))
+          .find((el) => el !== null);
+        if (from !== undefined && under && (under.getAttribute('data-node-id') ?? under.getAttribute('data-settings-from')) === from) return;
+        onClose();
       }}
     >
       <div
@@ -140,7 +148,7 @@ export function SettingsWindow({ subject, x, y, onClose }: { subject: Subject; x
         <textarea
           className={`code-input popup-json ${error !== undefined ? 'invalid' : ''}`}
           value={text}
-          rows={Math.min(8, Math.max(2, Math.ceil(text.length / 44)))}
+          rows={Math.min(14, Math.max(3, text.split('\n').length))}
           spellCheck={false}
           autoFocus
           aria-label="JSON"

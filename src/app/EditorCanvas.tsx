@@ -17,6 +17,7 @@ import { symbolNode, newUserNode } from '../editor/symbols';
 import { measureFor, useStore } from './store';
 import { ui } from './ui-events';
 import { doubleClickSettings, openSettings } from './settings';
+import { ClickRun } from './click-run';
 
 interface View {
   x: number;
@@ -212,6 +213,8 @@ export function EditorCanvas() {
     viewRef.current = view;
   }, [view]);
   const mode = useRef<Mode>({ kind: 'none' });
+  /** The canvas's own count of clicks, for the double-clicks the browser sends no dblclick for. */
+  const [clicks] = useState(() => new ClickRun());
   const [pointer, setPointer] = useState<Point>();
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number }>();
   /** Wires being drawn or reshaped, drawn dashed over the sheet. */
@@ -526,6 +529,30 @@ export function EditorCanvas() {
   const selectedNodes = layout.nodes.filter((n) => selection.has(n.id));
   const cursor = spaceDown || gesture === 'pan' ? 'grab' : placing ? 'copy' : gesture === 'wire' ? 'crosshair' : (edgeCursor ?? 'default');
 
+  /** A double-click: opens a block, the JSON of a symbol with settings or of a part's block, or renames. */
+  const doubleClick = (ev: React.MouseEvent) => {
+    const m = mode.current;
+    if (m.kind === 'wire') {
+      cancelWire();
+      return;
+    }
+    const hit = hitFrom(document.elementFromPoint(ev.clientX, ev.clientY));
+    const s = store();
+    if (hit.node) {
+      const n = s.layout?.nodes.find((x) => x.id === hit.node);
+      const settings = doubleClickSettings(s, hit.node);
+      // A block opens; a symbol with settings, or a part's block, opens its JSON; the rest is renamed.
+      if (n?.kind === 'instance' && n.moduleName && (s.doc.drawn.includes(n.moduleName) || s.viewDesign()?.modules[n.moduleName])) s.openNode(hit.node);
+      else if (settings) {
+        openSettings(settings, ev.clientX, ev.clientY, hit.node);
+        // The next two clicks the canvas gets open it again, however the browser counts them (see ClickRun).
+        clicks.reset();
+      } else ui.dispatchEvent(new CustomEvent('rename', { detail: hit.node }));
+    } else if (hit.edge) {
+      ui.dispatchEvent(new CustomEvent('rename', { detail: hit.edge }));
+    }
+  };
+
   return (
     <div
       ref={wrap}
@@ -753,24 +780,10 @@ export function EditorCanvas() {
           }
         }
       }}
-      onDoubleClick={(ev) => {
-        const m = mode.current;
-        if (m.kind === 'wire') {
-          cancelWire();
-          return;
-        }
-        const hit = hitFrom(document.elementFromPoint(ev.clientX, ev.clientY));
-        const s = store();
-        if (hit.node) {
-          const n = s.layout?.nodes.find((x) => x.id === hit.node);
-          const settings = doubleClickSettings(s, hit.node);
-          // A block opens; a symbol with settings, or a part's block, opens its JSON; the rest is renamed.
-          if (n?.kind === 'instance' && n.moduleName && (s.doc.drawn.includes(n.moduleName) || s.viewDesign()?.modules[n.moduleName])) s.openNode(hit.node);
-          else if (settings) openSettings(settings, ev.clientX, ev.clientY);
-          else ui.dispatchEvent(new CustomEvent('rename', { detail: hit.node }));
-        } else if (hit.edge) {
-          ui.dispatchEvent(new CustomEvent('rename', { detail: hit.edge }));
-        }
+      onDoubleClick={doubleClick}
+      onClick={(ev) => {
+        if ((ev.target as Element).closest('.zoom-controls')) return;
+        if (clicks.click('canvas', ev.detail)) doubleClick(ev);
       }}
     >
       <svg width="100%" height="100%">

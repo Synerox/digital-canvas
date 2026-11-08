@@ -217,8 +217,11 @@ function pinText(p: ModulePort): string {
   return p.width === 1 ? p.name : `${p.name}[${p.width - 1}:0]`;
 }
 
-/** One component as JSON on one line: `{ "name": "and5", "base": "and", "inputs": 5 }`. */
-export function componentJson(d: ComponentDef): string {
+/**
+ * One component as JSON: on one line, `{ "name": "and5", "base": "and", "inputs": 5 }`, as the list of
+ * Components writes each; or, `multiline`, one item to a line, as the window that edits one shows it.
+ */
+export function componentJson(d: ComponentDef, multiline = false): string {
   const o: Record<string, unknown> = { name: d.name, ...(d.title ? { title: d.title } : {}) };
   if (isPart(d)) {
     for (const [key, dir] of [['inputs', 'input'], ['inouts', 'inout'], ['outputs', 'output']] as const) {
@@ -229,7 +232,7 @@ export function componentJson(d: ComponentDef): string {
     o.base = d.base;
     Object.assign(o, d.params);
   }
-  return oneLine(o);
+  return multiline ? JSON.stringify(o, null, 2) : oneLine(o);
 }
 
 /** The components as JSON the user can edit (and parseComponents reads back to the same). */
@@ -309,7 +312,10 @@ export function partVerilog(def: ComponentDef & { pins: ModulePort[] }): string 
   ].join('\n');
 }
 
-/** A placed symbol's settings as JSON, as Properties shows them: `{ "sym": "and", "inputs": 3, "width": 1 }`. */
+/**
+ * A placed symbol's settings as JSON, one item to a line, as the window that edits them shows them:
+ * `{ "sym": "and", "inputs": 3, "width": 1 }` written out.
+ */
 export function symbolJson(sym: SymKey, params: SymParams): string {
   const def = SYMBOL_BY_KEY[sym];
   const o: Record<string, unknown> = { sym };
@@ -317,7 +323,7 @@ export function symbolJson(sym: SymKey, params: SymParams): string {
     const v = params[f as keyof SymParams] ?? def?.defaults[f as keyof SymParams];
     if (v !== undefined) o[f] = v;
   }
-  return oneLine(o);
+  return JSON.stringify(o, null, 2);
 }
 
 /** What the JSON of a placed symbol may set, with the numbers each takes: `"inputs" 2–32, "width" 1–256`. */
