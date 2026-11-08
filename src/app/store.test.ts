@@ -1587,6 +1587,60 @@ endmodule
     expect(st().doc.components?.length).toBe(2);
   }, 60_000);
 
+  it('changes the width of what was placed from a preset when the preset changes, but not of a symbol changed on its own', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('top');
+    await settle();
+    const defs = parseComponents('[{ "name": "mux4x8", "base": "mux", "inputs": 4, "width": 8 }]').defs!;
+    st().setComponents(defs);
+    const place = (x: number) => {
+      st().startPlacing({ ...componentSymbol(defs[0]), component: 'mux4x8' });
+      st().placeAt({ x, y: 0 });
+    };
+    place(0);
+    place(200);
+    place(400);
+    st().startPlacing({ sym: 'input', params: { width: 8 } });
+    st().placeAt({ x: -200, y: 0 });
+    await settle();
+    const [a, b, c] = st().doc.sheets['d:top'].nodes.filter((n) => n.sym === 'mux').map((n) => n.id);
+    const pin = st().doc.sheets['d:top'].nodes.find((n) => n.sym === 'input')!.id;
+    expect(st().connectEnds({ kind: 'port', node: pin, port: `${pin}.out` }, { kind: 'port', node: a, port: `${a}.I0` })).toBe(true);
+    // c is made 4 bits wide by itself: from now on it is a symbol of its own.
+    st().setNodeParams(c, { width: 4 });
+    const widthOf = (id: string) => st().netlist!.nodes.find((n) => n.id === id)!.ports.find((p) => p.name === 'Y')!.width;
+    expect([widthOf(a), widthOf(b), widthOf(c)]).toEqual([8, 8, 4]);
+    // The preset becomes 16 bits wide, in one undo step: a and b follow (with a's wire), c keeps its 4 bits.
+    const steps = st().past.length;
+    st().setComponents(parseComponents('[{ "name": "mux4x8", "base": "mux", "inputs": 4, "width": 16 }]').defs!);
+    await settle();
+    expect(st().past.length).toBe(steps + 1);
+    expect([widthOf(a), widthOf(b), widthOf(c)]).toEqual([16, 16, 4]);
+    expect(st().netlist!.edges.filter((e) => e.target.node === a).map((e) => e.target.port)).toEqual([`${a}.I0`]);
+    // Chosen to be placed again, it is placed as it is now.
+    st().startPlacing({ ...componentSymbol(defs[0]), component: 'mux4x8' });
+    st().setComponents(parseComponents('[{ "name": "mux4x8", "base": "mux", "inputs": 4, "width": 32 }]').defs!);
+    expect(st().placing).toEqual({ sym: 'mux', params: { inputs: 4, width: 32 }, component: 'mux4x8' });
+    st().startPlacing(undefined);
+    await settle();
+    expect([widthOf(a), widthOf(b), widthOf(c)]).toEqual([32, 32, 4]);
+    // Undo brings the old width back.
+    st().undo();
+    await settle();
+    expect([widthOf(a), widthOf(b)]).toEqual([16, 16]);
+    // Renamed in its window, what was placed from it follows the new name; deleted, it keeps its settings.
+    st().setComponents(parseComponents('[{ "name": "mux16", "base": "mux", "inputs": 4, "width": 16 }]').defs!, { from: 'mux4x8', to: 'mux16' });
+    expect(st().doc.sheets['d:top'].nodes.filter((n) => n.component).map((n) => `${n.id}:${n.component}`)).toEqual([`${a}:mux16`, `${b}:mux16`]);
+    st().setComponents([]);
+    await settle();
+    expect(st().doc.sheets['d:top'].nodes.some((n) => n.component)).toBe(false);
+    expect([widthOf(a), widthOf(b), widthOf(c)]).toEqual([16, 16, 4]);
+    // Saved and opened again, the link stays.
+    st().undo();
+    const saved = parseSavedFile(JSON.stringify(st().savedFile()));
+    expect(saved.doc.sheets['d:top'].nodes.filter((n) => n.component).length).toBe(2);
+  }, 60_000);
+
   it('never gives a drawing a Verilog keyword as its name (C31)', async () => {
     await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
     st().newDrawing('module');

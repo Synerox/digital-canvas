@@ -75,6 +75,11 @@ export interface UserNode {
   name?: string;
   /** For `raw` symbols: the drawing node as it was copied (port IDs are rewritten to this node). */
   raw?: DNode;
+  /**
+   * The preset of the library (Components) it was placed from: it follows that preset's settings when the
+   * preset is changed, until it is changed on its own (see followComponents).
+   */
+  component?: string;
 }
 
 export interface UserEdge {

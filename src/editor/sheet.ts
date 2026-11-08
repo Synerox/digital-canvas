@@ -12,6 +12,7 @@ import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
 import { type InterfaceOf, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
 import { verilogIdent } from './verilog-export';
+import { type ComponentDef, componentSymbol, fullSettings, isPart, sameSettings } from './components';
 
 // ---------- effective netlist ----------
 
@@ -352,6 +353,67 @@ export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEd
   const routes = { ...e.routes };
   for (const x of remapped) if (!edges.includes(x)) delete routes[x.id];
   return { ...e, nodes, edges, routes };
+}
+
+/** The symbol `id` placed from a preset of the library, linked to the preset `component`, or to none. */
+function linkTo(e: SheetEdits, id: string, component: string | undefined): SheetEdits {
+  const n = e.nodes.find((x) => x.id === id);
+  if (!n || n.component === component) return e;
+  const linked: UserNode = { ...n, component };
+  if (!component) delete linked.component;
+  return { ...e, nodes: e.nodes.map((x) => (x === n ? linked : x)) };
+}
+
+/**
+ * After the user changed the settings of the symbol `id` by itself: when it was placed from a preset and
+ * no longer has the preset's settings, it is a symbol of its own from now on (changing the preset leaves it).
+ */
+export function unlinkChanged(e: SheetEdits, id: string, defs: readonly ComponentDef[] | undefined): SheetEdits {
+  const n = e.nodes.find((x) => x.id === id);
+  if (!n?.component) return e;
+  const def = defs?.find((c) => c.name === n.component);
+  const keep = def && !isPart(def) && def.base === n.sym && sameSettings(n.sym, n.params, def.params ?? {});
+  return keep ? e : linkTo(e, id, undefined);
+}
+
+/**
+ * The sheets after the library changed from `before` to `after`: the symbols placed from a preset take
+ * its new settings (with their wires, as a change in Properties would), and follow it when it is renamed
+ * (`renamed`). A symbol whose preset is gone, became a part or another symbol keeps its settings and is
+ * a symbol of its own. Returns `sheets` itself when nothing changes.
+ */
+export function followComponents(
+  sheets: Record<string, SheetEdits>,
+  before: readonly ComponentDef[] | undefined,
+  after: readonly ComponentDef[] | undefined,
+  renamed?: { from: string; to: string },
+): Record<string, SheetEdits> {
+  /** What the symbols placed from each preset become: the preset now (by its name now), or none. */
+  const plan = new Map<string, ComponentDef | undefined>();
+  for (const old of before ?? []) {
+    if (isPart(old)) continue;
+    const name = renamed?.from === old.name ? renamed.to : old.name;
+    const now = after?.find((c) => c.name === name);
+    plan.set(old.name, now && !isPart(now) && now.base === old.base ? now : undefined);
+  }
+  let out: Record<string, SheetEdits> | undefined;
+  for (const [key, e] of Object.entries(sheets)) {
+    let next = e;
+    for (const n of e.nodes) {
+      if (!n.component || !plan.has(n.component)) continue;
+      const to = plan.get(n.component);
+      if (!to || to.base !== n.sym) {
+        next = linkTo(next, n.id, undefined);
+        continue;
+      }
+      // All of them: a setting the preset leaves out is the default, not what the symbol had.
+      const params = fullSettings(n.sym, componentSymbol(to).params);
+      if (!sameSettings(n.sym, n.params, params)) next = setParams(next, n.id, params);
+      next = linkTo(next, n.id, to.name);
+    }
+    if (next !== e) (out ??= { ...sheets })[key] = next;
+  }
+  return out ?? sheets;
 }
 
 export function setSlice(e: SheetEdits, id: string, slice: { lo: number; width: number } | undefined): SheetEdits {

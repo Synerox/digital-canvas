@@ -228,15 +228,28 @@ function oneLine(o: Record<string, unknown>): string {
   return `{ ${Object.entries(o).map(([k, v]) => `${JSON.stringify(k)}: ${value(v)}`).join(', ')} }`;
 }
 
-/** A pin as the JSON writes it: `a` when it has the bits the part's `width` gives (see partWidth), else `a[7:0]`. */
+/** A pin as the JSON writes it: `a` when it has the part's `width` (see partWidth), else its bits, `a[7:0]` (or `a[0:0]`). */
 function pinText(p: ModulePort, width: number): string {
   return p.width === width ? p.name : `${p.name}[${p.width - 1}:0]`;
 }
 
-/** The bits every pin of a part has, when they all have the same; else 1 (each wider pin says its own). */
+/**
+ * The "width" the JSON of a part writes once, for the pins that have it: the width of most of its buses
+ * (the wider one of two as common), so that changing it changes the data width and leaves the other pins
+ * (a 3-bit op, a 1-bit flag, written with their bits) as they are. 1 when no pin is a bus.
+ */
 function partWidth(pins: readonly ModulePort[]): number {
-  const w = pins[0]?.width ?? 1;
-  return pins.every((p) => p.width === w) ? w : 1;
+  const count = new Map<number, number>();
+  for (const p of pins) if (p.width > 1) count.set(p.width, (count.get(p.width) ?? 0) + 1);
+  let best = 1;
+  let most = 0;
+  for (const [w, k] of count) {
+    if (k > most || (k === most && w > best)) {
+      best = w;
+      most = k;
+    }
+  }
+  return best;
 }
 
 /**
@@ -246,7 +259,7 @@ function partWidth(pins: readonly ModulePort[]): number {
 export function componentJson(d: ComponentDef, multiline = false): string {
   const o: Record<string, unknown> = { name: d.name, ...(d.title ? { title: d.title } : {}) };
   if (isPart(d)) {
-    // Pins of one width are written as names and the width once, so that changing "width" changes them all.
+    // The pins of the part's width are written as names and the width once, so that changing "width" changes them.
     const width = partWidth(d.pins);
     for (const [key, dir] of [['inputs', 'input'], ['inouts', 'inout'], ['outputs', 'output']] as const) {
       const pins = d.pins.filter((p) => p.dir === dir);
@@ -317,6 +330,25 @@ export function loadComponents(v: unknown): ComponentDef[] {
 /** The library item a component places: its symbol and parameters. */
 export function componentSymbol(def: ComponentDef): { sym: SymKey; params: SymParams } {
   return isPart(def) ? { sym: 'block', params: { module: def.name } } : { sym: def.base!, params: { ...def.params } };
+}
+
+/** Every setting of a `sym` symbol: `params`, with the library's defaults for those it leaves out. */
+export function fullSettings(sym: SymKey, params: SymParams): SymParams {
+  const out: SymParams = {};
+  const def = SYMBOL_BY_KEY[sym];
+  for (const f of presetFields(sym)) {
+    const v = params[f as keyof SymParams] ?? def?.defaults[f as keyof SymParams];
+    if (v !== undefined) (out as Record<string, unknown>)[f] = v;
+  }
+  return out;
+}
+
+/** Whether two `sym` symbols have the same settings (a setting left out is the library's default). */
+export function sameSettings(sym: SymKey, a: SymParams, b: SymParams): boolean {
+  const x = fullSettings(sym, a);
+  const y = fullSettings(sym, b);
+  const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+  return [...keys].every((k) => x[k as keyof SymParams] === y[k as keyof SymParams]);
 }
 
 /**

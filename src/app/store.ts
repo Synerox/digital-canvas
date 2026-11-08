@@ -52,6 +52,8 @@ import {
   resolveConnection,
   restoreHidden,
   setParams,
+  followComponents,
+  unlinkChanged,
   setRoute,
   setSlice,
   toDrawing,
@@ -62,7 +64,7 @@ import { orthogonalize } from '../editor/router';
 import { legContaining } from '../editor/draw-wire';
 import { type SheetIssues, checkSheet } from '../editor/check';
 import { verilogIdent } from '../editor/verilog-export';
-import { type ComponentDef, isPart, partInterface, partNamed } from '../editor/components';
+import { type ComponentDef, componentSymbol, isPart, partInterface, partNamed } from '../editor/components';
 
 export type { PathEntry, ViewMode } from '../editor/doc';
 
@@ -169,6 +171,8 @@ export interface HistoryEntry {
 export interface Placing {
   sym: SymKey;
   params?: SymParams;
+  /** The preset of the library it is placed from: the symbol follows the preset (see followComponents). */
+  component?: string;
 }
 
 interface State {
@@ -308,8 +312,11 @@ interface State {
   undo(): void;
   redo(): void;
   newDrawing(name?: string): void;
-  /** Make these the components of the library (one undo step); the blocks of parts follow their pins. */
-  setComponents(defs: ComponentDef[]): void;
+  /**
+   * Make these the components of the library (one undo step): the blocks of parts follow their pins, the
+   * symbols placed from a preset its settings (and its new name, when `renamed` says it was renamed).
+   */
+  setComponents(defs: ComponentDef[], renamed?: { from: string; to: string }): void;
   /** Why a part of the library may not be named `name` (a drawing or a Verilog module has the name), or nothing. */
   componentNameTaken(name: string): string | undefined;
   renameDrawing(from: string, to: string): string | undefined;
@@ -554,6 +561,13 @@ export function sheetsUsing(doc: EditDoc, module: string): string[] {
     if (e.nodes.some((n) => n.sym === 'block' && n.params.module === module)) out.add(k.replace(/^d:|^v:[a-z]+:/, ''));
   }
   out.delete(module);
+  return [...out];
+}
+
+/** Where symbols placed from the preset `component` (and still following it) are, by sheet name. */
+export function sheetsPlacing(doc: EditDoc, component: string): string[] {
+  const out = new Set<string>();
+  for (const [k, e] of Object.entries(doc.sheets)) if (e.nodes.some((n) => n.component === component)) out.add(k.replace(/^d:|^v:[a-z]+:/, ''));
   return [...out];
 }
 
@@ -1812,6 +1826,7 @@ export const useStore = create<State>((set, get) => {
           node.name = `${stem}${k}`;
         }
         if (p.sym === 'text') node.name = 'Note';
+        if (p.component) node.component = p.component;
         const size = sizeNode(symbolNode(node, interfaceOf), measureFor(get().theme));
         let pos = { x: snap(at.x - size.width / 2), y: snap(at.y - size.height / 2) };
         // A second click on the same spot would put the new symbol exactly over the last one, hiding it: it goes a
@@ -1909,7 +1924,8 @@ export const useStore = create<State>((set, get) => {
 
     setNodeParams(id, params) {
       const before = get().doc;
-      editSheet((e) => setParams(e, id, params));
+      // Changed on its own, a symbol placed from a preset no longer follows the preset.
+      editSheet((e) => unlinkChanged(setParams(e, id, params), id, get().doc.components));
       // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
       const s = get();
       if (s.doc === before || !s.netlist) return;
@@ -2062,13 +2078,22 @@ export const useStore = create<State>((set, get) => {
       return undefined;
     },
 
-    setComponents(defs) {
+    setComponents(defs, renamed) {
       const s = get();
       const doc: EditDoc = { ...s.doc };
       if (defs.length) doc.components = defs;
       else delete doc.components;
-      if (JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
-      pushDoc(doc);
+      // The symbols placed from a preset follow it: one undo step with the change of the library.
+      doc.sheets = followComponents(s.doc.sheets, s.doc.components, defs, renamed);
+      if (doc.sheets === s.doc.sheets && JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
+      // A preset chosen to be placed is placed as it is now (or no more, when it is gone).
+      let placing = s.placing;
+      if (placing?.component) {
+        const name = renamed?.from === placing.component ? renamed.to : placing.component;
+        const def = defs.find((c) => c.name === name);
+        placing = def && !isPart(def) && def.base === placing.sym ? { ...componentSymbol(def), component: def.name } : undefined;
+      }
+      pushDoc(doc, placing !== s.placing ? { placing } : {});
       refresh();
     },
 

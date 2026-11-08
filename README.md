@@ -24,7 +24,7 @@
 - **雙擊**：有子模組的 block 進入子模組；有設定的符號（閘、MUX、加法器、暫存器、常數…）開一個小視窗用 JSON 編輯設定（每個項目一行，例如 `"inputs": 5`），Apply（Ctrl+Enter）套用、Esc 取消，一次套用是一個復原步驟；在那個元件上繼續點不會關掉視窗，點其他地方才會關，關掉後再點兩下一定會再打開；自訂零件（part）的方塊和符號庫 Components 裡的元件開同樣的小視窗編輯它的定義（改腳位會改到每個方塊）；I/O pin、註解和導線還是改名稱。Properties 的「JSON…」按鈕也能打開。
 - **Ctrl+Z 回上一層**：切換到別張圖也是一個復原步驟。雙擊 block 進入子模組後按 Ctrl+Z 回到主模組（畫面停在離開時的位置），Ctrl+Shift+Z 再進去；breadcrumb、階層樹、手繪圖清單和（在 Verilog 圖上）Block diagram / Full circuit 切換都一樣。在子模組裡改過東西時，Ctrl+Z 先復原那些修改，再回上一層。切換圖不會清掉重做紀錄。
 - **JSON 元件**：符號庫最上面的「Components › Add…/Edit…」用 JSON 定義自己的元件，跟作品一起存檔。兩種：
-  - 預設組合（preset）：內建符號加上設定，例如 `{ "name": "and5", "base": "and", "inputs": 5 }`、`{ "name": "mux4x8", "base": "mux", "inputs": 4, "width": 8 }`。可設定的欄位就是 Properties 裡的 `inputs`、`width`、`parts`、`shift`、`value`。
+  - 預設組合（preset）：內建符號加上設定，例如 `{ "name": "and5", "base": "and", "inputs": 5 }`、`{ "name": "mux4x8", "base": "mux", "inputs": 4, "width": 8 }`。可設定的欄位就是 Properties 裡的 `inputs`、`width`、`parts`、`shift`、`value`。改了預設組合（例如把 mux4x8 的 `width` 改成 16），從它放下的符號會一起改（同一個復原步驟）；單獨改過設定的符號就變成獨立的符號，不再跟著改。
   - 自訂零件（part）：只有腳位、沒有內部邏輯，例如 `{ "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }`；腳位也可以只給數量 `"inputs": 6`（名稱 in0、in1…）。`width` 是沒寫位元的腳位（例如 `"a"`）的寬度；所有腳位一樣寬時，JSON 會寫成名稱加一個 `"width"`，改它就改到全部腳位。每個腳位都寫了自己的位元、`width` 卻跟它們不同時會提示錯誤，不會默默忽略。放置後是一個模組方塊，匯出 Verilog 時寫成空的 `(* blackbox *)` 模組。之後若匯入或畫了同名的模組，方塊就改用那個模組。
   - 符號的 JSON 小視窗裡「Save as a component」把輸入的設定加進元件庫；在符號庫雙擊元件可以只改那一個。
 - **匯入 Verilog**：File › Import Verilog…（Ctrl+I）貼上或開檔，流程和 FSM Designer 相同。匯入後的圖可以直接編輯：移動、改名、刪除、加畫符號和導線。Verilog 決定電路結構，編輯另外以穩定 ID 存放，重新匯入修改過的 Verilog 時會保留手動位置、改名、刪除和手畫的部分；新出現的符號放在 ELK 建議的相對位置且不重疊。

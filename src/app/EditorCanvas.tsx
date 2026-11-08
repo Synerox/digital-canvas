@@ -576,7 +576,7 @@ export function EditorCanvas() {
         ev.stopPropagation();
         const w = toWorld(ev.clientX, ev.clientY);
         const s = store();
-        s.startPlacing({ sym: sym as never, ...(s.placing?.sym === sym ? { params: s.placing.params } : {}) });
+        s.startPlacing(s.placing?.sym === sym ? s.placing : { sym: sym as never });
         s.placeAt(w);
       }}
       onPointerDown={(ev) => {

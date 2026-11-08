@@ -64,13 +64,16 @@ export function openSettings(target: SettingsTarget, x: number, y: number, from?
 }
 
 /** What the window was opened on, as it was then (the window is modal: nothing else changes while it is open). */
-export type Subject = { kind: 'node'; id: string; sym: SymKey; text: string } | { kind: 'component'; def: ComponentDef; text: string };
+export type Subject =
+  | { kind: 'node'; id: string; sym: SymKey; text: string; /** The preset it was placed from (and follows). */ component?: string }
+  | { kind: 'component'; def: ComponentDef; text: string };
 
 /** What the window shows for `target`: none when there is no such symbol or component (any more). */
 export function subjectOf(s: EditorState, target: SettingsTarget): Subject | undefined {
   if ('node' in target) {
     const user = s.doc.sheets[s.sheet]?.nodes.find((n) => n.id === target.node);
-    return user && PRESET_BASES.includes(user.sym) ? { kind: 'node', id: user.id, sym: user.sym, text: symbolJson(user.sym, user.params) } : undefined;
+    if (!user || !PRESET_BASES.includes(user.sym)) return undefined;
+    return { kind: 'node', id: user.id, sym: user.sym, text: symbolJson(user.sym, user.params), ...(user.component ? { component: user.component } : {}) };
   }
   const def = s.doc.components?.find((c) => c.name === target.component);
   return def && { kind: 'component', def, text: componentJson(def, true) };

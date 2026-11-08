@@ -109,7 +109,7 @@ describe('components in JSON', () => {
   it('edits one component of the library as JSON, in its place', () => {
     const defs = parseComponents(COMPONENTS_EXAMPLE).defs!;
     expect(componentJson(defs[0])).toBe('{ "name": "and5", "title": "AND (5 inputs)", "base": "and", "inputs": 5 }');
-    expect(componentJson(defs[2])).toBe('{ "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }');
+    expect(componentJson(defs[2])).toBe('{ "name": "alu", "title": "ALU", "inputs": ["a", "b", "op[2:0]"], "outputs": ["y", "zero[0:0]"], "width": 8 }');
     // One item to a line, as the window shows one; each reads back to itself either way.
     expect(componentJson(defs[0], true)).toBe('{\n  "name": "and5",\n  "title": "AND (5 inputs)",\n  "base": "and",\n  "inputs": 5\n}');
     expect(componentJson(defs[3], true)).toBe('{\n  "name": "lut6",\n  "inputs": [\n    "in0",\n    "in1",\n    "in2",\n    "in3",\n    "in4",\n    "in5"\n  ],\n  "outputs": [\n    "out"\n  ]\n}');
@@ -138,9 +138,16 @@ describe('components in JSON', () => {
     expect(componentJson(x)).toBe('{ "name": "x", "inputs": ["in0", "in1"], "outputs": ["out"], "width": 4 }');
     const wider = editComponent([x], 'x', componentJson(x, true).replace('"width": 4', '"width": 16')).defs![0];
     expect(wider.pins!.map((p) => p.width)).toEqual([16, 16, 16]);
-    // Pins of different widths each say theirs, as before.
-    const alu = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "op[2:0]"], "outputs": ["y[7:0]"] }').defs![0];
-    expect(componentJson(alu)).toBe('{ "name": "alu", "inputs": ["a[7:0]", "op[2:0]"], "outputs": ["y[7:0]"] }');
+    // Buses of other widths, and 1-bit pins, say their bits: "width" is the width of most buses, the data width.
+    const alu = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }').defs![0];
+    expect(componentJson(alu)).toBe('{ "name": "alu", "inputs": ["a", "b", "op[2:0]"], "outputs": ["y", "zero[0:0]"], "width": 8 }');
+    expect(parseComponents(componentJson(alu)).defs).toEqual([alu]);
+    const alu16 = editComponent([alu], 'alu', componentJson(alu, true).replace('"width": 8', '"width": 16')).defs![0];
+    expect(alu16.pins!.map((p) => `${p.name}:${p.width}`)).toEqual(['a:16', 'b:16', 'op:3', 'y:16', 'zero:1']);
+    // Two widths as common: the wider one.
+    expect(componentJson(parseComponents('{ "name": "z", "inputs": ["a[3:0]"], "outputs": ["y[7:0]"] }').defs![0])).toBe(
+      '{ "name": "z", "inputs": ["a[3:0]"], "outputs": ["y"], "width": 8 }',
+    );
     // Pins written with bits as wide as "width" are the same part.
     const same = parseComponents('{ "name": "y", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["s[7:0]"] }').defs![0];
     expect(componentJson(same)).toBe('{ "name": "y", "inputs": ["a", "b"], "outputs": ["s"], "width": 8 }');

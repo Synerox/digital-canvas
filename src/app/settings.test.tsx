@@ -23,8 +23,10 @@ function state(aluDrawn = false): EditorState {
     newUserNode('u:3', 'text', { name: 'hello' }),
     newUserNode('u:4', 'block', { name: 'u_alu', params: { module: 'alu' } }),
     newUserNode('u:5', 'block', { name: 'u_sub', params: { module: 'sub' } }),
+    // Placed from the preset and5: it follows the preset.
+    newUserNode('u:6', 'and', { params: { inputs: 5, width: 1 }, component: 'and5' }),
   ];
-  const edits = { ...emptyEdits(), nodes, next: 6 };
+  const edits = { ...emptyEdits(), nodes, next: 7 };
   const drawn = ['d', 'sub', ...(aluDrawn ? ['alu'] : [])];
   const doc: EditDoc = { drawn, sheets: { 'd:d': edits }, components };
   const iface = (m: string) => (m === 'alu' && !aluDrawn ? partInterface(partNamed(components, 'alu')!) : { label: m, ports: [] });
@@ -69,8 +71,8 @@ describe('what double-clicking a symbol edits', () => {
 });
 
 describe('the JSON window', () => {
-  const show = (target: Parameters<typeof subjectOf>[1]) =>
-    renderToStaticMarkup(<SettingsWindow subject={subjectOf(state(), target)!} x={10} y={10} onClose={() => {}} />);
+  const show = (target: Parameters<typeof subjectOf>[1], aluDrawn = false) =>
+    renderToStaticMarkup(<SettingsWindow subject={subjectOf(state(aluDrawn), target)!} x={10} y={10} onClose={() => {}} />);
 
   it("edits a symbol's settings, says what they are, and saves them as a component", () => {
     const html = show({ node: 'u:1' });
@@ -84,13 +86,20 @@ describe('the JSON window', () => {
   it('edits a component of the library, and says which blocks follow it', () => {
     const preset = show({ component: 'and5' });
     expect(preset).toContain('and5 (component)');
-    expect(preset).toContain('Symbols placed already keep their settings.');
+    // What was placed from it follows it.
+    expect(preset).toContain('Changes the symbols placed from and5 on d (but those changed on their own).');
+    expect(show({ node: 'u:6' })).toContain('Placed from and5: a change here is for this symbol only (it stops following and5).');
+    expect(show({ node: 'u:1' })).not.toContain('Placed from');
     expect(preset).not.toContain('Save as a component');
     const part = show({ component: 'alu' });
     expect(part).toContain('Changes every block of alu.');
     // Pins all 8 bits wide: written as names and one "width", which changes them all.
     expect(part).toContain('&quot;inputs&quot;: [\n    &quot;a&quot;,\n    &quot;b&quot;\n  ],');
     expect(part).toContain('&quot;width&quot;: 8\n}');
+    // A drawing of its name defines the blocks: its pins are not used, so they change nothing.
+    const shadowed = show({ component: 'alu' }, true);
+    expect(shadowed).toContain('A Verilog module or drawing named alu defines its blocks now: these pins are not used.');
+    expect(shadowed).not.toContain('Changes every block');
   });
 });
 

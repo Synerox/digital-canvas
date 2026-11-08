@@ -166,6 +166,7 @@ function userNode(v: unknown): UserNode | undefined {
   for (const k of ['value', 'module'] as const) if (isStr(p[k])) params[k] = p[k];
   const out: UserNode = { id: v.id, sym, params };
   if (isStr(v.name)) out.name = v.name;
+  if (isStr(v.component) && sym !== 'raw' && sym !== 'block') out.component = v.component;
   if (sym === 'raw') {
     const raw = rawNode(v.id, v.raw);
     if (!raw) return undefined;
