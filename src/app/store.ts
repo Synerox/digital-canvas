@@ -11,7 +11,7 @@ import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 import { GRID, LayoutCancelled, type LayoutResult, type MeasureText, type Point, cancelLayouts, layoutDiagram, sizeNode } from '../layout/elk-layout';
 import { canvasMeasure } from '../render/export';
 import { THEMES, type ThemeName } from '../render/theme';
-import { YosysError, elaborate } from '../yosys/client';
+import { YosysError, type YosysErrorKind, type YosysStatus, elaborate } from '../yosys/client';
 import { declaredModules } from '../yosys/script';
 import {
   type Box,
@@ -211,8 +211,11 @@ interface State {
   /** Changed since the last Save to a file. */
   dirty: boolean;
   status: Status;
-  progress?: { loaded: number; total: number };
+  /** What the running elaboration waits for: Yosys loading, or Yosys working on the design. */
+  yosys?: YosysStatus;
   error?: string;
+  /** Whether the error is in the design, a design Yosys did not finish, or Yosys failing to load. */
+  errorKind?: YosysErrorKind;
   log: string;
   /** Selected symbols and wires. */
   selection: ReadonlySet<string>;
@@ -1540,6 +1543,7 @@ export const useStore = create<State>((set, get) => {
           hierarchy: undefined,
           status: 'idle',
           error: undefined,
+          errorKind: undefined,
           codeFile: undefined,
           highlighted: new Set(),
           codeRanges: [],
@@ -1550,11 +1554,11 @@ export const useStore = create<State>((set, get) => {
         return;
       }
       const t0 = performance.now();
-      set({ status: 'elaborating', error: undefined, progress: undefined });
+      set({ status: 'elaborating', error: undefined, errorKind: undefined, yosys: undefined });
       try {
-        const result = await elaborate(files, topOverride, (loaded, total) => {
+        const result = await elaborate(files, topOverride, (yosys) => {
           if (gen !== rebuildGen) return;
-          set({ progress: { loaded, total }, status: loaded >= total ? 'elaborating' : 'loading' });
+          set({ yosys, status: yosys.stage === 'run' ? 'elaborating' : 'loading' });
         });
         if (gen !== rebuildGen) return;
         set({ status: 'elaborating', log: result.log });
@@ -1589,7 +1593,7 @@ export const useStore = create<State>((set, get) => {
         if (gen !== rebuildGen) return;
         const err = e as YosysError;
         const codeFile = get().codeFile && files[get().codeFile!] !== undefined ? get().codeFile : Object.keys(files)[0];
-        set({ status: 'error', error: err.message, log: err.log ?? get().log, codeFile });
+        set({ status: 'error', error: err.message, errorKind: err.kind ?? 'design', log: err.log ?? get().log, codeFile });
         // Drawings do not need Yosys.
         if (get().path[0]?.drawn) await get().openPath(get().path);
       }

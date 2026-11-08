@@ -13,8 +13,17 @@ import { FILE_EXTENSION, FileFormatError, isDrawnKey } from './editor/doc';
 import { GRID } from './layout/elk-layout';
 import { downloadBlob } from './render/export';
 import { THEMES, type ThemeName } from './render/theme';
+import { type YosysErrorKind, describeStatus, preloadYosys } from './yosys/client';
 
 let started = false;
+
+/** How an error reads in the status bar, over an older diagram, and in place of a diagram. */
+const ERROR_TITLES: Record<YosysErrorKind, { status: string; banner: string; box: string }> = {
+  design: { status: 'Yosys reported an error', banner: 'Yosys could not elaborate the current files.', box: 'Could not elaborate the design.' },
+  timeout: { status: 'Yosys did not finish', banner: 'Yosys did not finish the current files.', box: 'Yosys did not finish the design.' },
+  load: { status: 'Yosys could not load', banner: 'Yosys could not be loaded.', box: 'Could not load Yosys.' },
+};
+
 
 async function readFiles(list: FileList | File[]): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
@@ -27,20 +36,18 @@ async function readFiles(list: FileList | File[]): Promise<Record<string, string
 
 function StatusText() {
   const status = useStore((s) => s.status);
-  const progress = useStore((s) => s.progress);
+  const yosys = useStore((s) => s.yosys);
+  const errorKind = useStore((s) => s.errorKind);
   const elapsed = useStore((s) => s.elapsedMs);
   switch (status) {
-    case 'loading': {
-      const pct = progress ? Math.floor((100 * progress.loaded) / Math.max(1, progress.total)) : 0;
-      const mb = progress ? (progress.total / 1e6).toFixed(0) : '16';
-      return <span className="status">Loading Yosys ({mb} MB, first time only)… {pct}%</span>;
-    }
+    case 'loading':
+      return <span className="status">{yosys ? describeStatus(yosys) : 'Loading Yosys…'}</span>;
     case 'elaborating':
       return <span className="status">Elaborating with Yosys…</span>;
     case 'layout':
       return <span className="status">Laying out…</span>;
     case 'error':
-      return <span className="status error-text">Yosys reported an error</span>;
+      return <span className="status error-text">{ERROR_TITLES[errorKind ?? 'design'].status}</span>;
     case 'ready':
     case 'too-large':
       return <span className="status muted">Ready{elapsed ? ` in ${(elapsed / 1000).toFixed(1)} s` : ''}</span>;
@@ -91,6 +98,7 @@ export default function App() {
   const s = useStore.getState();
   const status = useStore((x) => x.status);
   const error = useStore((x) => x.error);
+  const errorKind = useStore((x) => x.errorKind);
   const notice = useStore((x) => x.notice);
   const otherTab = useStore((x) => x.autosavePaused);
   const dirty = useStore((x) => x.dirty);
@@ -118,6 +126,8 @@ export default function App() {
   useEffect(() => {
     if (started) return;
     started = true;
+    // Yosys takes a while to download the first time: start now, even if the work needs it only later.
+    preloadYosys();
     void (async () => {
       if (!(await useStore.getState().restoreAutosave())) await useStore.getState().loadExample();
     })();
@@ -458,7 +468,13 @@ export default function App() {
           )}
           {hasLayout && status === 'error' && !drawn && (
             <div className="error-banner">
-              <b>Yosys could not elaborate the current files.</b> {error} <span className="muted">The diagram below is from the last successful run.</span>
+              <b>{ERROR_TITLES[errorKind ?? 'design'].banner}</b> {error} <span className="muted">The diagram below is from the last successful run.</span>
+              {errorKind === 'load' && (
+                <>
+                  {' '}
+                  <button onClick={() => void s.rebuild()}>Try again</button>
+                </>
+              )}
             </div>
           )}
           <div className="center-body">
@@ -480,8 +496,9 @@ export default function App() {
                   </div>
                 ) : status === 'error' ? (
                   <div className="error-box">
-                    <b>Could not elaborate the design.</b>
+                    <b>{ERROR_TITLES[errorKind ?? 'design'].box}</b>
                     <p>{error}</p>
+                    {errorKind === 'load' && <button onClick={() => void s.rebuild()}>Try again</button>}
                   </div>
                 ) : status === 'idle' ? (
                   <div className="notice-box">

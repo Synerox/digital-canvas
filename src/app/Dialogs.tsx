@@ -9,7 +9,7 @@ import { isPart, partNamed, partVerilog } from '../editor/components';
 import { type EditDoc, type SheetEdits, emptyDoc, emptyEdits, sheetKey } from '../editor/doc';
 import { effectiveDiagram } from '../editor/sheet';
 import { downloadBlob } from '../render/export';
-import { elaborate } from '../yosys/client';
+import { describeStatus, elaborate } from '../yosys/client';
 import { parseYosysJson } from '../core/yosys-json';
 import { declaredModules } from '../yosys/script';
 import { type PutAside, changeFiles, importedTop, moduleTitle, planImport as planFiles, staleSlices, useStore, withoutModuleDefinitions } from './store';
@@ -593,6 +593,8 @@ export function VerilogExportDialog({ onClose }: { onClose(): void }) {
   const out = useMemo(() => exportCurrent(), []);
   const [check, setCheck] = useState<{ ok: boolean; text: string }>();
   const [busy, setBusy] = useState(false);
+  /** Yosys still loading for the check: what the button says meanwhile. */
+  const [loading, setLoading] = useState<string>();
   const [message, setMessage] = useState<string>();
   useEscape(onClose);
 
@@ -600,7 +602,7 @@ export function VerilogExportDialog({ onClose }: { onClose(): void }) {
     setBusy(true);
     setCheck(undefined);
     try {
-      const r = await elaborate(out.check.files, out.check.top);
+      const r = await elaborate(out.check.files, out.check.top, (y) => setLoading(y.stage === 'run' ? undefined : describeStatus(y)));
       const json = parseYosysJson(r.json);
       const m = json.modules[out.check.top];
       const done = `Yosys elaborated ${out.name}: ${Object.keys(m?.ports ?? {}).length} ports, ${Object.keys(m?.cells ?? {}).length} cells.`;
@@ -611,6 +613,7 @@ export function VerilogExportDialog({ onClose }: { onClose(): void }) {
       setCheck({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
+      setLoading(undefined);
     }
   };
 
@@ -649,7 +652,7 @@ export function VerilogExportDialog({ onClose }: { onClose(): void }) {
         {check && <p className={`small ${check.ok ? '' : 'error-text'}`}>{check.text}</p>}
         <div className="row">
           <button onClick={() => void runCheck()} disabled={busy}>
-            {busy ? 'Checking…' : 'Check with Yosys'}
+            {busy ? (loading ?? 'Checking…') : 'Check with Yosys'}
           </button>
           <span className="spacer" />
           <button
