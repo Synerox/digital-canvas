@@ -39,6 +39,8 @@ export function openBusHints(layout: Pick<LayoutResult, 'nodes' | 'edges'>): Ope
   for (const n of layout.nodes) {
     for (const p of n.ports) {
       if (p.width <= 1 || wired.has(p.id)) continue;
+      // The slices of a split or a concatenation are named next to the bar already ([7:4]), where the number would go.
+      if ((n.kind === 'split' && p.side === 'EAST') || (n.kind === 'join' && p.side === 'WEST')) continue;
       const d = OUT[p.side] ?? OUT.EAST;
       const from = { x: p.x, y: p.y };
       const to = { x: p.x + d.x * OPEN_BUS_STUB, y: p.y + d.y * OPEN_BUS_STUB };

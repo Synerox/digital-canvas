@@ -57,6 +57,14 @@ describe('openBusHints', () => {
     expect(s.text.anchor).toBe('start');
     expect(s.text.x).toBeGreaterThan(pin.x);
   });
+  it('leaves the slices of a split or a concatenation to the names written next to the bar', () => {
+    const split = placed('u:1', 'split', { parts: 2, width: 4 }, 0, 0);
+    const join = placed('u:2', 'concat', { parts: 2, width: 4 }, 200, 0);
+    expect(openBusHints({ nodes: [split, join], edges: [] }).map((h) => [h.port, h.width])).toEqual([
+      ['u:1.in', 8],
+      ['u:2.out', 8],
+    ]);
+  });
 });
 
 describe('hoveredSymbol', () => {
