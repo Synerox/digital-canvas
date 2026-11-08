@@ -702,9 +702,14 @@ function stubEnd(end: RouteEnd, len: number, clear: number, grid: number): Point
   }
 }
 
-/** Where the router's straight piece of wire at a port ends (the first bend or branch is no closer). */
-export function portStub(end: RouteEnd, grid = 10): Point {
-  return stubEnd(end, STUB, STUB_CLEAR, grid > 0 ? grid : 10);
+/**
+ * Where the router's straight piece of wire at a port ends (the first bend or branch is no closer). Given the
+ * symbols on the sheet, the end its search uses: short of the grid, or half way across the gap, when another
+ * symbol sits right in front of the pin (see searchStubEnd).
+ */
+export function portStub(end: RouteEnd, grid = 10, obstacles?: Rect[]): Point {
+  const g = grid > 0 ? grid : 10;
+  return obstacles ? searchStubEnd(end, obstacles, g) : stubEnd(end, STUB, STUB_CLEAR, g);
 }
 
 /** Whether a point is inside the keep-out of a symbol other than `own`. */
@@ -787,9 +792,10 @@ function cutUp(pl: Point[]): Seg[] {
 }
 
 // Segments of each wire and pin stub seen. A refresh hands every wire it routes the same wires of the
-// other nets and the same free pins (neither is changed in place), so each is cut up once, not once per wire.
+// other nets, the same free pins and the same symbols (none is changed in place), so each is cut up once,
+// not once per wire.
 const segCache = new WeakMap<Point[], Seg[]>();
-const stubCache = new WeakMap<RouteEnd, { grid: number; segs: Seg[] }>();
+const stubCache = new WeakMap<RouteEnd, { grid: number; obstacles: Rect[]; segs: Seg[] }>();
 
 function segmentsOf(polylines: Point[][]): Seg[] {
   const out: Seg[] = [];
@@ -801,9 +807,15 @@ function segmentsOf(polylines: Point[][]): Seg[] {
   return out;
 }
 
-function stubSegments(end: RouteEnd, grid: number): Seg[] {
+/**
+ * A free pin's stub as the search will draw it once the pin is wired: ending where searchStubEnd ends it, so
+ * that a pin over a symbol one grid step away keeps the point half way across the gap for its own wire (a
+ * wire of another net running across there would be met by that pin's wire, end on).
+ */
+function stubSegments(end: RouteEnd, grid: number, obstacles: Rect[]): Seg[] {
   let c = stubCache.get(end);
-  if (!c || c.grid !== grid) stubCache.set(end, (c = { grid, segs: cutUp([end.point, stubEnd(end, STUB, STUB_CLEAR, grid)]) }));
+  if (!c || c.grid !== grid || c.obstacles !== obstacles)
+    stubCache.set(end, (c = { grid, obstacles, segs: cutUp([end.point, searchStubEnd(end, obstacles, grid)]) }));
   return c.segs;
 }
 
@@ -997,7 +1009,7 @@ export function routeWire(from: RouteEnd, to: RouteEnd, opts: RouteOptions): Poi
   if (samePoint(p, q)) return [{ x: p.x, y: p.y }, { x: q.x, y: q.y }];
   const others = segmentsOf(opts.otherNets ?? []);
   // Free pins' stubs count as wires of other nets.
-  for (const r of opts.reserved ?? []) if (!samePoint(r.point, p) && !samePoint(r.point, q)) for (const s of stubSegments(r, grid)) others.push(s);
+  for (const r of opts.reserved ?? []) if (!samePoint(r.point, p) && !samePoint(r.point, q)) for (const s of stubSegments(r, grid, opts.obstacles)) others.push(s);
   const obstacles = [...opts.obstacles, from.rect, to.rect];
   const texts = opts.texts ?? [];
   const straight = straightRoute(from, to, obstacles, texts, others, grid);

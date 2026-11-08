@@ -489,7 +489,7 @@ export function buildGeometry(input: GeometryInput): Geometry {
     let line = stubs.get(port);
     if (!line) {
       const end = ends.get(port)!;
-      line = [end.point, portStub(end)];
+      line = [end.point, portStub(end, 10, obstacles)];
       stubs.set(port, line);
     }
     return line;

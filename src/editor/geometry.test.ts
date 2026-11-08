@@ -582,6 +582,35 @@ describe('stored wires after edits', () => {
     }
   });
 
+  it('keeps two pins on a bottom edge over a symbol a grid step under it apart, whichever side their wires come from', () => {
+    // EN at (320,140) and CLK at (340,140) share the one free line half way across the gap (y = 145):
+    // EN's wire, routed first, must keep off the point where CLK's will turn there.
+    for (const below of ['and', 'add', 'mux', 'dff'] as const) {
+      for (const [ex, cx] of [
+        [500, 0],
+        [0, 500],
+        [500, 500],
+        [0, 0],
+      ]) {
+        const s = new Sheet([
+          ['u:1', 'dffe', 300, 100],
+          ['u:2', below, 300, 150],
+          ['u:3', 'input', ex, 300],
+          ['u:4', 'input', cx, 360],
+        ]);
+        expect(s.pin('u:1.EN')).toEqual({ x: 320, y: 140 });
+        expect(s.pin('u:1.CLK')).toEqual({ x: 340, y: 140 });
+        s.wire('u:3.out', 'u:1.EN');
+        s.wire('u:4.out', 'u:1.CLK');
+        const label = `${below}, EN from x=${ex}, CLK from x=${cx}`;
+        expect(touching(s.layout!), label).toEqual([]);
+        expect(crowded(s.layout!), label).toEqual([]);
+        s.refresh();
+        expect(touching(s.layout!), label).toEqual([]);
+      }
+    }
+  });
+
   it('routes a wire drawn by hand again when a symbol is moved, placed or pasted onto it', () => {
     const sheet = () => {
       const s = new Sheet([

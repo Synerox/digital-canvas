@@ -862,6 +862,43 @@ describe('store', () => {
     expect(box('u:1').y).toBe(100);
   });
 
+  it('makes that room only once the blocks of Verilog modules on the drawing have their pins', async () => {
+    // A block of alu8 right over an adder that grows by 20 px. Without the Verilog the block has no pins and
+    // is drawn much shorter: room measured then would move the adder up, under the block as it really is.
+    const alu = 'module alu8(input [7:0] a, input [7:0] b, input [2:0] op, input c, output [7:0] y, output z);\n  assign y = a + b;\n  assign z = c;\nendmodule\n';
+    const d: SheetEdits = {
+      ...drawing([
+        { ...newUserNode('u:1', 'block'), params: { module: 'alu8' }, name: 'u_alu' },
+        { ...newUserNode('u:2', 'add'), params: { width: 4 } },
+      ]),
+      pos: { 'u:1': { x: 200, y: 0 }, 'u:2': { x: 200, y: 140 } },
+    };
+    const path = [{ instance: 'old', module: 'old', drawn: true }];
+    await open({ 'alu.v': alu.replace('a + b', 'a +') }, { outlines: undefined, doc: { drawn: ['old'], sheets: { 'd:old': d } }, path });
+    await settle();
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    expect(st().status).toBe('error');
+    expect(st().path).toEqual(path);
+    expect(box('u:1').ports).toEqual([]);
+    expect(box('u:1').height).toBeLessThan(140 - 20);
+    // Drawn as it was saved, still marked: nothing has moved.
+    expect(st().doc.sheets['d:old'].oldOutlines).toBe(true);
+    expect(st().doc.sheets['d:old'].pos).toEqual(d.pos);
+    // A file saved now keeps the mark on that drawing.
+    const saved = JSON.parse(JSON.stringify(st().savedFile())) as SavedFile;
+    expect(saved.outlines).toBe(OUTLINES);
+    expect(saved.doc.sheets['d:old'].oldOutlines).toBe(true);
+    // With the Verilog fixed the block has its pins, and the adder grows down, clear of it.
+    await st().setFiles({ 'alu.v': alu }, true);
+    await settle();
+    expect(st().status).toBe('ready');
+    await st().openPath(path);
+    expect(box('u:1').ports.length).toBe(6);
+    expect(box('u:1').y + box('u:1').height).toBeLessThanOrEqual(140);
+    expect([box('u:2').y, box('u:2').height]).toEqual([140, 60]);
+    expect(st().doc.sheets['d:old'].oldOutlines).toBeUndefined();
+  });
+
   it('pastes onto another sheet where the user looks, and on its own sheet beside the original (F2, N30)', async () => {
     const far = { ...drawing([pin('u:1', 'input', 'a')]), pos: { 'u:1': { x: 1200, y: 600 } } };
     await open({}, { doc: { drawn: ['a', 'b'], sheets: { 'd:a': far, 'd:b': drawing([]) } }, path: [{ instance: 'a', module: 'a', drawn: true }] });

@@ -383,7 +383,10 @@ export function layoutToEdits(e: SheetEdits, layout: LayoutResult, keep: 'none' 
     if (routes[x.id] || x.points.length < 2) continue;
     routes[x.id] = { points: x.points, ...(x.labelBox ? { label: x.labelBox } : {}) };
   }
-  return { ...e, pos, routes };
+  const out: SheetEdits = { ...e, pos, routes };
+  // Every symbol is where a layout with today's outlines put it: none needs room for an older one (see fitNewOutlines).
+  if (keep === 'none') delete out.oldOutlines;
+  return out;
 }
 
 /**

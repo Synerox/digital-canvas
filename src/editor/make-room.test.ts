@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { approxMeasure, type Point, sizeNode } from '../layout/elk-layout';
+import { type LayoutResult, approxMeasure, type Point, sizeNode } from '../layout/elk-layout';
 import { OUTLINES, type SheetEdits, emptyEdits, parseSavedFile } from './doc';
-import { addNodes, connect, effectiveDiagram, fitNewOutlines, makeRoom, resolveConnection } from './sheet';
+import { addNodes, connect, effectiveDiagram, fitNewOutlines, layoutToEdits, makeRoom, resolveConnection } from './sheet';
 import { type InterfaceOf, type SymKey, type SymParams, newUserNode } from './symbols';
 
 const size = (width: number, height: number) => ({ width, height });
@@ -272,6 +272,17 @@ describe('fitNewOutlines', () => {
     expect(out.pos).toEqual(e.pos);
     expect(out.routes).toEqual(e.routes);
     expect(out.oldOutlines).toBeUndefined();
+  });
+
+  it('is not needed after Auto layout, which places every symbol with its outline of today', () => {
+    const e = sheet([
+      ['u:1', 'add', 200, 100],
+      ['u:2', 'not', 200, 150],
+    ]);
+    const layout = { nodes: boxes(e).map((b) => ({ ...b, ports: [] })), edges: [], width: 400, height: 300 } as unknown as LayoutResult;
+    expect(layoutToEdits({ ...e, pos: {}, routes: {} }, layout, 'none').oldOutlines).toBeUndefined();
+    // Placing only the symbols that have no position yet keeps the others where they were saved: still marked.
+    expect(layoutToEdits(e, layout, 'existing').oldOutlines).toBe(true);
   });
 });
 
