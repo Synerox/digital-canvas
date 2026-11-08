@@ -1,5 +1,5 @@
 {
-  "bundle": "bundle.js",
+  "bundle": "bundle-52495253e123.js",
   "version": "0.71.188-dev.1267",
   "modules": {
     "yosys.core.wasm": {
