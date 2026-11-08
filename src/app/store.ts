@@ -1032,9 +1032,25 @@ export const useStore = create<State>((set, get) => {
     shown && !e.hidden.length ? shown : effectiveDiagram(module, base, restoreHidden(e), interfaceOf);
 
   /**
+   * A Verilog sheet's netlist before edits (cached, as openPath builds it), when the design has its module. A full
+   * circuit only up to FLAT_CELL_LIMIT cells, as building a bigger one takes a while.
+   */
+  const baseOf = (mode: ViewMode, module: string): Diagram | undefined => {
+    const { rules, design, blockDesign } = get();
+    const cacheKey = `${mode}:${module}:${rulesKey(rules)}`;
+    let base = baseCache.get(cacheKey);
+    if (base) return base;
+    const view = mode === 'blocks' ? (blockDesign ?? design) : design;
+    if (!view?.modules[module] || (mode === 'flat' && flatCellCount(view, module) > FLAT_CELL_LIMIT)) return undefined;
+    base = buildDiagram(mode === 'flat' ? withFlattened(view, module) : view, module, rules);
+    baseCache.set(cacheKey, base);
+    return base;
+  };
+
+  /**
    * The sheets after symbols on them took other settings (`before` → `after`, as when a preset changes): those
    * that got wider (a gate with more inputs) make room, as in Properties (see setNodeParams). A Verilog sheet whose
-   * netlist is not at hand (not opened since the files or rules changed) is left as it is.
+   * netlist cannot be had now (see baseOf) is left as it is.
    */
   const roomForWider = (before: EditDoc['sheets'], after: EditDoc['sheets']): EditDoc['sheets'] => {
     if (after === before) return after;
@@ -1052,7 +1068,7 @@ export const useStore = create<State>((set, get) => {
       if (!widths.size) continue;
       const mode = viewModeOf(key);
       const module = mode ? key.slice(`v:${mode}:`.length) : key.slice(2);
-      const base = mode ? baseCache.get(`${mode}:${module}:${rulesKey(get().rules)}`) : undefined;
+      const base = mode ? baseOf(mode, module) : undefined;
       if (mode && !base) continue;
       if (out === after) out = { ...after };
       out[key] = fitWider(e, withHidden(module, base, e), widths, measure);

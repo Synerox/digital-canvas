@@ -962,7 +962,9 @@ export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: Rea
     for (const k of Object.keys(pos)) if (k !== id) pos[k] = my(pos[k]);
     for (const [k, r] of Object.entries(routes)) routes[k] = { ...r, points: r.points.map(my), ...(r.label ? { label: my(r.label) } : {}) };
   }
-  const boxes = grown.map(([id]) => rect(id));
+  // Not the box of a symbol the user deleted (hidden): no wire is routed around it, and those over it are routed
+  // again when it comes back (Restore).
+  const boxes = grown.filter(([id]) => !e.hidden.includes(id)).map(([id]) => rect(id));
   for (const [id, r] of Object.entries(routes)) if (boxes.some((b) => polylineHitsRect(r.points, b))) delete routes[id];
   return { ...e, pos, routes };
 }

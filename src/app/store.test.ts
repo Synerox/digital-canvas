@@ -893,6 +893,16 @@ describe('store', () => {
     st().restoreHidden();
     expect(box(add).height).toBe(60);
     expect(apart(add, io('output', 'z'))).toBe(true);
+    // A wire drawn by hand over the deleted adder keeps its shape: no wire is routed around a deleted symbol.
+    await open({ 't.v': src }, { doc: { drawn: [], sheets: { [key]: { ...emptyEdits(), pos: at({ x: 300, y: 200 }), hidden: [add] } } } });
+    await settle();
+    const az = st().layout!.edges.find((x) => x.source.node === io('input', 'a') && x.target.node === io('output', 'z'))!;
+    const [p, q] = [az.points[0], az.points[az.points.length - 1]];
+    const drawn = [p, { x: 100, y: p.y }, { x: 100, y: 40 }, { x: 250, y: 40 }, { x: 250, y: q.y }, q];
+    const routes = { [az.id]: { points: drawn, manual: true } };
+    await open({ 't.v': src }, { outlines: undefined, doc: { drawn: [], sheets: { [key]: { ...emptyEdits(), pos: at({ x: 300, y: 200 }), hidden: [add], routes } } } });
+    await settle();
+    expect(st().doc.sheets[key].routes[az.id]).toEqual({ points: drawn, manual: true });
     // Out z deleted, 30 px over the adder: the adder does not grow up into it.
     const over = { ...emptyEdits(), pos: at({ x: 160, y: -10 }), hidden: [io('output', 'z')] };
     await open({ 't.v': src }, { outlines: undefined, doc: { drawn: [], sheets: { [key]: over } } });
@@ -940,6 +950,22 @@ describe('store', () => {
     st().setComponents([{ ...gate, params: { inputs: 3 } }]);
     expect([box('u:1').width, box('u:2').x]).toEqual([50, 170]);
     expect(st().doc.sheets['d:g'].nodes[0].component).toBe('gate');
+  });
+
+  it('moves what is right of a preset gate that got more inputs on a Verilog sheet not opened since the file was', async () => {
+    const gate: ComponentDef = { name: 'gate', base: 'and', params: { inputs: 2 } };
+    const src = 'module sub(input a, output y);\n  assign y = ~a;\nendmodule\nmodule top(input a, output y);\n  sub s (.a(a), .y(y));\nendmodule\n';
+    const hand = (): SheetEdits => ({
+      ...drawing([{ ...newUserNode('u:1', 'and'), component: 'gate' }, newUserNode('u:2', 'not')]),
+      pos: { 'u:1': { x: 600, y: 100 }, 'u:2': { x: 650, y: 100 } },
+    });
+    const sheets = { 'v:blocks:top': hand(), 'v:blocks:sub': hand() };
+    await open({ 't.v': src }, { doc: { drawn: [], sheets, components: [gate] }, path: [{ instance: 'top', module: 'top' }] });
+    await settle();
+    expect(st().sheet).toBe('v:blocks:top');
+    st().setComponents([{ ...gate, params: { inputs: 4 } }]);
+    expect(st().doc.sheets['v:blocks:top'].pos['u:2']).toEqual({ x: 670, y: 100 });
+    expect(st().doc.sheets['v:blocks:sub'].pos['u:2']).toEqual({ x: 670, y: 100 });
   });
 
   it('makes that room clear of a block whose Verilog failed, as tall as the block turns out once it loads', async () => {
