@@ -6,15 +6,16 @@ vi.mock('../yosys/client', async () => {
   const { JSON_OUT, yosysArgs } = await import('../yosys/script');
   class YosysError extends Error {
     log?: string;
+    kind?: string;
   }
   return {
     YosysError,
-    async elaborate(files: Record<string, string>, top?: string) {
+    elaborate: vi.fn(async (files: Record<string, string>, top?: string) => {
       const out = (await runYosys(yosysArgs(files, { top }), files, { stdout: () => {}, stderr: () => {} })) as Record<string, string | Uint8Array>;
       const raw = out[JSON_OUT];
       if (raw === undefined) throw new YosysError('Yosys failed');
       return { json: typeof raw === 'string' ? raw : new TextDecoder().decode(raw), log: '' };
-    },
+    }),
   };
 });
 
@@ -1687,5 +1688,36 @@ endmodule
     expect(st().doc.sheets['d:outer'].edges[0].target.port).toBe('u:3.data');
     st().deleteDrawing('inner');
     expect(st().notice).toMatch(/still used as a block on outer/);
+  }, 60_000);
+});
+
+describe('Yosys errors', () => {
+  it('keeps the kind of a Yosys error and the last log, and the next run clears both error and kind', async () => {
+    await st().loadExample('auction');
+    await settle();
+    const { YosysError } = await import('../yosys/client');
+    vi.mocked(elaborate).mockRejectedValueOnce(Object.assign(new YosysError('Yosys stopped downloading: no data arrived for 60 s.'), { kind: 'load' }));
+    useStore.setState({ log: 'previous log' });
+    await st().rebuild();
+    expect([st().status, st().errorKind, st().error, st().log]).toEqual(['error', 'load', 'Yosys stopped downloading: no data arrived for 60 s.', 'previous log']);
+    // The diagram of the last run stays.
+    expect(st().layout).toBeDefined();
+    vi.mocked(elaborate).mockRejectedValueOnce(Object.assign(new YosysError('Yosys worked on the design for 60 s'), { kind: 'timeout', log: 'so far' }));
+    await st().rebuild();
+    expect([st().errorKind, st().log]).toEqual(['timeout', 'so far']);
+    await st().rebuild();
+    await settle();
+    expect([st().status, st().error, st().errorKind]).toEqual(['ready', undefined, undefined]);
+  }, 60_000);
+
+  it('withdraws the Yosys run of a rebuild that a newer rebuild replaced', async () => {
+    await st().loadExample('auction');
+    await settle();
+    vi.mocked(elaborate).mockClear();
+    const first = st().rebuild();
+    const second = st().rebuild();
+    await Promise.all([first, second]);
+    const signals = vi.mocked(elaborate).mock.calls.map((c) => c[3] as AbortSignal);
+    expect(signals.map((x) => x.aborted)).toEqual([true, false]);
   }, 60_000);
 });
