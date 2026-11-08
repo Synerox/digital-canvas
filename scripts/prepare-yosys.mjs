@@ -10,7 +10,7 @@ const gen = path.join(pkgDir, 'gen');
 const outDir = path.resolve('public/yosys');
 const version = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8')).version;
 // Bump FORMAT when the files written here change shape, so existing copies are rebuilt.
-const FORMAT = 2;
+const FORMAT = 3;
 const stampText = `${version} format ${FORMAT}`;
 const stamp = path.join(outDir, 'VERSION');
 
@@ -21,7 +21,11 @@ if (fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8') === stampText) {
 
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
-fs.copyFileSync(path.join(gen, 'bundle.js'), path.join(outDir, 'bundle.js'));
+// The bundle's name carries its hash: the manifest (always fetched fresh) then names the bundle that
+// matches the core, and a browser never pairs a new core with an older bundle from its HTTP cache.
+const bundle = fs.readFileSync(path.join(gen, 'bundle.js'));
+const bundleName = `bundle-${crypto.createHash('sha256').update(bundle).digest('hex').slice(0, 12)}.js`;
+fs.writeFileSync(path.join(outDir, bundleName), bundle);
 
 const CHUNK = 12 * 1024 * 1024; // keep each file well under hosting limits
 const modules = {};
@@ -39,5 +43,5 @@ for (const f of fs.readdirSync(gen).filter((f) => f.endsWith('.wasm'))) {
   modules[f] = { chunks, gzip: true, size: gz.length, sha256 };
   console.log(`${f}: ${(raw.length / 1e6).toFixed(1)} MB -> ${(gz.length / 1e6).toFixed(1)} MB in ${chunks.length} file(s)`);
 }
-fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify({ bundle: 'bundle.js', version, modules }, null, 2));
+fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify({ bundle: bundleName, version, modules }, null, 2));
 fs.writeFileSync(stamp, stampText);

@@ -340,6 +340,8 @@ const baseCache = new Map<string, Diagram>();
 const flatAllowed = new Set<string>();
 /** Incremented by every rebuild/navigation, so a slow older call cannot overwrite a newer result. */
 let rebuildGen = 0;
+/** Withdraws the Yosys run of the previous rebuild: its result would be dropped anyway. */
+let rebuildAbort: AbortController | undefined;
 let navSeq = 0;
 /** What Copy took, the box of the copied symbols, and the sheet they were copied from (see paste). */
 let clipboard: { clip: Clip; box: Box; sheet: string } | undefined;
@@ -1526,6 +1528,8 @@ export const useStore = create<State>((set, get) => {
 
     async rebuild() {
       const gen = ++rebuildGen;
+      rebuildAbort?.abort();
+      const abort = (rebuildAbort = new AbortController());
       const { files } = get();
       const moduleNames = declaredModules(files);
       renameClashingDrawings(moduleNames);
@@ -1556,10 +1560,15 @@ export const useStore = create<State>((set, get) => {
       const t0 = performance.now();
       set({ status: 'elaborating', error: undefined, errorKind: undefined, yosys: undefined });
       try {
-        const result = await elaborate(files, topOverride, (yosys) => {
-          if (gen !== rebuildGen) return;
-          set({ yosys, status: yosys.stage === 'run' ? 'elaborating' : 'loading' });
-        });
+        const result = await elaborate(
+          files,
+          topOverride,
+          (yosys) => {
+            if (gen !== rebuildGen) return;
+            set({ yosys, status: yosys.stage === 'run' ? 'elaborating' : 'loading' });
+          },
+          abort.signal,
+        );
         if (gen !== rebuildGen) return;
         set({ status: 'elaborating', log: result.log });
         const json = parseYosysJson(result.json);

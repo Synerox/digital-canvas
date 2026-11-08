@@ -24,8 +24,8 @@ export class YosysError extends Error {
   }
 }
 
-/** What a run waits for: Yosys loading (see LoadStatus), or Yosys working on the design. */
-export type YosysStatus = LoadStatus | { stage: 'run' };
+/** What a run waits for: Yosys loading (see LoadStatus), Yosys finishing an earlier run, or Yosys working on the design. */
+export type YosysStatus = LoadStatus | { stage: 'queued' } | { stage: 'run' };
 
 /** The status as the page shows it. */
 export function describeStatus(y: YosysStatus): string {
@@ -36,6 +36,8 @@ export function describeStatus(y: YosysStatus): string {
     }
     case 'start':
       return y.fromCache ? 'Starting Yosys from this browser’s copy…' : 'Starting Yosys…';
+    case 'queued':
+      return 'Waiting for Yosys to finish an earlier run…';
     case 'run':
       return 'Elaborating with Yosys…';
     default:
@@ -49,8 +51,10 @@ export const RUN_TIMEOUT_MS = 60_000;
 export const STALL_MS = 60_000;
 /** Decompressing and compiling Yosys takes seconds; this only catches a page that never finishes it. */
 export const START_LIMIT_MS = 180_000;
+/** A run no longer wanted gets this long to finish before its worker is replaced. */
+export const ABORT_GRACE_MS = 3_000;
 
-const NETWORK_HINT = 'Check the internet connection, then reload the page.';
+const NETWORK_HINT = 'Check the internet connection and try again.';
 
 function yosysBaseUrl(): string {
   return new URL('yosys/', document.baseURI).href;
@@ -65,6 +69,8 @@ interface Job {
   reject(e: Error): void;
   /** Yosys is working on this design (its time limit runs). */
   started: boolean;
+  /** No longer wanted (already rejected), but Yosys is still working on it. */
+  aborted?: boolean;
   timer?: ReturnType<typeof setTimeout>;
   /** What Yosys has written for this run so far. */
   log: string;
@@ -148,7 +154,7 @@ function checkLoading(s: Session) {
   if (now() - s.lastActivity < (starting ? START_LIMIT_MS : STALL_MS)) return;
   endSession(s);
   const message = starting
-    ? `Yosys did not start within ${START_LIMIT_MS / 60_000} minutes. Reload the page to try again.`
+    ? `Yosys did not start within ${START_LIMIT_MS / 60_000} minutes. Try again, or reload the page.`
     : `Yosys stopped downloading: no data arrived for ${STALL_MS / 1000} s. ${NETWORK_HINT}`;
   failJobs(s, new YosysError(message, undefined, 'load'));
 }
@@ -159,6 +165,13 @@ function onMessage(s: Session, m: WorkerResponse) {
     s.lastActivity = now();
     if (m.status.stage === 'ready') {
       s.state = 'ready';
+      // The first run in line starts now; the others wait for it.
+      let next = true;
+      for (const j of s.jobs.values()) {
+        if (j.started) continue;
+        if (!next) j.onStatus?.({ stage: 'queued' });
+        next = false;
+      }
       return;
     }
     s.state = 'loading';
@@ -168,13 +181,37 @@ function onMessage(s: Session, m: WorkerResponse) {
     return;
   }
   const j = s.jobs.get(m.id);
-  if (!j) return;
+  if (!j) {
+    if (m.type === 'started') {
+      // Withdrawn just as the worker started it (the cancel came too late): it still holds Yosys,
+      // so it gets the grace time of any withdrawn run.
+      const late: Job = { id: m.id, files: {}, resolve() {}, reject() {}, started: true, aborted: true, log: '' };
+      s.jobs.set(m.id, late);
+      late.timer = setTimeout(() => restart(s, late), ABORT_GRACE_MS);
+    }
+    return;
+  }
   switch (m.type) {
     case 'started':
+      // A withdrawn run keeps its grace time, also when Yosys starts it again (the retry without -sv).
+      if (j.aborted) return;
       j.started = true;
       j.log = '';
       clearTimeout(j.timer);
-      j.timer = setTimeout(() => runTimedOut(s, j), RUN_TIMEOUT_MS);
+      j.timer = setTimeout(
+        () =>
+          restart(
+            s,
+            j,
+            new YosysError(
+              `Yosys worked on the design for ${RUN_TIMEOUT_MS / 1000} s without finishing, so it was stopped. ` +
+                'Check for a for loop or generate loop that never ends; the log shows how far Yosys got.',
+              j.log || undefined,
+              'timeout',
+            ),
+          ),
+        RUN_TIMEOUT_MS,
+      );
       j.onStatus?.({ stage: 'run' });
       return;
     case 'log':
@@ -195,24 +232,41 @@ function onMessage(s: Session, m: WorkerResponse) {
   }
 }
 
-/** Yosys cannot be interrupted: replace the worker, and give the runs waiting behind this one a fresh Yosys. */
-function runTimedOut(s: Session, j: Job) {
+/**
+ * Yosys cannot be interrupted: stop the run that holds it by replacing the worker, and give the
+ * runs waiting behind it a fresh Yosys (from this browser's cache, in about a second).
+ */
+function restart(s: Session, j: Job, error?: Error) {
   s.jobs.delete(j.id);
   endSession(s);
-  j.reject(
-    new YosysError(
-      `Yosys worked on the design for ${RUN_TIMEOUT_MS / 1000} s without finishing, so it was stopped. ` +
-        'Check for a for loop or generate loop that never ends; the log shows how far Yosys got.',
-      j.log || undefined,
-      'timeout',
-    ),
-  );
+  if (error) j.reject(error);
   const waiting = [...s.jobs.values()];
   s.jobs.clear();
   for (const other of waiting) {
     clearTimeout(other.timer);
     dispatch(other);
   }
+}
+
+function abortError(): Error {
+  return new DOMException('A newer run replaced this one', 'AbortError');
+}
+
+/** The caller no longer wants this run. */
+function abort(job: Job) {
+  const s = session;
+  if (!s || s.jobs.get(job.id) !== job || job.aborted) return;
+  job.reject(abortError());
+  if (!job.started) {
+    s.jobs.delete(job.id);
+    const req: WorkerRequest = { type: 'cancel', id: job.id };
+    s.worker.postMessage(req);
+    return;
+  }
+  // Running: a quick run may finish, but a long one (or one that never ends) must not hold up the runs after it.
+  job.aborted = true;
+  clearTimeout(job.timer);
+  job.timer = setTimeout(() => restart(s, job), ABORT_GRACE_MS);
 }
 
 function dispatch(job: Job) {
@@ -232,6 +286,7 @@ function dispatch(job: Job) {
     watch(s);
   }
   if (s.state === 'loading') job.onStatus?.(s.loading);
+  else if (s.jobs.size > 1) job.onStatus?.({ stage: 'queued' });
   const req: WorkerRequest = { type: 'run', id: job.id, baseUrl: yosysBaseUrl(), files: job.files, top: job.top };
   s.worker.postMessage(req);
 }
@@ -241,16 +296,24 @@ export function preloadYosys(): void {
   startSession();
 }
 
+/**
+ * Elaborate the files with Yosys. `signal` withdraws the run (its promise rejects with an AbortError):
+ * a run still waiting is skipped, and a running one gets ABORT_GRACE_MS before its worker is replaced.
+ */
 export async function elaborate(
   files: Record<string, string>,
   top?: string,
   onStatus?: (s: YosysStatus) => void,
+  signal?: AbortSignal,
 ): Promise<RunResult> {
+  if (signal?.aborted) throw abortError();
   if (startSession()) {
     try {
-      return await new Promise<RunResult>((resolve, reject) =>
-        dispatch({ id: nextId++, files, top, onStatus, resolve, reject, started: false, log: '' }),
-      );
+      return await new Promise<RunResult>((resolve, reject) => {
+        const job: Job = { id: nextId++, files, top, onStatus, resolve, reject, started: false, log: '' };
+        dispatch(job);
+        signal?.addEventListener('abort', () => abort(job), { once: true });
+      });
     } catch (e) {
       if (!(e as { workerFailure?: boolean }).workerFailure) throw e;
     }

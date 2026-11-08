@@ -128,7 +128,7 @@ describe('fetchModules', () => {
     }) as typeof fetch;
     const err2 = await fetchModules(f.manifest, BASE, { fetch: offline, origin: ORIGIN, onStatus: () => {} }).catch((e) => e);
     expect(err2).toBeInstanceOf(YosysLoadError);
-    expect(err2.message).toBe('Could not download Yosys (Failed to fetch). Check the internet connection, then reload the page.');
+    expect(err2.message).toBe('Could not download Yosys (Failed to fetch). Check the internet connection and try again.');
   });
 
   it('keeps working when the cache refuses to store', async () => {

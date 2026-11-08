@@ -119,7 +119,7 @@ describe('elaborate', () => {
     await vi.advanceTimersByTimeAsync(client.STALL_MS + 1000);
     const e = await run;
     expect(e.kind).toBe('load');
-    expect(e.message).toBe('Yosys stopped downloading: no data arrived for 60 s. Check the internet connection, then reload the page.');
+    expect(e.message).toBe('Yosys stopped downloading: no data arrived for 60 s. Check the internet connection and try again.');
     expect(w.terminated).toBe(true);
     // Trying again starts a new download.
     void client.elaborate(FILES);
@@ -168,5 +168,111 @@ describe('elaborate', () => {
     const e = await client.elaborate(FILES).catch((x) => x);
     expect([e.kind, e.message]).toEqual(['load', 'Could not download Yosys']);
     expect(FakeWorker.all).toHaveLength(1);
+  });
+
+  it('gives up a start that never ends', async () => {
+    const run = client.elaborate(FILES).catch((e) => e);
+    const w = FakeWorker.all[0];
+    w.send({ type: 'load', status: { stage: 'start', fromCache: true } });
+    // Starting may take longer than a stalled download would be allowed.
+    await vi.advanceTimersByTimeAsync(client.STALL_MS + 5000);
+    expect(w.terminated).toBe(false);
+    await vi.advanceTimersByTimeAsync(client.START_LIMIT_MS);
+    const e = await run;
+    expect([e.kind, e.message]).toEqual(['load', 'Yosys did not start within 3 minutes. Try again, or reload the page.']);
+    expect(w.terminated).toBe(true);
+  });
+
+  it('tells runs waiting behind another one that they wait, not that Yosys is starting', async () => {
+    const a: string[] = [];
+    const b: string[] = [];
+    void client.elaborate(FILES, undefined, (s) => a.push(s.stage));
+    void client.elaborate(FILES, undefined, (s) => b.push(s.stage));
+    const w = FakeWorker.all[0];
+    w.send({ type: 'load', status: { stage: 'start', fromCache: true } });
+    w.send({ type: 'load', status: { stage: 'ready' } });
+    const [r1, r2] = w.runs();
+    w.send({ id: r1.id, type: 'started' });
+    expect(a).toEqual(['load', 'start', 'run']);
+    expect(b).toEqual(['load', 'start', 'queued']);
+    // A run asked for while another one is running waits too.
+    const c: string[] = [];
+    void client.elaborate(FILES, undefined, (s) => c.push(s.stage));
+    expect(c).toEqual(['queued']);
+    w.send({ id: r1.id, type: 'done', json: '{}', log: '' });
+    w.send({ id: r2.id, type: 'started' });
+    expect(b.at(-1)).toBe('run');
+  });
+
+  it('skips a withdrawn run that has not started, and lets the next one go first', async () => {
+    const first = new AbortController();
+    const withdrawn = client.elaborate(FILES, undefined, undefined, first.signal).catch((e) => e);
+    const current = client.elaborate({ 'b.v': 'module b; endmodule' });
+    const w = FakeWorker.all[0];
+    const [r1, r2] = w.runs();
+    first.abort();
+    const e = await withdrawn;
+    expect(e.name).toBe('AbortError');
+    expect(w.received.at(-1)).toEqual({ type: 'cancel', id: r1.id });
+    w.send({ type: 'load', status: { stage: 'ready' } });
+    w.send({ id: r2.id, type: 'started' });
+    w.send({ id: r2.id, type: 'done', json: '{"b":1}', log: '' });
+    await expect(current).resolves.toEqual({ json: '{"b":1}', log: '' });
+    expect(w.terminated).toBe(false);
+    // An already withdrawn signal never reaches the worker.
+    const gone = new AbortController();
+    gone.abort();
+    await expect(client.elaborate(FILES, undefined, undefined, gone.signal)).rejects.toThrow(/replaced/);
+    expect(w.runs()).toHaveLength(2);
+  });
+
+  it('gives a withdrawn run that is running a moment to finish, then replaces the worker for the runs after it', async () => {
+    const quick = new AbortController();
+    void client.elaborate(FILES, undefined, undefined, quick.signal).catch(() => {});
+    const w = FakeWorker.all[0];
+    w.send({ type: 'load', status: { stage: 'ready' } });
+    w.send({ id: w.runs()[0].id, type: 'started' });
+    quick.abort();
+    // It finishes within the grace time: the worker stays.
+    await vi.advanceTimersByTimeAsync(client.ABORT_GRACE_MS - 1000);
+    w.send({ id: w.runs()[0].id, type: 'done', json: '{}', log: '' });
+    await vi.advanceTimersByTimeAsync(client.ABORT_GRACE_MS);
+    expect(w.terminated).toBe(false);
+
+    // A withdrawn run that hangs holds up the next one only for the grace time, not for RUN_TIMEOUT_MS.
+    const hung = new AbortController();
+    const statuses: string[] = [];
+    void client.elaborate(FILES, undefined, undefined, hung.signal).catch(() => {});
+    w.send({ id: w.runs()[1].id, type: 'started' });
+    const next = client.elaborate({ 'c.v': 'module c; endmodule' }, 'c', (s) => statuses.push(s.stage));
+    hung.abort();
+    await vi.advanceTimersByTimeAsync(client.ABORT_GRACE_MS);
+    expect(w.terminated).toBe(true);
+    const w2 = FakeWorker.all[1];
+    expect(w2.runs().map((r) => r.top)).toEqual(['c']);
+    expect(statuses).toEqual(['queued', 'load']);
+    w2.send({ type: 'load', status: { stage: 'ready' } });
+    w2.send({ id: w2.runs()[0].id, type: 'started' });
+    w2.send({ id: w2.runs()[0].id, type: 'done', json: '{"c":1}', log: '' });
+    await expect(next).resolves.toEqual({ json: '{"c":1}', log: '' });
+  });
+
+  it('watches a run that the worker started just before its cancel arrived', async () => {
+    const late = new AbortController();
+    void client.elaborate(FILES, undefined, undefined, late.signal).catch(() => {});
+    const next = client.elaborate({ 'd.v': 'module d; endmodule' }, 'd');
+    const w = FakeWorker.all[0];
+    w.send({ type: 'load', status: { stage: 'ready' } });
+    const [r1] = w.runs();
+    late.abort();
+    // The worker had already started it, and it never ends.
+    w.send({ id: r1.id, type: 'started' });
+    await vi.advanceTimersByTimeAsync(client.ABORT_GRACE_MS);
+    expect(w.terminated).toBe(true);
+    const w2 = FakeWorker.all[1];
+    expect(w2.runs().map((r) => r.top)).toEqual(['d']);
+    w2.send({ id: w2.runs()[0].id, type: 'started' });
+    w2.send({ id: w2.runs()[0].id, type: 'done', json: '{"d":1}', log: '' });
+    await expect(next).resolves.toEqual({ json: '{"d":1}', log: '' });
   });
 });

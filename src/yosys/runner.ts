@@ -64,7 +64,7 @@ function fileName(url: URL | string): string {
   return String(url).split('?')[0].split('/').pop() ?? String(url);
 }
 
-const NETWORK_HINT = 'Check the internet connection, then reload the page.';
+const NETWORK_HINT = 'Check the internet connection and try again.';
 
 async function readAll(res: Response, onBytes: (n: number) => void): Promise<Uint8Array> {
   const reader = res.body!.getReader();
@@ -104,7 +104,7 @@ async function download(
   } catch (e) {
     throw new YosysLoadError(`Could not download Yosys (${(e as Error).message}). ${NETWORK_HINT}`);
   }
-  if (!res.ok) throw new YosysLoadError(`Could not download Yosys: ${fileName(url)} answered HTTP ${res.status}. Reload the page to try again.`);
+  if (!res.ok) throw new YosysLoadError(`Could not download Yosys: ${fileName(url)} answered HTTP ${res.status}. Try again in a moment.`);
   try {
     return await readAll(res, onBytes);
   } catch (e) {
@@ -169,7 +169,7 @@ export async function fetchModules(manifest: YosysManifest, baseUrl: string, dep
         done = Math.max(0, done - bytes.length);
         bytes = await get('reload');
         if ((await sha256Hex(bytes)) !== mod.sha256) {
-          throw new YosysLoadError(`The downloaded Yosys file ${name} is damaged. Reload the page to download it again.`);
+          throw new YosysLoadError(`The downloaded Yosys file ${name} is damaged. Try again to download it anew.`);
         }
       }
       out.set(name, bytes);
@@ -223,13 +223,15 @@ function pageOrigin(): string {
 }
 
 let loaded: Promise<typeof RunYosys> | undefined;
+/** `loaded` has resolved: Yosys is ready to run. */
+let ready = false;
 let attempt = 0;
 /** Status listener of whoever is waiting for Yosys to load, and the latest status for late listeners. */
 let statusListener: ((s: LoadStatus) => void) | undefined;
 let lastStatus: LoadStatus | undefined;
 
 export function isYosysLoaded(): boolean {
-  return loaded !== undefined;
+  return ready;
 }
 
 /**
@@ -237,13 +239,17 @@ export function isYosysLoaded(): boolean {
  * Failures are YosysLoadErrors, and the next call tries again.
  */
 export function loadYosys(baseUrl: string, onStatus?: (s: LoadStatus) => void): Promise<typeof RunYosys> {
-  if (onStatus) {
+  if (loaded && ready) return loaded;
+  if (onStatus && onStatus !== statusListener) {
+    // A new listener hears where loading is.
     statusListener = onStatus;
     if (loaded && lastStatus) onStatus(lastStatus);
   }
   if (loaded) return loaded;
   const thisAttempt = ++attempt;
   const emit = (s: LoadStatus) => {
+    // Downloads of a failed attempt may still be running: they do not speak for the retry.
+    if (thisAttempt !== attempt) return;
     lastStatus = s;
     statusListener?.(s);
   };
@@ -251,14 +257,14 @@ export function loadYosys(baseUrl: string, onStatus?: (s: LoadStatus) => void): 
     emit({ stage: 'load' });
     const realFetch = globalThis.fetch.bind(globalThis);
     const manifestUrl = new URL('manifest.json', baseUrl);
-    if (thisAttempt > 1) manifestUrl.search = `?r=${thisAttempt}`;
+    if (thisAttempt > 1) manifestUrl.searchParams.set('r', String(thisAttempt));
     let manifest: YosysManifest;
     try {
       // Always ask the server whether the list changed, so it never names files of an older Yosys.
       manifest = JSON.parse(new TextDecoder().decode(await download(realFetch, manifestUrl, () => {}, 'no-cache')));
     } catch (e) {
       if (e instanceof YosysLoadError) throw e;
-      throw new YosysLoadError(`Could not read the Yosys file list (${(e as Error).message}). Reload the page to try again.`);
+      throw new YosysLoadError(`Could not read the Yosys file list (${(e as Error).message}). Try again in a moment.`);
     }
     const cache = await openCache();
     const origin = pageOrigin();
@@ -299,9 +305,10 @@ export function loadYosys(baseUrl: string, onStatus?: (s: LoadStatus) => void): 
     globalThis.fetch = shim;
     let runYosys: typeof RunYosys;
     try {
+      // The manifest names the bundle by its hash (see prepare-yosys), so it always matches the core.
       const bundleUrl = new URL(manifest.bundle, baseUrl);
       // A fresh URL on retries: browsers cache failed module imports per URL.
-      if (thisAttempt > 1) bundleUrl.search = `?r=${thisAttempt}`;
+      if (thisAttempt > 1) bundleUrl.searchParams.set('r', String(thisAttempt));
       runYosys = ((await import(/* @vite-ignore */ bundleUrl.href)) as { runYosys: typeof RunYosys }).runYosys;
     } catch (e) {
       throw new YosysLoadError(`Could not load Yosys (${(e as Error).message}). ${NETWORK_HINT}`);
@@ -314,6 +321,9 @@ export function loadYosys(baseUrl: string, onStatus?: (s: LoadStatus) => void): 
       // Decompress and compile the core once, so concurrent runs share it.
       // With no arguments the runtime only fetches and compiles its resources.
       await runYosys(undefined, {}, { fetchProgress: () => {} });
+      // One trivial command instantiates it too (a few milliseconds): a core this browser cannot
+      // link or give memory to fails here, as a loading problem, not on the user's design.
+      await runYosys(['-V'], {}, { stdout: () => {}, stderr: () => {}, fetchProgress: () => {} });
     } catch (e) {
       if (e instanceof YosysLoadError) throw e;
       throw new YosysLoadError(
@@ -321,6 +331,10 @@ export function loadYosys(baseUrl: string, onStatus?: (s: LoadStatus) => void): 
       );
     }
     if (cache) void pruneCache(cache, origin, manifest).catch(() => {});
+    // Loaded: later callers get Yosys at once, with no loading status to repeat.
+    ready = true;
+    lastStatus = undefined;
+    statusListener = undefined;
     return runYosys;
   })();
   loaded.catch(() => {

@@ -597,12 +597,21 @@ export function VerilogExportDialog({ onClose }: { onClose(): void }) {
   const [loading, setLoading] = useState<string>();
   const [message, setMessage] = useState<string>();
   useEscape(onClose);
+  // A check still waiting or running when the dialog closes is withdrawn.
+  const checkAbort = useRef<AbortController>(undefined);
+  useEffect(() => () => checkAbort.current?.abort(), []);
 
   const runCheck = async () => {
     setBusy(true);
     setCheck(undefined);
     try {
-      const r = await elaborate(out.check.files, out.check.top, (y) => setLoading(y.stage === 'run' ? undefined : describeStatus(y)));
+      checkAbort.current = new AbortController();
+      const r = await elaborate(
+        out.check.files,
+        out.check.top,
+        (y) => setLoading(y.stage === 'run' ? undefined : describeStatus(y)),
+        checkAbort.current.signal,
+      );
       const json = parseYosysJson(r.json);
       const m = json.modules[out.check.top];
       const done = `Yosys elaborated ${out.name}: ${Object.keys(m?.ports ?? {}).length} ports, ${Object.keys(m?.cells ?? {}).length} cells.`;
