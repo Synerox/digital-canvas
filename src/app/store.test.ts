@@ -21,6 +21,7 @@ vi.mock('../yosys/client', async () => {
 
 import { DEFAULT_RULES, RULES } from '../core/rules';
 import type { EditDoc, SavedFile, SheetEdits } from '../editor/doc';
+import type { ComponentDef } from '../editor/components';
 import { OUTLINES, emptyEdits, parseSavedFile } from '../editor/doc';
 import { componentSymbol, parseComponents } from '../editor/components';
 import { polylineHitsRect } from '../editor/router';
@@ -860,6 +861,85 @@ describe('store', () => {
     await st().loadSaved(JSON.stringify(saved));
     expect(box('u:2').y).toBe(170);
     expect(box('u:1').y).toBe(100);
+  });
+
+  it('makes that room for symbols deleted from a Verilog sheet too, and keeps clear of them, as Restore brings them back', async () => {
+    const src = 'module top(input [3:0] a, input [3:0] b, output [3:0] y, output [3:0] z);\n  assign y = a + b;\n  assign z = a;\nendmodule\n';
+    await open({ 't.v': src });
+    await settle();
+    const key = st().sheet;
+    const nodes = st().layout!.nodes;
+    const add = nodes.find((n) => n.cellType === '$add')!.id;
+    const io = (kind: string, label: string) => nodes.find((n) => n.kind === kind && n.label === label)!.id;
+    // As the old outlines had it: the adder 40x40 at (160,20); out z right under it, or 30 px over it.
+    const at = (z: { x: number; y: number }) => ({
+      [io('input', 'a')]: { x: 0, y: 0 },
+      [io('input', 'b')]: { x: 0, y: 100 },
+      [add]: { x: 160, y: 20 },
+      [io('output', 'y')]: { x: 300, y: 20 },
+      [io('output', 'z')]: z,
+    });
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    const apart = (a: string, b: string) => {
+      const [p, q] = [box(a), box(b)];
+      return p.x + p.width <= q.x || q.x + q.width <= p.x || p.y + p.height <= q.y || q.y + q.height <= p.y;
+    };
+    // The adder deleted: it grows when the file opens (down: z is in the way), so it is clear of z once restored.
+    const under = { ...emptyEdits(), pos: at({ x: 160, y: 70 }), hidden: [add] };
+    await open({ 't.v': src }, { outlines: undefined, doc: { drawn: [], sheets: { [key]: under } } });
+    await settle();
+    expect(st().sheet).toBe(key);
+    expect(st().doc.sheets[key].oldOutlines).toBeUndefined();
+    st().restoreHidden();
+    expect(box(add).height).toBe(60);
+    expect(apart(add, io('output', 'z'))).toBe(true);
+    // Out z deleted, 30 px over the adder: the adder does not grow up into it.
+    const over = { ...emptyEdits(), pos: at({ x: 160, y: -10 }), hidden: [io('output', 'z')] };
+    await open({ 't.v': src }, { outlines: undefined, doc: { drawn: [], sheets: { [key]: over } } });
+    await settle();
+    expect(box(add).y).toBe(20);
+    st().restoreHidden();
+    expect(apart(add, io('output', 'z'))).toBe(true);
+  });
+
+  it('moves what is right of a gate that got wider with more inputs, rather than covering it', async () => {
+    const d: SheetEdits = {
+      ...drawing([newUserNode('u:1', 'and'), newUserNode('u:2', 'not'), newUserNode('u:3', 'not')], [
+        { id: 'w:1', source: { node: 'u:1', port: 'u:1.Y' }, target: { node: 'u:2', port: 'u:2.A' } },
+      ]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 160, y: 100 }, 'u:3': { x: 300, y: 300 } },
+    };
+    await open({}, { doc: { drawn: ['g'], sheets: { 'd:g': d } }, path: [{ instance: 'g', module: 'g', drawn: true }] });
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    expect(box('u:1').width).toBe(40);
+    st().setNodeParams('u:1', { inputs: 4 });
+    expect([box('u:1').x, box('u:1').width]).toEqual([100, 60]);
+    // Everything right of the gate's old right edge moved right as far as the gate grew.
+    expect([box('u:2').x, box('u:3').x]).toEqual([180, 320]);
+    const w = st().layout!.edges.find((x) => x.id === 'w:1')!;
+    const y = box('u:1').ports.find((p) => p.name === 'Y')!;
+    const a = box('u:2').ports.find((p) => p.name === 'A')!;
+    expect([w.points[0], w.points[w.points.length - 1]]).toEqual([
+      { x: y.x, y: y.y },
+      { x: a.x, y: a.y },
+    ]);
+    expect(w.points.every((p) => p.x >= y.x && p.x <= a.x)).toBe(true);
+    // One undo step.
+    st().undo();
+    expect([box('u:1').width, box('u:2').x]).toEqual([40, 160]);
+  });
+
+  it('moves what is right of gates placed from a preset that got more inputs', async () => {
+    const gate: ComponentDef = { name: 'gate', base: 'and', params: { inputs: 2 } };
+    const d: SheetEdits = {
+      ...drawing([{ ...newUserNode('u:1', 'and'), component: 'gate' }, newUserNode('u:2', 'not')]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 160, y: 100 } },
+    };
+    await open({}, { doc: { drawn: ['g'], sheets: { 'd:g': d }, components: [gate] }, path: [{ instance: 'g', module: 'g', drawn: true }] });
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    st().setComponents([{ ...gate, params: { inputs: 3 } }]);
+    expect([box('u:1').width, box('u:2').x]).toEqual([50, 170]);
+    expect(st().doc.sheets['d:g'].nodes[0].component).toBe('gate');
   });
 
   it('makes that room clear of a block whose Verilog failed, as tall as the block turns out once it loads', async () => {

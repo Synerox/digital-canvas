@@ -858,26 +858,45 @@ export interface Size {
 }
 
 /**
- * A sheet saved with the symbol outlines of before (oldOutlines, see OUTLINES), drawn with today's: the symbols
- * that grew get room as a block that grew does (makeRoom), so none covers a neighbour, a pin or a wire. An adder
- * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right. Wires a grown
- * symbol covers are routed again; so are those to its pins that moved (their ends no longer meet them).
+ * makeRoom for the symbols of `d` that have a position, from the size `oldSize` gives each (given its size now).
+ * `d` holds the symbols the user deleted from a Verilog sheet too: they come back where they were (Restore).
  */
-export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText): SheetEdits {
+function growFrom(e: SheetEdits, d: Diagram, measure: MeasureText, oldSize: (n: DNode, now: Size) => Size): SheetEdits {
   const was = new Map<string, Size>();
   const now = new Map<string, Size>();
   const unsized = new Set<string>();
   for (const n of d.nodes) {
     if (!e.pos[n.id]) continue;
     const s = sizeNode(n, measure);
-    now.set(n.id, { width: s.width, height: s.height });
-    was.set(n.id, legacyCellSize(n, measure) ?? now.get(n.id)!);
+    const size = { width: s.width, height: s.height };
+    now.set(n.id, size);
+    was.set(n.id, oldSize(n, size));
     // A block of a module whose Verilog is still loading, or failed, has no pins yet: it is drawn smaller than it is.
     if (n.attrs?.missingModule) unsized.add(n.id);
   }
-  const out = { ...makeRoom(e, was, now, unsized) };
+  return makeRoom(e, was, now, unsized);
+}
+
+/**
+ * A sheet saved with the symbol outlines of before (oldOutlines, see OUTLINES), drawn with today's: the symbols
+ * that grew get room as a block that grew does (makeRoom), so none covers a neighbour, a pin or a wire. An adder
+ * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right. Wires a grown
+ * symbol covers are routed again; so are those to its pins that moved (their ends no longer meet them).
+ * `d` is the sheet's netlist with its hidden symbols (see growFrom).
+ */
+export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText): SheetEdits {
+  const out = { ...growFrom(e, d, measure, (n, now) => legacyCellSize(n, measure) ?? now) };
   delete out.oldOutlines;
   return out;
+}
+
+/**
+ * Room right of symbols that got wider when their settings changed (a gate with more inputs; `widths`: how wide
+ * each was before): what is right of one moves right as far, wires too (makeRoom), rather than being covered.
+ * `d` is the sheet's netlist after the change, with its hidden symbols (see growFrom).
+ */
+export function fitWider(e: SheetEdits, d: Diagram, widths: ReadonlyMap<string, number>, measure: MeasureText): SheetEdits {
+  return growFrom(e, d, measure, (n, now) => (widths.has(n.id) ? { width: Math.min(widths.get(n.id)!, now.width), height: now.height } : now));
 }
 
 /**

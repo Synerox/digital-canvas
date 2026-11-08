@@ -44,6 +44,7 @@ import {
   deleteItems,
   effectiveDiagram,
   fitNewOutlines,
+  fitWider,
   layoutToEdits,
   makeRoom,
   moveNodes,
@@ -1023,6 +1024,42 @@ export const useStore = create<State>((set, get) => {
   /** False while a Verilog sheet is being opened: what is on screen still belongs to the previous one. */
   const settled = (s: State) => isDrawnKey(s.sheet) || s.loadedSheet === s.sheet;
 
+  /**
+   * A sheet's netlist with the symbols the user deleted from it too (they keep their positions, and come back
+   * there with Restore): room made for a symbol that grew keeps clear of them, and they get room themselves.
+   */
+  const withHidden = (module: string, base: Diagram | undefined, e: SheetEdits, shown?: Diagram): Diagram =>
+    shown && !e.hidden.length ? shown : effectiveDiagram(module, base, restoreHidden(e), interfaceOf);
+
+  /**
+   * The sheets after symbols on them took other settings (`before` → `after`, as when a preset changes): those
+   * that got wider (a gate with more inputs) make room, as in Properties (see setNodeParams). A Verilog sheet whose
+   * netlist is not at hand (not opened since the files or rules changed) is left as it is.
+   */
+  const roomForWider = (before: EditDoc['sheets'], after: EditDoc['sheets']): EditDoc['sheets'] => {
+    if (after === before) return after;
+    const measure = measureFor(get().theme);
+    const width = (u: UserNode) => sizeNode(symbolNode(u, interfaceOf), measure).width;
+    let out = after;
+    for (const [key, e] of Object.entries(after)) {
+      const old = before[key];
+      if (!old || old === e) continue;
+      const widths = new Map<string, number>();
+      for (const u of e.nodes) {
+        const was = old.nodes.find((x) => x.id === u.id);
+        if (was && was !== u && e.pos[u.id] && width(u) > width(was)) widths.set(u.id, width(was));
+      }
+      if (!widths.size) continue;
+      const mode = viewModeOf(key);
+      const module = mode ? key.slice(`v:${mode}:`.length) : key.slice(2);
+      const base = mode ? baseCache.get(`${mode}:${module}:${rulesKey(get().rules)}`) : undefined;
+      if (mode && !base) continue;
+      if (out === after) out = { ...after };
+      out[key] = fitWider(e, withHidden(module, base, e), widths, measure);
+    }
+    return out;
+  };
+
   /** A history entry for the document as it is now. */
   const here = (): HistoryEntry => ({ doc: get().doc, path: get().path, sheet: get().sheet });
 
@@ -1099,7 +1136,7 @@ export const useStore = create<State>((set, get) => {
     const measure = measureFor(s.theme);
     // Saved with the symbol outlines of before: the symbols that grew since get room, once (stored below).
     const refitted = !!e.oldOutlines;
-    if (e.oldOutlines) e = fitNewOutlines(e, netlist, measure);
+    if (e.oldOutlines) e = fitNewOutlines(e, withHidden(currentModule(), drawn ? undefined : s.base, e, netlist), measure);
     let pos = e.pos;
     let routes = e.routes;
     let placed: string[] = [];
@@ -1228,7 +1265,7 @@ export const useStore = create<State>((set, get) => {
     const netlist = effectiveDiagram(module, base, saved, interfaceOf);
     const measure = measureFor(theme);
     // As refresh() draws it: with room for the symbols that grew since an older file was saved.
-    const e = saved.oldOutlines ? fitNewOutlines(saved, netlist, measure) : saved;
+    const e = saved.oldOutlines ? fitNewOutlines(saved, withHidden(module, base, saved, netlist), measure) : saved;
     let { pos, routes } = e;
     if (!isPinned(e) || netlist.nodes.some((n) => !pos[n.id])) {
       const elk = await elkOf(cacheKey, base);
@@ -1953,8 +1990,16 @@ export const useStore = create<State>((set, get) => {
 
     setNodeParams(id, params) {
       const before = get().doc;
-      // Changed on its own, a symbol placed from a preset no longer follows the preset.
-      editSheet((e) => unlinkChanged(setParams(e, id, params, interfaceOf), id, get().doc.components));
+      editSheet((e, _netlist, layout) => {
+        // Changed on its own, a symbol placed from a preset no longer follows the preset.
+        const next = unlinkChanged(setParams(e, id, params, interfaceOf), id, get().doc.components);
+        // Wider now (a gate with more inputs): what is right of it moves right rather than being covered.
+        const was = layout.nodes.find((n) => n.id === id);
+        if (next === e || !was || !next.pos[id]) return next;
+        const s = get();
+        const d = withHidden(currentModule(), isDrawnKey(s.sheet) ? undefined : s.base, next);
+        return fitWider(next, d, new Map([[id, was.width]]), measureFor(s.theme));
+      });
       // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
       const s = get();
       if (s.doc === before || !s.netlist) return;
@@ -2129,7 +2174,7 @@ export const useStore = create<State>((set, get) => {
       if (defs.length) doc.components = defs;
       else delete doc.components;
       // The symbols placed from a preset follow it: one undo step with the change of the library.
-      doc.sheets = followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf);
+      doc.sheets = roomForWider(s.doc.sheets, followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf));
       if (doc.sheets === s.doc.sheets && JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
       const placing = placingNow(s.placing, defs, renamed);
       pushDoc(doc, placing !== s.placing ? { placing } : {});
