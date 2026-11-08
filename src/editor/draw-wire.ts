@@ -139,6 +139,8 @@ export function trace(d: WireDraft, p: Point, sideways: number): WireDraft {
     const from = d.pivot ?? last(d.points);
     const off = Math.abs(across(p) - across(from));
     const on = Math.abs(along(p) - along(from));
+    // The leg after the corner runs where the pointer runs now (with sparse pointer events, that may be a
+    // little past where it left the leg: the pointer goes on down that line, not back to it).
     if (off >= 2 * STUB && 2 * on <= off) return { ...d, turn: p };
     // Still running along the leg (or diagonally): the corner would be here.
     return on >= off ? { ...d, pivot: p } : d;

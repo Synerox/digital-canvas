@@ -8,7 +8,7 @@ import type { Diagram } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
 import { checkSheet, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
-import { PRESET_BASES, freeComponentName, parseSymbolJson, partNamed, symbolJson } from '../editor/components';
+import { MAX_COMPONENTS, PRESET_BASES, freeComponentName, parseSymbolJson, partNamed, symbolJson } from '../editor/components';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
 import { moduleTitle, sameFile, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
@@ -432,6 +432,10 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
                   return;
                 }
                 const params = r.params;
+                if ((s.doc.components?.length ?? 0) >= MAX_COMPONENTS) {
+                  s.setNotice(`Not saved as a component: the library holds at most ${MAX_COMPONENTS}.`);
+                  return;
+                }
                 const stem = `${user.sym}${params.inputs ?? params.parts ?? (params.width && params.width > 1 ? params.width : '')}`;
                 const name = freeComponentName(s.doc.components, stem, s.componentNameTaken);
                 s.setComponents([...(s.doc.components ?? []), { name, base: user.sym, params }]);

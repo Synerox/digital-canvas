@@ -413,6 +413,8 @@ export function buildGeometry(input: GeometryInput): Geometry {
   // moved onto the grid. Checked like a new route, and stored, so they are moved once. A symbol the user
   // moves goes whole grid steps, so the routes of its wires are not taken for these (adjustRoute stretches them).
   const nudged = new Set<string>();
+  /** Wires drawn by hand moved onto the grid like that: stored, but kept as wires that did not move. */
+  const movedOnGrid = new Set<string>();
   let stored = routes;
   if (!fast) {
     const close = (a: Point, b: Point) => Math.abs(a.x - b.x) <= GRID / 2 + 0.5 && Math.abs(a.y - b.y) <= GRID / 2 + 0.5;
@@ -433,8 +435,10 @@ export function buildGeometry(input: GeometryInput): Geometry {
       const points = onGrid(r.points, s, t, a, b, snapGrid);
       if (!points) continue;
       if (stored === routes) stored = { ...routes };
-      stored[e.id] = { points, ...(r.manual ? { manual: true } : {}) };
-      nudged.add(e.id);
+      stored[e.id] = { ...r, points };
+      // A wire drawn by hand stays drawn by hand: moved by a few px with its symbols, it is kept like any other.
+      if (!r.manual) nudged.add(e.id);
+      else movedOnGrid.add(e.id);
     }
   }
   // Stored routes that still meet both of their pins, and whether each one is new here or moved along with
@@ -526,7 +530,7 @@ export function buildGeometry(input: GeometryInput): Geometry {
       if (!(isFresh ? crowds(e, r.points, (all ??= nodes.map(keepOut)), keptPins) : crowds(e, r.points, changed, steadyPins))) {
         resolved.set(e.id, { points: r.points, label: r.label });
         if (isFresh) fresh.push(e);
-        if (nudged.has(e.id)) routed[e.id] = r;
+        if (nudged.has(e.id) || movedOnGrid.has(e.id)) routed[e.id] = r;
         continue;
       }
     } else if (r?.manual && r.points.length >= 2) {

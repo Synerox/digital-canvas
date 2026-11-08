@@ -13,7 +13,8 @@ import { ComponentsDialog } from './ComponentsDialog';
 import { moduleTitle, useStore } from './store';
 import { ui } from './ui-events';
 
-const sameParams = (a: SymParams | undefined, b: SymParams | undefined) => JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
+/** The same item of the library: the library's own symbols have no parameters given, components always some. */
+const sameParams = (a: SymParams | undefined, b: SymParams | undefined) => (a === undefined) === (b === undefined) && JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
 
 const Icon = memo(function Icon({ sym, params }: { sym: SymKey; params?: SymParams }) {
   const iface = useStore((s) => s.interfaceOf);

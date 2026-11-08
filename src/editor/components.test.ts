@@ -79,6 +79,9 @@ describe('components in JSON', () => {
     const saved = JSON.parse(JSON.stringify(defs));
     expect(loadComponents([...saved, { name: 'bad', base: 'nope' }, 'x', { name: 'and5', base: 'or' }])).toEqual(defs);
     expect(loadComponents(undefined)).toEqual([]);
+    expect(loadComponents([{ name: 'and5', base: 'and', params: { name: 'x', base: 'or', inputs: 5 } }])).toEqual([
+      { name: 'and5', base: 'and', params: { inputs: 5 } },
+    ]);
   });
 
   it('exports a part as an empty module with its ports', () => {

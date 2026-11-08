@@ -55,6 +55,12 @@ describe('drawing a wire', () => {
     expect(draftPath(d, P(300, 180), 'WEST')).toEqual(pts(100, 100, 200, 100, 200, 180, 300, 180));
   });
 
+  it('puts the corner on the line the pointer runs along after it, when pointer events come far apart', () => {
+    let d = out;
+    for (const p of [P(150, 100), P(200, 100), P(240, 180), P(240, 260)]) d = trace(d, p, 10);
+    expect(draftPath(d, P(240, 260))).toEqual(pts(100, 100, 240, 100, 240, 260));
+  });
+
   it('draws one corner for a diagonal drag, not a staircase', () => {
     let d = out;
     for (let k = 1; k <= 20; k++) d = trace(d, P(100 + 10 * Math.ceil(k / 2), 100 + 10 * Math.floor(k / 2)), 10);

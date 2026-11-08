@@ -246,7 +246,11 @@ export function loadComponents(v: unknown): ComponentDef[] {
     // Saved as the dialog keeps them: pins with their direction. Read through the user's form, so that
     // one rule says what a component may be.
     const spec: Record<string, unknown> = { name: c.name, ...(c.title !== undefined ? { title: c.title } : {}) };
-    if (c.base !== undefined) Object.assign(spec, { base: c.base }, isObj(c.params) ? c.params : {});
+    // Only parameters: one named "name", "base" or "title" would take the place of the component's own.
+    if (c.base !== undefined) {
+      const params = isObj(c.params) ? Object.entries(c.params).filter(([k]) => !['name', 'base', 'title'].includes(k)) : [];
+      Object.assign(spec, Object.fromEntries(params), { base: c.base });
+    }
     else if (Array.isArray(c.pins)) {
       const pins = c.pins.filter(isObj);
       const side = (dir: string) => pins.filter((p) => p.dir === dir).map((p) => ({ name: p.name, width: p.width }));

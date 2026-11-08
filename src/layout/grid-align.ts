@@ -284,6 +284,8 @@ function placeRows(layout: LayoutResult, portAt: ReadonlyMap<string, PortAt>, xs
   };
   const fits = (i: number, y: number) => {
     if (Math.abs(y - home[i]) > MAX_DRIFT * grid + 0.5) return false;
+    // Not up past the layout's top margin (the canvas and the export start at 0).
+    if (y < Math.min(home[i], grid) - 0.5) return false;
     const h = nodes[i].height;
     for (const b of bounds[i]) {
       const o = nodes[b.j];
