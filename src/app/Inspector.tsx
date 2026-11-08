@@ -1,18 +1,19 @@
 /**
- * Properties of the selection (or of the sheet when nothing is selected).
- * Names and parameters apply on Enter or when the field loses focus; every
- * change is one undo step.
+ * Properties of the selection (or of the sheet when nothing is selected):
+ * only what is needed. Names and parameters apply on Enter or when the field
+ * loses focus; every change is one undo step. A symbol's settings as JSON are
+ * edited in a window of their own (see SettingsPopup).
  */
 import { useEffect, useRef, useState } from 'react';
 import type { Diagram } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
 import { checkSheet, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
-import { MAX_COMPONENTS, PRESET_BASES, freeComponentName, parseSymbolJson, partNamed, symbolJson } from '../editor/components';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
 import { moduleTitle, sameFile, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
 import { ui } from './ui-events';
+import { openSettings, partOfBlock, settingsOf } from './settings';
 
 /**
  * A text field that commits on Enter or blur and resets on Escape. `check`
@@ -83,53 +84,6 @@ function Field({
             setText(value);
             setErr(undefined);
             (e.target as HTMLInputElement).blur();
-          }
-        }}
-      />
-      {err && <div className="field-error small">{err}</div>}
-    </>
-  );
-}
-
-/**
- * A symbol's settings as JSON (`{ "sym": "and", "inputs": 5, "width": 1 }`): applied on Ctrl+Enter or
- * when the field loses focus, reset on Escape. Text that is not right stays, to be corrected, and says why.
- * Keyed by its value where it is used, so that it starts over when the settings change.
- */
-function JsonField({ value, onCommit }: { value: string; onCommit(v: string): string | void }) {
-  const [text, setText] = useState(value);
-  const [err, setErr] = useState<string>();
-  const cancelled = useRef(false);
-  const commit = () => {
-    if (cancelled.current) {
-      cancelled.current = false;
-      return;
-    }
-    if (text === value) return;
-    setErr(onCommit(text) || undefined);
-  };
-  return (
-    <>
-      <textarea
-        className={`json-input ${err ? 'invalid' : ''}`}
-        value={text}
-        rows={Math.min(6, Math.max(2, Math.ceil(text.length / 30)))}
-        spellCheck={false}
-        aria-label="Settings as JSON"
-        onChange={(e) => {
-          setText(e.target.value);
-          setErr(undefined);
-        }}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            (e.target as HTMLTextAreaElement).blur();
-          } else if (e.key === 'Escape') {
-            cancelled.current = true;
-            setText(value);
-            setErr(undefined);
-            (e.target as HTMLTextAreaElement).blur();
           }
         }}
       />
@@ -248,12 +202,16 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
             />
           </label>
         ) : (
-          <p className="small muted">
-            From Verilog: <b>{moduleTitle(module)}</b>. Your moves, added symbols and wires, renames and deletions are kept when the Verilog is imported again.
-            {/* Each view has sheets of its own: an edit here does not show in the other view, nor in its export. */}
-            {viewModeOf(s.sheet) === 'flat'
-              ? ' They belong to the Full circuit: the Block diagram is edited apart.'
-              : ' They belong to the Block diagram: the Full circuit is edited apart.'}
+          <p
+            className="small muted"
+            // Each view has sheets of its own: an edit here does not show in the other view, nor in its export.
+            title={`Your moves, added symbols and wires, renames and deletions are kept when the Verilog is imported again. ${
+              viewModeOf(s.sheet) === 'flat'
+                ? 'They belong to the Full circuit: the Block diagram is edited apart.'
+                : 'They belong to the Block diagram: the Full circuit is edited apart.'
+            }`}
+          >
+            From Verilog: <b>{moduleTitle(module)}</b>. Your edits are kept when it is imported again.
           </p>
         )}
         <p className="small muted">
@@ -346,11 +304,11 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
     const renamed = !user && edits?.labels[id] !== undefined;
     const lines = srcLines(node.src, s.files);
     // A block of a part has nothing to open, unless a drawing or Verilog module of that name defines it now.
-    const isPartBlock =
-      !!node.moduleName && !!partNamed(s.doc.components, node.moduleName) && !s.doc.drawn.includes(node.moduleName) && !s.viewDesign()?.modules[node.moduleName];
+    const part = user ? partOfBlock(s, node) : undefined;
+    const settings = settingsOf(s, id);
     return (
       <div className="inspector">
-        <h3>{title}</h3>
+        <h3>{part ? `Part ${part.title ?? part.name}` : title}</h3>
         {renameable && (
           <label className="prop">
             <span>{user?.sym === 'text' ? 'Text' : node.kind === 'instance' ? 'Instance name' : 'Name'}</span>
@@ -410,70 +368,53 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
               </label>
             );
           })}
-        {user && PRESET_BASES.includes(user.sym) && (
-          <label className="prop">
-            <span title="The same settings as JSON: for example, change inputs to 5 for five input pins">JSON</span>
-            <JsonField
-              key={`${id} ${symbolJson(user.sym, user.params)}`}
-              value={symbolJson(user.sym, user.params)}
-              onCommit={(v) => {
-                const r = parseSymbolJson(v, user.sym);
-                if (r.error !== undefined) return r.error;
-                s.setNodeParams(id, r.params);
-              }}
-            />
-            <button
-              className="link small"
-              title="Add a component with these settings to the library (Components)"
-              onClick={() => {
-                const r = parseSymbolJson(symbolJson(user.sym, user.params), user.sym);
-                if (r.error !== undefined) {
-                  s.setNotice(`Not saved as a component: ${r.error}`);
-                  return;
-                }
-                const params = r.params;
-                if ((s.doc.components?.length ?? 0) >= MAX_COMPONENTS) {
-                  s.setNotice(`Not saved as a component: the library holds at most ${MAX_COMPONENTS}.`);
-                  return;
-                }
-                const stem = `${user.sym}${params.inputs ?? params.parts ?? (params.width && params.width > 1 ? params.width : '')}`;
-                const name = freeComponentName(s.doc.components, stem, s.componentNameTaken);
-                s.setComponents([...(s.doc.components ?? []), { name, base: user.sym, params }]);
-                s.setNotice(`Added ${name} to the components of the library (Components › Edit… changes it).`);
-              }}
-            >
-              Save as a component
-            </button>
-          </label>
-        )}
-        {node.kind === 'instance' && node.moduleName && (isPartBlock ? (
-          <p className="small muted">A part of the library (Components): its pins are set there. It is exported as an empty module.</p>
-        ) : (
+        {node.kind === 'instance' && node.moduleName && !part && (
           <div className="prop-actions">
             <button onClick={() => s.openNode(id)}>Open {node.label}</button>
           </div>
-        ))}
-        <dl className="ports small">
-          {node.ports.map((p) => (
-            <div key={p.id}>
-              <dt>{p.name}</dt>
-              <dd>
-                {p.dir === 'in' ? 'in' : 'out'} · {p.width} bit{p.width === 1 ? '' : 's'}
-              </dd>
-            </div>
-          ))}
-        </dl>
-        {lines.length > 0 && (
-          <p className="small muted">
-            Verilog {lines.length === 1 ? `line ${lines[0]} is` : `lines ${lineList(lines)} are`} highlighted in Source.
-          </p>
         )}
-        {!user && (
-          <p className="small muted">
-            Imported from Verilog: change the Verilog to change what it is. You can {renameable ? 'move, rename' : 'move'} or delete it here.
+        {node.ports.length > 0 && (
+          <details className="ports small">
+            <summary>
+              {node.ports.length} pin{node.ports.length === 1 ? '' : 's'}
+            </summary>
+            <dl>
+              {node.ports.map((p) => (
+                <div key={p.id}>
+                  <dt>{p.name}</dt>
+                  <dd>
+                    {p.dir === 'in' ? 'in' : 'out'} · {p.width} bit{p.width === 1 ? '' : 's'}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </details>
+        )}
+        {/* One line: where it comes from, and the lines Source highlights (Source shows only with the sheets of Verilog). */}
+        {!user ? (
+          <p className="small muted" title={`Change the Verilog to change what it is. You can ${renameable ? 'move, rename' : 'move'} or delete it here.`}>
+            From Verilog{lines.length > 0 && `, ${lines.length === 1 ? `line ${lines[0]}` : `lines ${lineList(lines)}`} (highlighted in Source)`}.
           </p>
+        ) : (
+          !drawn &&
+          lines.length > 0 && (
+            <p className="small muted">
+              Verilog {lines.length === 1 ? `line ${lines[0]} is` : `lines ${lineList(lines)} are`} highlighted in Source.
+            </p>
+          )
         )}
         <div className="prop-actions">
+          {settings && (
+            <button
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                openSettings(settings, r.left, r.bottom);
+              }}
+              title={part ? `The pins of ${part.name}, as JSON (changes every block of it). Double-clicking the block opens it too.` : 'The settings as JSON. Double-clicking the symbol opens them too.'}
+            >
+              {part ? 'Edit pins…' : 'JSON…'}
+            </button>
+          )}
           <button className="danger" onClick={() => s.deleteSelection()}>
             Delete
           </button>

@@ -1,0 +1,170 @@
+/**
+ * The small window that edits a component as JSON: a placed symbol's settings
+ * (`{ "sym": "and", "inputs": 5, "width": 1 }`), or a component of the
+ * library (a part's pins, a preset's settings). Double-clicking the symbol, a
+ * part's block or a component of the library opens it; Properties has a
+ * button for it too. Apply is one undo step.
+ */
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ComponentDef, MAX_COMPONENTS, editComponent, freeComponentName, isPart, parseSymbolJson, settingsHint } from '../editor/components';
+import { SYMBOL_BY_KEY, type SymKey, type SymParams } from '../editor/symbols';
+import { MOD, useEscape } from './Dialogs';
+import { sheetsUsing, useStore } from './store';
+import { type SettingsRequest, type Subject, subjectOf } from './settings';
+import { ui } from './ui-events';
+
+/** Mounted once: shows the window when asked to (see openSettings). */
+export function SettingsPopup() {
+  const [open, setOpen] = useState<{ subject: Subject; x: number; y: number; n: number }>();
+  useEffect(() => {
+    let n = 0;
+    const onOpen = (ev: Event) => {
+      const { target, x, y } = (ev as CustomEvent<SettingsRequest>).detail;
+      const subject = subjectOf(useStore.getState(), target);
+      if (subject) setOpen({ subject, x, y, n: ++n });
+    };
+    ui.addEventListener('edit-settings', onOpen);
+    return () => ui.removeEventListener('edit-settings', onOpen);
+  }, []);
+  if (!open) return null;
+  return <SettingsWindow key={open.n} subject={open.subject} x={open.x} y={open.y} onClose={() => setOpen(undefined)} />;
+}
+
+/** The window itself, next to the point (x, y) in the page. */
+export function SettingsWindow({ subject, x, y, onClose }: { subject: Subject; x: number; y: number; onClose(): void }) {
+  const setNodeParams = useStore((s) => s.setNodeParams);
+  const setComponents = useStore((s) => s.setComponents);
+  const nameTaken = useStore((s) => s.componentNameTaken);
+  const doc = useStore((s) => s.doc);
+  const [text, setText] = useState(subject.text);
+  const [said, setSaid] = useState<string>();
+  const box = useRef<HTMLDivElement>(null);
+  const [at, setAt] = useState({ left: x + 12, top: y + 12 });
+  useEscape(onClose);
+
+  // Next to the point, all of it on the screen.
+  useLayoutEffect(() => {
+    const r = box.current?.getBoundingClientRect();
+    if (!r) return;
+    const left = Math.max(8, Math.min(x + 12, window.innerWidth - r.width - 8));
+    const top = Math.max(8, Math.min(y + 12, window.innerHeight - r.height - 8));
+    setAt((a) => (a.left === left && a.top === top ? a : { left, top }));
+  }, [x, y, text, said]);
+
+  // A part the library has already keeps its name, also once a module has it (see ComponentsDialog).
+  const taken = useMemo(() => {
+    const had = new Set((doc.components ?? []).filter(isPart).map((d) => d.name));
+    return (name: string) => (had.has(name) ? undefined : nameTaken(name));
+  }, [doc.components, nameTaken]);
+
+  /** What the text says: the symbol's settings, or the library with the component changed; or what is wrong. */
+  const result = useMemo((): { params?: SymParams; defs?: ComponentDef[]; error?: string } => {
+    if (subject.kind === 'node') return parseSymbolJson(text, subject.sym);
+    return editComponent(doc.components ?? [], subject.def.name, text, taken);
+  }, [subject, text, doc.components, taken]);
+  const error = result.error;
+
+  const apply = () => {
+    if (error !== undefined) return;
+    if (text !== subject.text) {
+      if (subject.kind === 'node' && result.params) setNodeParams(subject.id, result.params);
+      else if (result.defs) setComponents(result.defs);
+    }
+    onClose();
+  };
+
+  /** Add the settings typed to the library as a component of its own (the symbol stays as it is until Apply). */
+  const saveAsComponent = () => {
+    if (subject.kind !== 'node' || !result.params) return;
+    if ((doc.components?.length ?? 0) >= MAX_COMPONENTS) {
+      setSaid(`The library holds at most ${MAX_COMPONENTS} components.`);
+      return;
+    }
+    const p = result.params;
+    const name = freeComponentName(doc.components, `${subject.sym}${p.inputs ?? p.parts ?? (p.width && p.width > 1 ? p.width : '')}`, nameTaken);
+    setComponents([...(doc.components ?? []), { name, base: subject.sym, params: p }]);
+    setSaid(`Added ${name} to Components.`);
+  };
+
+  const symTitle = (sym: SymKey) => SYMBOL_BY_KEY[sym]?.title ?? sym;
+  let title: string;
+  let hint: string;
+  let note: string | undefined;
+  if (subject.kind === 'node') {
+    title = symTitle(subject.sym);
+    hint = `Sets ${settingsHint(subject.sym)}.`;
+  } else {
+    const d = subject.def;
+    title = `${d.title ?? d.name} (component)`;
+    hint = isPart(d)
+      ? 'Pins: "inputs", "outputs", "inouts" as names such as "a[7:0]", or a number of pins; "width" is their bits.'
+      : `Sets ${settingsHint(d.base!)}; "base" is the symbol.`;
+    const blocks = isPart(d) ? sheetsUsing(doc, d.name) : [];
+    const kept = result.defs?.find((c) => c.name === d.name);
+    if (blocks.length && result.defs && !(kept && isPart(kept))) {
+      note = `Blocks of ${d.name} on ${blocks.join(', ')} lose their pins and wires (Undo brings them back).`;
+    } else if (blocks.length) {
+      note = `Changes every block of ${d.name}.`;
+    } else if (!isPart(d)) {
+      note = 'Symbols placed already keep their settings.';
+    }
+  }
+
+  return (
+    <div
+      className="modal-backdrop popup-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={box}
+        className="modal popup"
+        style={at}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${title}: JSON`}
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            apply();
+          }
+        }}
+      >
+        <div className="modal-head">
+          <b>{title}</b>
+          <button className="icon" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </div>
+        <textarea
+          className={`code-input popup-json ${error !== undefined ? 'invalid' : ''}`}
+          value={text}
+          rows={Math.min(8, Math.max(2, Math.ceil(text.length / 44)))}
+          spellCheck={false}
+          autoFocus
+          aria-label="JSON"
+          onChange={(e) => {
+            setText(e.target.value);
+            setSaid(undefined);
+          }}
+        />
+        {error !== undefined ? <div className="field-error small">{error}</div> : <p className="small muted">{hint}</p>}
+        {note && <p className="small">{note}</p>}
+        {said && <p className="small">{said}</p>}
+        <div className="row">
+          <button className="primary" onClick={apply} disabled={error !== undefined}>
+            Apply
+          </button>
+          <button onClick={onClose}>Cancel</button>
+          {subject.kind === 'node' && (
+            <button className="link small" onClick={saveAsComponent} disabled={error !== undefined} title="Add these settings to the library (Components)">
+              Save as a component
+            </button>
+          )}
+          <span className="small muted popup-keys">{MOD}+Enter applies</span>
+        </div>
+      </div>
+    </div>
+  );
+}

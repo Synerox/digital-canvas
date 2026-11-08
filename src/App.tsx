@@ -5,6 +5,7 @@ import { Hints, ImportDialog, MOD, VerilogExportDialog } from './app/Dialogs';
 import { Inspector } from './app/Inspector';
 import { Menu, type MenuItem } from './app/Menu';
 import { Palette } from './app/Palette';
+import { SettingsPopup } from './app/SettingsPopup';
 import { Breadcrumb, CodePanel, Drawings, FileList, HierarchyTree, LogPanel, RulePanel, TopSelector, ViewToggle } from './app/Panels';
 import { AUTOSAVE_KEY, EXAMPLES, type ExampleName, type ImportPlan, planDrop, planOpen, useStore } from './app/store';
 import { ui } from './app/ui-events';
@@ -422,8 +423,8 @@ export default function App() {
           </section>
           <section className="help small muted">
             <p>
-              Draw with the symbol library, or import Verilog and edit what it draws. Drag from a pin to wire it. Double-click a block to open it.
-              Click a symbol to find its Verilog line.
+              Draw with the symbol library, or import Verilog and edit what it draws. Drag from a pin to wire it. Double-click a block to open it,
+              or a symbol to edit its settings as JSON. Click a symbol to find its Verilog line.
             </p>
             <p>Everything runs in your browser. Your Verilog is never uploaded; your work is kept in this browser and in files you save.</p>
           </section>
@@ -513,10 +514,15 @@ export default function App() {
 
         <aside className="code-pane">
           <Inspector onExportVerilog={() => setShowVerilog(true)} />
-          <h3>
-            Source <span className="muted small">{codeFile}</span>
-          </h3>
-          <CodePanel />
+          {/* A drawing has no Verilog of its own: the files open are about other sheets. */}
+          {!drawn && (
+            <>
+              <h3>
+                Source <span className="muted small">{codeFile}</span>
+              </h3>
+              <CodePanel />
+            </>
+          )}
         </aside>
       </div>
 
@@ -526,6 +532,7 @@ export default function App() {
       )}
       {showImport && <ImportDialog initial={showImport === true ? undefined : showImport} onClose={() => setShowImport(false)} />}
       {showVerilog && <VerilogExportDialog onClose={() => setShowVerilog(false)} />}
+      <SettingsPopup />
     </div>
   );
 }

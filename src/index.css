@@ -123,8 +123,12 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .palette h4.palette-head { display: flex; justify-content: space-between; align-items: baseline; }
 .palette h4.palette-head button { text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 11px; }
 .components-dialog code { font-size: 11px; background: var(--bg, #f3f3f3); padding: 0 3px; border-radius: 3px; }
-.prop textarea.json-input { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 11px; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; resize: vertical; }
-.prop textarea.json-input.invalid { border-color: #c92a2a; }
+/* The small window that edits a component as JSON (SettingsPopup): next to where it was asked for. */
+.modal-backdrop.popup-backdrop { background: rgba(0,0,0,.08); display: block; }
+.modal.popup { position: fixed; width: min(400px, calc(100vw - 16px)); max-height: calc(100vh - 16px); padding: 10px 12px; gap: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.18); border: 1px solid var(--line); }
+.modal.popup textarea.popup-json { min-height: 0; font-size: 12px; padding: 6px 8px; }
+.modal.popup textarea.popup-json.invalid { border-color: #c92a2a; }
+.popup-keys { margin-left: auto; }
 .palette-search { width: 100%; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; }
 .palette-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .palette-item { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px; font-size: 11px; line-height: 1.15; min-width: 0; }
@@ -134,6 +138,8 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .palette-tip { margin: 8px 2px; }
 
 .code-pane .inspector { padding: 10px; border-bottom: 1px solid var(--line); max-height: 55%; overflow: auto; flex: none; }
+/* With no Source below it (a drawing), Properties has the pane. */
+.code-pane .inspector:last-child { max-height: none; flex: 1; border-bottom: none; }
 .inspector h3 { padding: 0; margin-bottom: 8px; }
 .prop { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
 .prop input, .prop select { width: 100%; margin: 0; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; color: var(--ink); }
@@ -143,7 +149,9 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 button.danger { color: #c92a2a; }
 button.link { border: none; background: none; color: var(--accent); padding: 0; text-align: left; }
 .issues { margin: 6px 0; padding-left: 16px; color: #8a1f1f; }
-.ports { display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; margin: 8px 0; }
+.ports { margin: 8px 0; }
+.ports summary { cursor: pointer; color: var(--muted); }
+.ports dl { display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; margin: 4px 0 0; }
 .ports div { display: contents; }
 .ports dt { font-family: ui-monospace, Menlo, monospace; }
 .ports dd { margin: 0; color: var(--muted); }
