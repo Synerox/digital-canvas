@@ -4,7 +4,7 @@
  */
 import type { JSX } from 'react';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT, approxMeasure, isMuxType } from '../layout/elk-layout';
+import { FONT, approxMeasure, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, muxInset } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -221,7 +221,7 @@ function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; 
 /** Short stub lines from a port to the outline of a non-rectangular symbol. */
 function stubs(n: LNode, edgeX: (y: number) => number, theme: Theme): JSX.Element[] {
   return n.ports
-    .filter((p) => p.side === 'WEST')
+    .filter((p) => p.side === 'WEST' && n.x + edgeX(p.y - n.y) > p.x)
     .map((p) => (
       <line key={p.id} x1={p.x} y1={p.y} x2={n.x + edgeX(p.y - n.y)} y2={p.y} stroke={theme.wire} strokeWidth={STROKE} />
     ));
@@ -239,10 +239,18 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   );
 
   if (isMuxType(t)) {
-    const inset = Math.min(10, h / 4);
+    // Textbook MUX: a trapezoid narrowing towards its output, the inputs numbered along the long edge,
+    // the select pin under the sloped bottom edge (on the grid), joined to it by a short lead.
+    const inset = muxInset(w, h);
     const west = n.ports.filter((q) => q.side === 'WEST');
+    const bottomAt = (px: number) => y + h - (inset * (px - x)) / w;
     return (
       <g>
+        {n.ports
+          .filter((q) => q.side === 'SOUTH')
+          .map((q) => (
+            <line key={q.id} x1={q.x} y1={bottomAt(q.x)} x2={q.x} y2={q.y} stroke={theme.wire} strokeWidth={STROKE} />
+          ))}
         <polygon
           points={`${x},${y} ${x + w},${y + inset} ${x + w},${y + h - inset} ${x},${y + h}`}
           fill={s.fill}
@@ -252,7 +260,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
         />
         {(t === '$mux' || t === 'dc:mux') &&
           west.map((q, k) => (
-            <text key={q.id} x={x + 4} y={q.y + 3.5} fontSize={10} fill={theme.muted} fontFamily={theme.font}>
+            <text key={q.id} x={x + 5} y={q.y + 3.5} fontSize={10} fill={theme.muted} fontFamily={theme.font}>
               {k}
             </text>
           ))}
@@ -260,23 +268,27 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     );
   }
 
-  if (t === '$add' || t === '$sub' || t === '$mul') {
-    // ALU-style adder: trapezoid with a notch between the two operands.
+  if (isAluType(t)) {
+    // Textbook adder (as in datapath drawings): the ALU outline, a trapezoid with its right edge half as
+    // long as its left one and a notch between the two operands, the operator written in its body.
+    const inset = h / 4;
+    const notch = Math.min(8, h / 8);
+    const depth = w / 4;
     const pts = [
       [0, 0],
-      [w, h * 0.28],
-      [w, h * 0.72],
+      [w, inset],
+      [w, h - inset],
       [0, h],
-      [0, h * 0.6],
-      [w * 0.28, h * 0.5],
-      [0, h * 0.4],
+      [0, h / 2 + notch],
+      [depth, h / 2],
+      [0, h / 2 - notch],
     ]
       .map(([a, b]) => `${x + a},${y + b}`)
       .join(' ');
     return (
       <g>
         <polygon points={pts} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
-        {text(n.label, x + w * 0.62, y + h / 2, 13)}
+        {text(n.label, x + (depth + w) / 2, y + h / 2, 16)}
       </g>
     );
   }
@@ -307,38 +319,53 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     );
   }
 
-  const isAnd = t === '$and' || t === '$logic_and' || t === '$reduce_and' || t === 'dc:and' || t === 'dc:nand';
-  const isOr = t === '$or' || t === '$logic_or' || t === '$reduce_or' || t === '$reduce_bool' || t === 'dc:nor';
-  const isXor = t === '$xor' || t === '$xnor' || t === '$reduce_xor' || t === '$reduce_xnor';
-  if (isAnd) {
-    // NAND: the same body, shortened to make room for the output bubble.
-    const bubble = t === 'dc:nand';
+  const gate = gateShape(t);
+  if (gate) {
+    // The body is at most four inputs tall (gateBodyHeight), centred; with more inputs the back edge runs
+    // on, straight, to the outer ones. A bubble on the output (NAND, NOR, XNOR) shortens the body.
+    const bubble = invertsOutput(t);
     const bw = bubble ? w - 8 : w;
-    const d = `M${x},${y} H${x + bw / 2} A${bw / 2},${h / 2} 0 0 1 ${x + bw / 2},${y + h} H${x} Z`;
-    const inverted = n.attrs?.invertB ? n.ports.find((q) => q.name === 'B') : undefined;
-    return (
-      <g>
-        <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
-        {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
-        {bubble && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />}
-      </g>
-    );
-  }
-  if (isOr || isXor) {
-    const curve = (dx: number) => `M${x + dx},${y} Q${x + dx + w * 0.25},${y + h / 2} ${x + dx},${y + h}`;
-    const inverted = t === '$xnor' || t === '$reduce_xnor' || t === 'dc:nor';
-    const bw = inverted ? w - 8 : w;
-    const body = `M${x},${y} Q${x + bw * 0.6},${y} ${x + bw},${y + h / 2} Q${x + bw * 0.6},${y + h} ${x},${y + h} Q${x + w * 0.25},${y + h / 2} ${x},${y} Z`;
+    const hb = gateBodyHeight(h);
+    const top = y + (h - hb) / 2;
+    const bottom = top + hb;
+    const inputs = n.ports.filter((q) => q.side === 'WEST');
+    const first = Math.min(...inputs.map((q) => q.y));
+    const last = Math.max(...inputs.map((q) => q.y));
+    const back = [
+      first < top && <line key="up" x1={x} y1={first} x2={x} y2={top} stroke={s.stroke} strokeWidth={s.width} />,
+      last > bottom && <line key="down" x1={x} y1={bottom} x2={x} y2={last} stroke={s.stroke} strokeWidth={s.width} />,
+    ];
+    const outBubble = bubble && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />;
+    if (gate === 'and') {
+      // Flat back, then a half ellipse (a half circle when the gate is as wide as it is tall).
+      const rx = Math.min(hb / 2, bw / 2);
+      const d = `M${x},${top} H${x + bw - rx} A${rx},${hb / 2} 0 0 1 ${x + bw - rx},${bottom} H${x} Z`;
+      const inverted = n.attrs?.invertB ? n.ports.find((q) => q.name === 'B') : undefined;
+      return (
+        <g>
+          {back}
+          <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
+          {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
+          {outBubble}
+        </g>
+      );
+    }
+    // OR and XOR: a curved back, and two curves meeting in a point at the output.
+    const depth = Math.min(hb, w) * 0.25;
+    const curve = (dx: number) => `M${x + dx},${top} Q${x + dx + depth},${top + hb / 2} ${x + dx},${bottom}`;
+    const body = `M${x},${top} Q${x + bw * 0.6},${top} ${x + bw},${top + hb / 2} Q${x + bw * 0.6},${bottom} ${x},${bottom} Q${x + depth},${top + hb / 2} ${x},${top} Z`;
+    // Inputs reach the curved back (those beyond the body end on its straight continuation).
     const edgeX = (py: number) => {
-      const tt = py / h;
-      return 2 * (1 - tt) * tt * (w * 0.25);
+      const tt = (py - (top - y)) / hb;
+      return tt <= 0 || tt >= 1 ? 0 : 2 * (1 - tt) * tt * depth;
     };
     return (
       <g>
         {stubs(n, edgeX, theme)}
+        {back}
         <path d={body} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
-        {isXor && <path d={curve(-6)} fill="none" stroke={s.stroke} strokeWidth={s.width} />}
-        {inverted && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />}
+        {gate === 'xor' && <path d={curve(-6)} fill="none" stroke={s.stroke} strokeWidth={s.width} />}
+        {outBubble}
       </g>
     );
   }
@@ -362,10 +389,25 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     // Enable and reset pins sit on the bottom edge like the clock: name them, or a register with an
     // enable and one with a reset look the same. Written above the clock triangle's height.
     const named = n.ports.filter((q) => q.side === 'SOUTH' && REGISTER_PINS.has(q.name));
+    // D, Q (and a load value's AD) are written inside, next to their pins, as textbooks draw a flip-flop;
+    // a latch is told from a register by having no clock triangle.
+    const sidePins = n.ports.filter((q) => q.side === 'WEST' || q.side === 'EAST');
     return (
       <g>
         <rect x={x} y={y} width={w} height={h} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />
-        {text(t.includes('dlatch') ? 'L' : 'D  Q', x + w / 2, y + h / 2 - 3, 10)}
+        {sidePins.map((q) => (
+          <text
+            key={q.id}
+            x={q.side === 'WEST' ? x + 5 : x + w - 5}
+            y={q.y + 3.5}
+            fontSize={10}
+            textAnchor={q.side === 'WEST' ? 'start' : 'end'}
+            fill={theme.ink}
+            fontFamily={theme.font}
+          >
+            {q.name}
+          </text>
+        ))}
         {clk && (
           <polyline
             points={`${clk.x - 5},${y + h} ${clk.x},${y + h - 7} ${clk.x + 5},${y + h}`}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DNode } from '../core/diagram';
 import { buildGeometry } from '../editor/geometry';
-import { type UserNode, symbolNode } from '../editor/symbols';
+import { type SymKey, type SymParams, type UserNode, newUserNode, symbolNode } from '../editor/symbols';
 import { type LEdge, type LNode, type LayoutResult, type Point, approxMeasure } from '../layout/elk-layout';
 import { exportSvg } from './export';
 import { THEMES } from './theme';
@@ -163,5 +163,112 @@ describe('registers', () => {
     expect(draw('dffe')).not.toContain('ARST');
     expect(draw('adff')).toContain('ARST');
     expect(draw('adff')).not.toContain('EN');
+  });
+});
+
+describe('textbook symbols', () => {
+  const iface = () => undefined;
+  /** One symbol drawn on the grid at (100, 100), its pins, and the SVG it draws. */
+  const draw = (sym: SymKey, params: SymParams = {}) => {
+    const u = newUserNode('u:1', sym);
+    const n = symbolNode({ ...u, params: { ...u.params, ...params } }, iface);
+    const { layout: l } = buildGeometry({ netlist: { module: 't', nodes: [n], edges: [] }, pos: { 'u:1': { x: 100, y: 100 } }, routes: {}, measure: approxMeasure });
+    const node = l.nodes[0];
+    const pin = (name: string) => node.ports.find((q) => q.name === name)!;
+    return { node, pin, svg: exportSvg(l, THEMES.report) };
+  };
+  const polygon = (svg: string): Point[] =>
+    /<polygon points="([^"]+)"/
+      .exec(svg)![1]
+      .trim()
+      .split(/\s+/)
+      .map((p) => {
+        const [x, y] = p.split(',').map(Number);
+        return { x, y };
+      });
+  const lines = (svg: string) => [...svg.matchAll(/<line x1="([^"]+)" y1="([^"]+)" x2="([^"]+)" y2="([^"]+)"/g)].map((m) => m.slice(1, 5).map(Number));
+
+  it('draws an adder as an ALU, its operands coming in above and below the notch', () => {
+    const { node, pin, svg } = draw('add');
+    expect([node.width, node.height]).toEqual([40, 60]);
+    const [a, b, y] = [pin('A'), pin('B'), pin('Y')];
+    expect([a.x, a.y, b.x, b.y, y.x, y.y]).toEqual([100, 110, 100, 150, 140, 130]);
+    // Left edge (0,0)-(0,h): broken by the notch; right edge a quarter of the height in from top and bottom.
+    const pts = polygon(svg);
+    expect(pts).toHaveLength(7);
+    const notch = pts.filter((p) => p.x === 100 && p.y > 100 && p.y < 160).map((p) => p.y);
+    expect(notch).toHaveLength(2);
+    // Each operand meets the straight part of the left edge, clear of the notch.
+    expect(a.y).toBeLessThan(Math.min(...notch) - 5);
+    expect(b.y).toBeGreaterThan(Math.max(...notch) + 5);
+    expect(pts).toContainEqual({ x: 140, y: 115 });
+    expect(pts).toContainEqual({ x: 140, y: 145 });
+    expect(texts(svg).map((t) => t.text)).toEqual(['+']);
+  });
+
+  it('draws a MUX narrowing towards its output, with the select pin on the grid joined to its sloped edge', () => {
+    for (const inputs of [2, 4, 8]) {
+      const { node, pin, svg } = draw('mux', { inputs });
+      expect(node.width, `${inputs}`).toBe(40);
+      const s = pin('S');
+      expect([s.x % 10, s.y % 10, s.y], `${inputs}`).toEqual([0, 0, node.y + node.height]);
+      const [tl, tr, br, bl] = polygon(svg);
+      expect([tl, bl]).toEqual([
+        { x: 100, y: 100 },
+        { x: 100, y: 100 + node.height },
+      ]);
+      // The output edge is clearly shorter (a 2:1 MUX's is half as long), but never under half a MUX of many inputs.
+      const drop = tr.y - tl.y;
+      expect(drop, `${inputs}`).toBe(inputs === 2 ? 15 : 20);
+      expect(br.y - tr.y).toBe(node.height - 2 * drop);
+      // The select lead runs from the sloped bottom edge straight down to the pin.
+      const slope = bl.y - ((bl.y - br.y) * (s.x - bl.x)) / (br.x - bl.x);
+      expect(lines(svg)).toContainEqual([s.x, slope, s.x, s.y]);
+      expect(texts(svg).map((t) => t.text)).toEqual(Array.from({ length: inputs }, (_, k) => String(k)));
+    }
+  });
+
+  it('keeps a gate with many inputs in shape, its back edge running on to the outer inputs', () => {
+    const sizes = (inputs: number) => {
+      const { node } = draw('and', { inputs });
+      return [node.width, node.height];
+    };
+    expect([2, 3, 4, 5, 8, 32].map(sizes)).toEqual([
+      [40, 40],
+      [50, 60],
+      [60, 80],
+      [60, 100],
+      [60, 160],
+      [60, 640],
+    ]);
+    for (const sym of ['and', 'or', 'xor', 'nand', 'nor', 'xnor'] as const) {
+      for (const inputs of [2, 4, 5, 6, 8]) {
+        const { node, svg } = draw(sym, { inputs });
+        const ins = node.ports.filter((q) => q.side === 'WEST').map((q) => q.y);
+        const back = lines(svg).filter(([x1, y1, x2, y2]) => x1 === node.x && x2 === node.x && y1 !== y2);
+        // Above and below a body four inputs tall (five for an odd count), the outer inputs end on a straight back edge.
+        const body = inputs <= 4 ? node.height : inputs % 2 ? 100 : 80;
+        const top = node.y + (node.height - body) / 2;
+        expect(back.length, `${sym} ${inputs}`).toBe(body < node.height ? 2 : 0);
+        if (back.length) {
+          expect(back[0][1]).toBe(Math.min(...ins));
+          expect(back[1][3]).toBe(Math.max(...ins));
+        }
+        // No input lands on a corner of a body shorter than the gate.
+        if (body < node.height) for (const y of ins) expect(y === top || y === top + body, `${sym} ${inputs}: input at ${y}`).toBe(false);
+      }
+    }
+  });
+
+  it('writes D and Q next to their pins in a register', () => {
+    const { pin, svg } = draw('dff');
+    const list = texts(svg);
+    const d = list.find((t) => t.text === 'D')!;
+    const q = list.find((t) => t.text === 'Q')!;
+    expect(d.x).toBeGreaterThan(pin('D').x);
+    expect(d.x).toBeLessThan(pin('D').x + 10);
+    expect(q.x + q.width).toBeLessThan(pin('Q').x);
+    expect(q.x + q.width).toBeGreaterThan(pin('Q').x - 10);
+    for (const t of [d, q]) expect(Math.abs(t.y + t.height / 2 - pin('D').y)).toBeLessThan(3);
   });
 });

@@ -71,7 +71,7 @@ export interface RouteOptions {
 
 /** Minimum straight piece of wire at a port. */
 const STUB = 10;
-/** A stub also ends at least this far beyond its own symbol's edge (ports may sit inside the box, e.g. on a sloped MUX edge). */
+/** A stub also ends at least this far beyond its own symbol's edge (should a port sit inside the box). */
 const STUB_CLEAR = 6;
 /** Wires keep at least this far from symbols. */
 const INFLATE = 4;
@@ -715,7 +715,7 @@ const inKeepOut = (pt: Point, obstacles: Rect[], own: Rect) =>
 
 /**
  * The stub's end for a search: on the grid, unless that is in another symbol's keep-out (a symbol right
- * under a MUX's select pin) and the shortest stub ends clear of it. A wire to a grid point in there has to
+ * under a pin on the bottom edge) and the shortest stub ends clear of it. A wire to a grid point in there has to
  * cross into the symbol and runs along its outline, dipping down and back up into the pin.
  */
 function searchStubEnd(end: RouteEnd, obstacles: Rect[], grid: number): Point {
