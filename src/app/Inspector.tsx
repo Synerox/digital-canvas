@@ -8,6 +8,7 @@ import type { Diagram } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
 import { checkSheet, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
+import { PRESET_BASES, freeComponentName, parseSymbolJson, partNamed, symbolJson } from '../editor/components';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
 import { moduleTitle, sameFile, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
@@ -82,6 +83,53 @@ function Field({
             setText(value);
             setErr(undefined);
             (e.target as HTMLInputElement).blur();
+          }
+        }}
+      />
+      {err && <div className="field-error small">{err}</div>}
+    </>
+  );
+}
+
+/**
+ * A symbol's settings as JSON (`{ "sym": "and", "inputs": 5, "width": 1 }`): applied on Ctrl+Enter or
+ * when the field loses focus, reset on Escape. Text that is not right stays, to be corrected, and says why.
+ * Keyed by its value where it is used, so that it starts over when the settings change.
+ */
+function JsonField({ value, onCommit }: { value: string; onCommit(v: string): string | void }) {
+  const [text, setText] = useState(value);
+  const [err, setErr] = useState<string>();
+  const cancelled = useRef(false);
+  const commit = () => {
+    if (cancelled.current) {
+      cancelled.current = false;
+      return;
+    }
+    if (text === value) return;
+    setErr(onCommit(text) || undefined);
+  };
+  return (
+    <>
+      <textarea
+        className={`json-input ${err ? 'invalid' : ''}`}
+        value={text}
+        rows={Math.min(6, Math.max(2, Math.ceil(text.length / 30)))}
+        spellCheck={false}
+        aria-label="Settings as JSON"
+        onChange={(e) => {
+          setText(e.target.value);
+          setErr(undefined);
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            (e.target as HTMLTextAreaElement).blur();
+          } else if (e.key === 'Escape') {
+            cancelled.current = true;
+            setText(value);
+            setErr(undefined);
+            (e.target as HTMLTextAreaElement).blur();
           }
         }}
       />
@@ -297,6 +345,9 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
         : node.label;
     const renamed = !user && edits?.labels[id] !== undefined;
     const lines = srcLines(node.src, s.files);
+    // A block of a part has nothing to open, unless a drawing or Verilog module of that name defines it now.
+    const isPartBlock =
+      !!node.moduleName && !!partNamed(s.doc.components, node.moduleName) && !s.doc.drawn.includes(node.moduleName) && !s.viewDesign()?.modules[node.moduleName];
     return (
       <div className="inspector">
         <h3>{title}</h3>
@@ -359,11 +410,40 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
               </label>
             );
           })}
-        {node.kind === 'instance' && node.moduleName && (
+        {user && PRESET_BASES.includes(user.sym) && (
+          <label className="prop">
+            <span title="The same settings as JSON: for example, change inputs to 5 for five input pins">JSON</span>
+            <JsonField
+              key={`${id} ${symbolJson(user.sym, user.params)}`}
+              value={symbolJson(user.sym, user.params)}
+              onCommit={(v) => {
+                const r = parseSymbolJson(v, user.sym);
+                if (r.error !== undefined) return r.error;
+                s.setNodeParams(id, r.params);
+              }}
+            />
+            <button
+              className="link small"
+              title="Add a component with these settings to the library (Components)"
+              onClick={() => {
+                const params = parseSymbolJson(symbolJson(user.sym, user.params), user.sym).params ?? {};
+                const stem = `${user.sym}${params.inputs ?? params.parts ?? (params.width && params.width > 1 ? params.width : '')}`;
+                const name = freeComponentName(s.doc.components, stem, s.componentNameTaken);
+                s.setComponents([...(s.doc.components ?? []), { name, base: user.sym, params }]);
+                s.setNotice(`Added ${name} to the components of the library (Components › Edit… changes it).`);
+              }}
+            >
+              Save as a component
+            </button>
+          </label>
+        )}
+        {node.kind === 'instance' && node.moduleName && (isPartBlock ? (
+          <p className="small muted">A part of the library (Components): its pins are set there. It is exported as an empty module.</p>
+        ) : (
           <div className="prop-actions">
             <button onClick={() => s.openNode(id)}>Open {node.label}</button>
           </div>
-        )}
+        ))}
         <dl className="ports small">
           {node.ports.map((p) => (
             <div key={p.id}>

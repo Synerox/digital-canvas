@@ -1,14 +1,19 @@
 /**
  * The symbol library: click a symbol, then click the canvas to place it
- * (Shift-click places more), or drag it onto the canvas.
+ * (Shift-click places more), or drag it onto the canvas. The components
+ * defined in JSON (Components…) come first.
  */
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type LayoutResult, approxMeasure, sizeNode } from '../layout/elk-layout';
 import { DiagramGraphic } from '../render/DiagramGraphic';
 import { THEMES } from '../render/theme';
-import { SYMBOLS, type SymKey, type SymParams, type SymbolGroup, newUserNode, symbolNode } from '../editor/symbols';
+import { SYMBOLS, SYMBOL_BY_KEY, type SymKey, type SymParams, type SymbolGroup, newUserNode, symbolNode } from '../editor/symbols';
+import { componentSymbol, isPart } from '../editor/components';
+import { ComponentsDialog } from './ComponentsDialog';
 import { moduleTitle, useStore } from './store';
 import { ui } from './ui-events';
+
+const sameParams = (a: SymParams | undefined, b: SymParams | undefined) => JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
 
 const Icon = memo(function Icon({ sym, params }: { sym: SymKey; params?: SymParams }) {
   const iface = useStore((s) => s.interfaceOf);
@@ -51,7 +56,9 @@ export function Palette() {
   // Re-list modules when drawings or the design change.
   useStore((s) => s.doc.drawn);
   useStore((s) => s.design);
+  const components = useStore((s) => s.doc.components);
   const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState(false);
   const search = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -66,7 +73,8 @@ export function Palette() {
   const modules = blockModules();
 
   const item = (key: string, sym: SymKey, title: string, hint: string, params?: SymParams) => {
-    const active = placing?.sym === sym && (sym !== 'block' || placing.params?.module === params?.module);
+    // A preset is the same symbol as the library's with other parameters: only one of them is on.
+    const active = placing?.sym === sym && sameParams(placing.params, params);
     return (
       <button
         key={key}
@@ -101,6 +109,28 @@ export function Palette() {
           }
         }}
       />
+      {(() => {
+        const list = (components ?? [])
+          .filter((c) => match(c.name) || match(c.title ?? '') || (!isPart(c) && match(c.base!)))
+          .map((c) => {
+            const { sym, params } = componentSymbol(c);
+            const hint = isPart(c)
+              ? `${c.title ?? c.name}: a part with ${c.pins.length} pin${c.pins.length === 1 ? '' : 's'} (${c.pins.map((p) => p.name).join(', ')})`
+              : `${c.title ?? c.name}: ${SYMBOL_BY_KEY[sym]?.title ?? sym} with ${Object.entries(params).map(([k, v]) => `${k} ${v}`).join(', ') || 'its defaults'}`;
+            return item(`component:${c.name}`, sym, c.title ?? c.name, hint, params);
+          });
+        return (
+          <section>
+            <h4 className="palette-head">
+              Components
+              <button className="link small" onClick={() => setEditing(true)} title="Define components of your own (inputs, pins, widths) in JSON">
+                {components?.length ? 'Edit…' : 'Add…'}
+              </button>
+            </h4>
+            {list.length > 0 && <div className="palette-grid">{list}</div>}
+          </section>
+        );
+      })()}
       {GROUPS.map((g) => {
         const list =
           g === 'Hierarchy'
@@ -118,6 +148,7 @@ export function Palette() {
           </section>
         );
       })}
+      {editing && <ComponentsDialog onClose={() => setEditing(false)} />}
       {placing && (
         <p className="small muted palette-tip">
           Click the canvas to place. Shift-click places more. Esc stops.

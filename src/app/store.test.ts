@@ -20,7 +20,8 @@ vi.mock('../yosys/client', async () => {
 
 import { DEFAULT_RULES, RULES } from '../core/rules';
 import type { EditDoc, SavedFile, SheetEdits } from '../editor/doc';
-import { emptyEdits } from '../editor/doc';
+import { emptyEdits, parseSavedFile } from '../editor/doc';
+import { componentSymbol, parseComponents } from '../editor/components';
 import { polylineHitsRect } from '../editor/router';
 import { effectiveDiagram } from '../editor/sheet';
 import { type InterfaceOf, type UserNode, newUserNode, symbolNode } from '../editor/symbols';
@@ -31,7 +32,6 @@ import {
   changeFiles,
   copyKeys,
   drawingPorts,
-  drawnRoute,
   followPinRenames,
   importedTop,
   measureFor,
@@ -46,6 +46,7 @@ import {
   viewModeOf,
   withoutModuleDefinitions,
   withoutVerilogEdits,
+  wireUpTo,
 } from './store';
 import { exportCurrent } from './Dialogs';
 import { elaborate } from '../yosys/client';
@@ -399,23 +400,16 @@ module other(input a, output y); assign y = a; endmodule`,
     expect(importedTop({ 'p.v': 'module m(input a, output y); /* sub u (.a(a)); */ assign y = a; endmodule\nmodule sub(input a); endmodule' }, ['sub', 'm'])).toBe('m');
   });
 
-  it('draws a wire through bends leaving and entering pins straight (C18)', () => {
-    // From an EAST output at (280,260) through a bend above-left of it, into a WEST input at (540,260).
-    const r = drawnRoute([{ x: 280, y: 260 }, { x: 240, y: 140 }, { x: 540, y: 260 }], 'EAST', 'WEST');
-    expect(r).toEqual([
-      { x: 280, y: 260 },
-      { x: 290, y: 260 },
-      { x: 290, y: 140 },
-      { x: 530, y: 140 },
-      { x: 530, y: 260 },
-      { x: 540, y: 260 },
-    ]);
-    // Never left of the output pin (back through its symbol).
-    expect(r.every((p) => p.x >= 280)).toBe(true);
-    // Without pins it is orthogonalize: horizontal first.
-    expect(drawnRoute([{ x: 0, y: 0 }, { x: 50, y: 30 }])).toEqual([{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 30 }]);
-    // A SOUTH pin (a mux select) leaves downwards, then turns.
-    expect(drawnRoute([{ x: 100, y: 100 }, { x: 60, y: 200 }], 'SOUTH')).toEqual([{ x: 100, y: 100 }, { x: 100, y: 110 }, { x: 60, y: 110 }, { x: 60, y: 200 }]);
+  it('finds the stretch of a wire up to a point on it', () => {
+    const w = [
+      { x: 0, y: 0 },
+      { x: 50, y: 0 },
+      { x: 50, y: 80 },
+      { x: 120, y: 80 },
+    ];
+    expect(wireUpTo(w, { x: 30, y: 0 })).toEqual([{ x: 0, y: 0 }]);
+    expect(wireUpTo(w, { x: 50, y: 40 })).toEqual([{ x: 0, y: 0 }, { x: 50, y: 0 }]);
+    expect(wireUpTo(w, { x: 90, y: 80 })).toEqual([{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 80 }]);
   });
 });
 
@@ -515,7 +509,8 @@ describe('store', () => {
     st().moveSelection(new Set([input('bonus').id]), 0, 50);
     st().paste();
     expect(st().doc.sheets['v:flat:auction_top']).toBeUndefined();
-    expect(st().past.length).toBe(0);
+    // Only the switch itself is a step (Undo goes back to the block diagram).
+    expect(st().past.map((h) => !!h.nav)).toEqual([true]);
     await going;
     await settle();
     expect(st().doc.sheets['v:flat:auction_top']).toBeUndefined();
@@ -530,11 +525,16 @@ describe('store', () => {
     st().moveSelection(new Set([input('clk').id]), 0, 120);
     await st().setViewMode('flat');
     await settle();
+    // The first Undo goes back to the block diagram, the next one takes the move back.
     st().undo();
     await settle();
     expect(st().viewMode).toBe('blocks');
     expect(st().sheet).toBe('v:blocks:auction_top');
+    expect(input('clk').y).toBe(y0 + 120);
+    st().undo();
+    await settle();
     expect(input('clk').y).toBe(y0);
+    // Switching views keeps the redo history; Redo shows the view the move was made in.
     await st().setViewMode('flat');
     await settle();
     st().redo();
@@ -1468,6 +1468,109 @@ endmodule
     await settle();
     expect(st().path.at(-1)).toEqual({ instance: 'u_check_a', module: 'bid_check' });
     expect(st().sheet).toBe('v:blocks:bid_check');
+  }, 60_000);
+
+  it('goes back to the module before with Undo after opening a block, and in again with Redo', async () => {
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE });
+    await settle();
+    const top = st().path;
+    expect(top).toEqual([{ instance: 'auction_top', module: 'auction_top' }]);
+    st().openNode(nodeOf((n) => n.instanceName === 'u_check_a').id);
+    await settle();
+    const inside = st().path;
+    expect(inside.at(-1)).toEqual({ instance: 'u_check_a', module: 'bid_check' });
+    // An edit inside: the first Undo takes it back and stays there, the next one goes up.
+    const cell = nodeOf((n) => n.kind === 'cell').id;
+    st().moveSelection(new Set([cell]), 0, 40);
+    const moved = st().doc;
+    st().undo();
+    await settle();
+    expect(st().path).toEqual(inside);
+    expect(st().doc).not.toBe(moved);
+    st().undo();
+    await settle();
+    expect(st().path).toEqual(top);
+    expect(st().sheet).toBe('v:blocks:auction_top');
+    // Redo goes in again, then redoes the edit there.
+    st().redo();
+    await settle();
+    expect(st().path).toEqual(inside);
+    st().redo();
+    await settle();
+    expect(st().doc).toBe(moved);
+    // The breadcrumb, the hierarchy and the Block diagram / Full circuit switch are steps too.
+    await st().navigate(top);
+    await settle();
+    await st().navigate(top);
+    expect(st().past.filter((h) => h.nav).length).toBe(2);
+    await st().setViewMode('flat');
+    await settle();
+    st().undo();
+    await settle();
+    expect(st().viewMode).toBe('blocks');
+    expect(st().path).toEqual(top);
+    st().undo();
+    await settle();
+    expect(st().path).toEqual(inside);
+    // A step that only navigated does not make the work unsaved.
+    useStore.setState({ dirty: false });
+    st().redo();
+    await settle();
+    expect(st().path).toEqual(top);
+    expect(st().dirty).toBe(false);
+  }, 60_000);
+
+  it('passes over a sheet that is gone when Undo goes back', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('a');
+    await settle();
+    st().newDrawing('b');
+    await settle();
+    await st().navigate([{ instance: 'a', module: 'a', drawn: true }]);
+    await settle();
+    await st().navigate([{ instance: 'b', module: 'b', drawn: true }]);
+    await settle();
+    // Drawing a is gone (as if deleted outside the history): Undo passes over the way back to it, and
+    // over the way to b, where the user is, and takes back the step before them: the new drawing b.
+    useStore.setState({ doc: { ...st().doc, drawn: ['b'] } });
+    st().undo();
+    await settle();
+    expect(st().past.some((h) => h.nav)).toBe(false);
+    expect(st().doc.drawn).toEqual(['a']);
+    expect(st().path).toEqual([{ instance: 'a', module: 'a', drawn: true }]);
+  }, 60_000);
+
+  it('places components defined in JSON: a gate with more inputs, and a part exported as a black box', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('top');
+    await settle();
+    const r = parseComponents('[{ "name": "and5", "base": "and", "inputs": 5 }, { "name": "alu", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["y[7:0]"] }]');
+    st().setComponents(r.defs!);
+    expect(st().doc.components?.map((c) => c.name)).toEqual(['and5', 'alu']);
+    for (const c of r.defs!) {
+      st().startPlacing(componentSymbol(c));
+      st().placeAt({ x: c.name === 'alu' ? 300 : 0, y: 0 });
+    }
+    await settle();
+    const gate = st().netlist!.nodes.find((n) => n.cellType === '$and')!;
+    expect(gate.ports.filter((p) => p.dir === 'in').length).toBe(5);
+    const block = st().netlist!.nodes.find((n) => n.moduleName === 'alu')!;
+    expect(block.ports.map((p) => `${p.name}:${p.width}`)).toEqual(['a:8', 'b:8', 'y:8']);
+    // A drawing cannot take a part's name.
+    expect(st().renameDrawing('top', 'alu')).toMatch(/component/);
+    expect(st().componentNameTaken('top')).toMatch(/drawing/);
+    // The export declares the part as an empty module, and Yosys reads it.
+    const out = exportCurrent();
+    expect(out.code).toContain('(* blackbox *)\nmodule alu (');
+    expect(out.code).toMatch(/alu u\d+ \(/);
+    await expect(elaborate(out.check.files, out.check.top)).resolves.toBeDefined();
+    // Saved with the work, and one undo step.
+    const saved = parseSavedFile(JSON.stringify(st().savedFile()));
+    expect(saved.doc.components).toEqual(st().doc.components);
+    st().setComponents([]);
+    expect(st().doc.components).toBeUndefined();
+    st().undo();
+    expect(st().doc.components?.length).toBe(2);
   }, 60_000);
 
   it('never gives a drawing a Verilog keyword as its name (C31)', async () => {

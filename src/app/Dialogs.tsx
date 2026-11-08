@@ -5,6 +5,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { type DNode, type Diagram, buildDiagram } from '../core/diagram';
 import { diagramToVerilog, verilogIdent } from '../editor/verilog-export';
+import { isPart, partNamed, partVerilog } from '../editor/components';
 import { type EditDoc, type SheetEdits, emptyDoc, emptyEdits, sheetKey } from '../editor/doc';
 import { effectiveDiagram } from '../editor/sheet';
 import { downloadBlob } from '../render/export';
@@ -333,7 +334,7 @@ export function exportCurrent(): VerilogOut {
   /** Module names that only this app gave: automatic blocks and Yosys's `$paramod…` modules. */
   const madeUpNames = new Map<string, string>();
   /** Names of modules that exist under that name anyway: the user's Verilog modules and the drawings. */
-  const taken = new Set([...declared, ...s.doc.drawn.map(verilogIdent)]);
+  const taken = new Set([...declared, ...s.doc.drawn.map(verilogIdent), ...(s.doc.components ?? []).filter(isPart).map((c) => c.name)]);
   /** Warnings about the sub-modules, listed after the sheet's own. */
   const later: string[] = [];
   /**
@@ -439,6 +440,12 @@ export function exportCurrent(): VerilogOut {
         // declares it under this name, so it is defined here as Yosys elaborated it, like an automatic block.
         const note = `// ${blocks.modules[sub].displayName} as Yosys elaborated it with the parameters of ${sub.replace(/\s+/g, ' ')}`;
         add(sub, verilogBlock(sub), madeUpName(sub), note);
+      } else if (partNamed(s.doc.components, sub)) {
+        // A part of the library has pins and no logic: declared as a black box, so that the code elaborates.
+        done.add(sub);
+        defined.add(sub);
+        parts.push(partVerilog(partNamed(s.doc.components, sub)!));
+        later.push(`${sub} is a component of the library with pins only: it is written as an empty module (a black box) for you to fill in`);
       } else {
         done.add(sub);
         warnings.push(`Module ${moduleTitle(sub)} (instance ${n.instanceName ?? n.subLabel ?? n.label}) is not defined by a drawing or your Verilog files`);
@@ -671,22 +678,23 @@ const HINTS: [string[], string][] = [
   [['Click', 'library'], 'Pick a symbol, then click the canvas to place it'],
   [['Shift', 'Click'], 'Place another copy (while placing)'],
   [['I'], 'Search the symbol library'],
-  [['Drag', 'pin'], 'Draw a wire to another pin or onto a wire'],
+  [['Drag', 'pin'], 'Draw a wire: it bends where the pointer turns; let go on a pin or a wire'],
   [['Click', 'pin'], 'Start a wire: click to add bends, click a pin or wire to finish'],
+  [['Alt', 'Drag', 'wire'], 'Draw a branch from that wire'],
   [['Backspace'], 'Remove the last bend while drawing a wire'],
   [['Esc'], 'Stop drawing or placing; clear the selection'],
-  [['Drag', 'symbol'], 'Move (snaps to the grid; hold Alt for free moves)'],
-  [['Drag', 'wire'], 'Move that wire segment'],
+  [['Drag', 'symbol'], 'Move (snaps to the grid)'],
+  [['Drag', 'wire'], 'Move that segment (or the bend under the pointer); the pins stay'],
   [['Click'], 'Select; Shift or Ctrl adds to the selection'],
   [['Drag', 'empty'], 'Box select (to the right: inside; to the left: touching)'],
   [['↑ ↓ ← →'], 'Nudge the selection (Shift: 5 grid steps)'],
-  [['Double-click'], 'Open a block; rename a pin, note or wire'],
+  [['Double-click'], 'Open a block (' + MOD + '+Z goes back up); rename a pin, note or wire'],
   [['Enter'], 'Rename the selection'],
   [['Delete'], 'Delete the selection'],
   [[MOD, 'C / X / V'], 'Copy, cut, paste'],
   [[MOD, 'D'], 'Duplicate'],
   [[MOD, 'A'], 'Select all'],
-  [[MOD, 'Z'], 'Undo'],
+  [[MOD, 'Z'], 'Undo; also goes back to the sheet before (out of an opened block)'],
   [[MOD, 'Shift', 'Z'], 'Redo (also ' + MOD + '+Y)'],
   [[MOD, 'S'], 'Save the drawing (.dcanvas.json)'],
   [[MOD, 'O'], 'Open a drawing'],

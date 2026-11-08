@@ -4,6 +4,7 @@
  */
 import type { ElkExtendedEdge, ElkNode, ElkPort } from 'elkjs/lib/elk-api';
 import type { DEdge, DNode, Diagram, Side } from '../core/diagram';
+import { alignToGrid } from './grid-align';
 
 export interface Point {
   x: number;
@@ -412,5 +413,7 @@ export async function layoutDiagram(d: Diagram, measure: MeasureText = approxMea
   });
 
   // An empty module still gets a small canvas, so export never produces a 0x0 image.
-  return { module: d.module, width: Math.max(out.width ?? 0, 48), height: Math.max(out.height ?? 0, 48), nodes, edges: lEdges };
+  const elkResult: LayoutResult = { module: d.module, width: Math.max(out.width ?? 0, 48), height: Math.max(out.height ?? 0, 48), nodes, edges: lEdges };
+  // ELK's coordinates are off the grid: put the symbols and wires on it (see grid-align).
+  return alignToGrid(elkResult, GRID);
 }

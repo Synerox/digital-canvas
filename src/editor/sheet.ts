@@ -487,7 +487,8 @@ export function placeMissing(
       free ??= q;
     }
     p = free ?? { x: p.x, y: p.y + 4000 };
-    p = { x: Math.round(p.x), y: Math.round(p.y) };
+    // On the grid, like every symbol: its pins line up with the others'.
+    p = { x: Math.round(p.x / GRID) * GRID, y: Math.round(p.y / GRID) * GRID };
     out[n.id] = p;
     rects.push({ x: p.x, y: p.y, w: s.width, h: s.height });
   }

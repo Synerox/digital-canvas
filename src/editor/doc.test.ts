@@ -88,3 +88,23 @@ endmodule
     expect(out.some((r) => r.startLine >= 1e9)).toBe(false);
   });
 });
+
+describe('work saved before the grid', () => {
+  it('puts the symbols of an older save on the grid', () => {
+    const e = parseEdits({ pos: { 'cell:a': { x: 103.4, y: 47 }, 'u:1': { x: 255, y: -14.9 } } });
+    expect(e.pos).toEqual({ 'cell:a': { x: 100, y: 50 }, 'u:1': { x: 260, y: -10 } });
+  });
+
+  it('keeps the components of the library, and drops a bad one', () => {
+    const f = parseSavedFile(
+      JSON.stringify({
+        format: 'digital-canvas',
+        version: 1,
+        files: {},
+        doc: { sheets: {}, drawn: [], components: [{ name: 'and5', base: 'and', params: { inputs: 5 } }, { name: 'x', base: 'nope' }] },
+      }),
+    );
+    expect(f.doc.components).toEqual([{ name: 'and5', base: 'and', params: { inputs: 5 } }]);
+    expect(parseSavedFile(JSON.stringify({ format: 'digital-canvas', version: 1, doc: { sheets: {}, drawn: [] } })).doc.components).toBeUndefined();
+  });
+});
