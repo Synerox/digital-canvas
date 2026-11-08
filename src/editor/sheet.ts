@@ -383,10 +383,7 @@ export function layoutToEdits(e: SheetEdits, layout: LayoutResult, keep: 'none' 
     if (routes[x.id] || x.points.length < 2) continue;
     routes[x.id] = { points: x.points, ...(x.labelBox ? { label: x.labelBox } : {}) };
   }
-  const out: SheetEdits = { ...e, pos, routes };
-  // Every symbol is where a layout with today's outlines put it: none needs room for an older one (see fitNewOutlines).
-  if (keep === 'none') delete out.oldOutlines;
-  return out;
+  return { ...e, pos, routes };
 }
 
 /**
@@ -754,13 +751,16 @@ export interface Size {
 export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText): SheetEdits {
   const was = new Map<string, Size>();
   const now = new Map<string, Size>();
+  const unsized = new Set<string>();
   for (const n of d.nodes) {
     if (!e.pos[n.id]) continue;
     const s = sizeNode(n, measure);
     now.set(n.id, { width: s.width, height: s.height });
     was.set(n.id, legacyCellSize(n, measure) ?? now.get(n.id)!);
+    // A block of a module whose Verilog is still loading, or failed, has no pins yet: it is drawn smaller than it is.
+    if (n.attrs?.missingModule) unsized.add(n.id);
   }
-  const out = { ...makeRoom(e, was, now) };
+  const out = { ...makeRoom(e, was, now, unsized) };
   delete out.oldOutlines;
   return out;
 }
@@ -775,9 +775,11 @@ export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText):
  * there, nor close beside it; otherwise downwards, with a row as high as its
  * growth put in at its old bottom the same way, or higher up where something
  * close beside it starts, which then stays beside its pins. Stored routes that
- * run through a grown symbol are dropped, to be routed again.
+ * run through a grown symbol are dropped, to be routed again. Symbols in
+ * `unsized` may be any size right of and below their corner (a block whose
+ * pins are not known yet): nothing grows upwards into where they might reach.
  */
-export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: ReadonlyMap<string, Size>): SheetEdits {
+export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: ReadonlyMap<string, Size>, unsized?: ReadonlySet<string>): SheetEdits {
   const grown = [...now].filter(([id, s]) => e.pos[id] && was.has(id) && (s.width > was.get(id)!.width || s.height > was.get(id)!.height));
   if (grown.length === 0) return e;
   const cols = grown
@@ -800,7 +802,7 @@ export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: Rea
   const side = 2 * GRID;
   const clear = (r: Box, id: string) =>
     Object.keys(pos).every((k) => {
-      const q = rect(k);
+      const q = unsized?.has(k) ? { ...pos[k], width: Infinity, height: Infinity } : rect(k);
       return k === id || r.x >= q.x + q.width + side || q.x >= r.x + r.width + side || r.y >= q.y + q.height + gap || q.y >= r.y + r.height + gap;
     });
   for (const [id, s] of grown.sort(([a], [b]) => pos[a].y - pos[b].y)) {

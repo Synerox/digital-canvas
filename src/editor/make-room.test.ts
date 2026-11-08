@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { type LayoutResult, approxMeasure, type Point, sizeNode } from '../layout/elk-layout';
+import { approxMeasure, type Point, sizeNode } from '../layout/elk-layout';
 import { OUTLINES, type SheetEdits, emptyEdits, parseSavedFile } from './doc';
-import { addNodes, connect, effectiveDiagram, fitNewOutlines, layoutToEdits, makeRoom, resolveConnection } from './sheet';
+import { addNodes, connect, effectiveDiagram, fitNewOutlines, makeRoom, resolveConnection } from './sheet';
 import { type InterfaceOf, type SymKey, type SymParams, newUserNode } from './symbols';
 
 const size = (width: number, height: number) => ({ width, height });
@@ -274,15 +274,24 @@ describe('fitNewOutlines', () => {
     expect(out.oldOutlines).toBeUndefined();
   });
 
-  it('is not needed after Auto layout, which places every symbol with its outline of today', () => {
+  it('grows an adder down, not up into where a block whose pins are not known yet may reach', () => {
     const e = sheet([
-      ['u:1', 'add', 200, 100],
-      ['u:2', 'not', 200, 150],
+      ['u:1', 'block', 200, 0, { module: 'alu8' }],
+      ['u:2', 'add', 200, 140],
     ]);
-    const layout = { nodes: boxes(e).map((b) => ({ ...b, ports: [] })), edges: [], width: 400, height: 300 } as unknown as LayoutResult;
-    expect(layoutToEdits({ ...e, pos: {}, routes: {} }, layout, 'none').oldOutlines).toBeUndefined();
-    // Placing only the symbols that have no position yet keeps the others where they were saved: still marked.
-    expect(layoutToEdits(e, layout, 'existing').oldOutlines).toBe(true);
+    // A block of a module with one pin is drawn as tall as one whose module is not loaded (no pins): over that
+    // block, the band the adder grows up into is free.
+    const one: InterfaceOf = (m) => (m === 'alu8' ? { label: m, ports: [{ name: 'a', dir: 'input', width: 1 }] } : undefined);
+    const known = effectiveDiagram('m', undefined, e, one);
+    const missing = effectiveDiagram('m', undefined, e, none);
+    const block = (d: typeof known) => sizeNode(d.nodes.find((n) => n.id === 'u:1')!, approxMeasure);
+    expect(missing.nodes.find((n) => n.id === 'u:1')!.attrs?.missingModule).toBe(true);
+    expect(block(missing).height).toBe(block(known).height);
+    expect(fitNewOutlines(e, known, approxMeasure).pos['u:2']).toEqual({ x: 200, y: 120 });
+    // Once its Verilog loads, the block may have more pins and reach further down: the adder grows down.
+    const out = fitNewOutlines(e, missing, approxMeasure);
+    expect(out.pos).toEqual(e.pos);
+    expect(out.oldOutlines).toBeUndefined();
   });
 });
 

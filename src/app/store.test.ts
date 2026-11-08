@@ -862,9 +862,9 @@ describe('store', () => {
     expect(box('u:1').y).toBe(100);
   });
 
-  it('makes that room only once the blocks of Verilog modules on the drawing have their pins', async () => {
-    // A block of alu8 right over an adder that grows by 20 px. Without the Verilog the block has no pins and
-    // is drawn much shorter: room measured then would move the adder up, under the block as it really is.
+  it('makes that room clear of a block whose Verilog failed, as tall as the block turns out once it loads', async () => {
+    // A block of alu8 right over an adder that grows by 20 px. Without the Verilog the block has no pins and is
+    // drawn much shorter: the adder must not grow up into where the block reaches once its Verilog is fixed.
     const alu = 'module alu8(input [7:0] a, input [7:0] b, input [2:0] op, input c, output [7:0] y, output z);\n  assign y = a + b;\n  assign z = c;\nendmodule\n';
     const d: SheetEdits = {
       ...drawing([
@@ -881,14 +881,11 @@ describe('store', () => {
     expect(st().path).toEqual(path);
     expect(box('u:1').ports).toEqual([]);
     expect(box('u:1').height).toBeLessThan(140 - 20);
-    // Drawn as it was saved, still marked: nothing has moved.
-    expect(st().doc.sheets['d:old'].oldOutlines).toBe(true);
+    // The adder grew down, and the drawing is stored as it is now.
+    expect([box('u:2').y, box('u:2').height]).toEqual([140, 60]);
+    expect(st().doc.sheets['d:old'].oldOutlines).toBeUndefined();
     expect(st().doc.sheets['d:old'].pos).toEqual(d.pos);
-    // A file saved now keeps the mark on that drawing.
-    const saved = JSON.parse(JSON.stringify(st().savedFile())) as SavedFile;
-    expect(saved.outlines).toBe(OUTLINES);
-    expect(saved.doc.sheets['d:old'].oldOutlines).toBe(true);
-    // With the Verilog fixed the block has its pins, and the adder grows down, clear of it.
+    // With the Verilog fixed the block has its pins and is taller, still clear of the adder.
     await st().setFiles({ 'alu.v': alu }, true);
     await settle();
     expect(st().status).toBe('ready');
@@ -896,7 +893,6 @@ describe('store', () => {
     expect(box('u:1').ports.length).toBe(6);
     expect(box('u:1').y + box('u:1').height).toBeLessThanOrEqual(140);
     expect([box('u:2').y, box('u:2').height]).toEqual([140, 60]);
-    expect(st().doc.sheets['d:old'].oldOutlines).toBeUndefined();
   });
 
   it('pastes onto another sheet where the user looks, and on its own sheet beside the original (F2, N30)', async () => {

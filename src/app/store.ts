@@ -991,18 +991,6 @@ export const useStore = create<State>((set, get) => {
   /** False while a Verilog sheet is being opened: what is on screen still belongs to the previous one. */
   const settled = (s: State) => isDrawnKey(s.sheet) || s.loadedSheet === s.sheet;
 
-  /**
-   * Whether the symbols that grew since an older file was saved can get room now (fitNewOutlines). A block
-   * of a Verilog module has no pins, and is drawn small, while the design is loading or failed to load (see
-   * interfaceOf): room measured against that would be wrong once the design is in, and is made only once.
-   * A block of a module that no file declares any more stays small, so it does not hold the room back.
-   */
-  const canFitOutlines = (netlist: Diagram): boolean => {
-    const { files, design, status } = get();
-    if (!netlist.nodes.some((n) => n.attrs?.missingModule)) return true;
-    return !Object.keys(files).length || (!!design && status !== 'loading' && status !== 'elaborating');
-  };
-
   /** A history entry for the document as it is now. */
   const here = (): HistoryEntry => ({ doc: get().doc, path: get().path, sheet: get().sheet });
 
@@ -1077,10 +1065,9 @@ export const useStore = create<State>((set, get) => {
     let e = opts.fast ?? edits();
     const netlist = effectiveDiagram(currentModule(), drawn ? undefined : s.base, e, interfaceOf);
     const measure = measureFor(s.theme);
-    // Saved with the symbol outlines of before: the symbols that grew since get room, once (stored below),
-    // when every block has its size.
-    const refitted = !!e.oldOutlines && canFitOutlines(netlist);
-    if (refitted) e = fitNewOutlines(e, netlist, measure);
+    // Saved with the symbol outlines of before: the symbols that grew since get room, once (stored below).
+    const refitted = !!e.oldOutlines;
+    if (e.oldOutlines) e = fitNewOutlines(e, netlist, measure);
     let pos = e.pos;
     let routes = e.routes;
     let placed: string[] = [];
@@ -1209,7 +1196,7 @@ export const useStore = create<State>((set, get) => {
     const netlist = effectiveDiagram(module, base, saved, interfaceOf);
     const measure = measureFor(theme);
     // As refresh() draws it: with room for the symbols that grew since an older file was saved.
-    const e = saved.oldOutlines && canFitOutlines(netlist) ? fitNewOutlines(saved, netlist, measure) : saved;
+    const e = saved.oldOutlines ? fitNewOutlines(saved, netlist, measure) : saved;
     let { pos, routes } = e;
     if (!isPinned(e) || netlist.nodes.some((n) => !pos[n.id])) {
       const elk = await elkOf(cacheKey, base);
