@@ -5,7 +5,7 @@
  * corners, click the end), reshape wires (drag any leg or corner), and place
  * symbols chosen in the library.
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Side } from '../core/diagram';
 import { GRID, type LEdge, type LayoutResult, type Point, sizeNode } from '../layout/elk-layout';
 import { DiagramGraphic } from '../render/DiagramGraphic';
@@ -18,6 +18,7 @@ import { measureFor, useStore } from './store';
 import { ui } from './ui-events';
 import { doubleClickSettings, openSettings } from './settings';
 import { ClickRun } from './click-run';
+import { hoveredSymbol, openBusHints } from './pin-hints';
 
 interface View {
   x: number;
@@ -221,7 +222,12 @@ export function EditorCanvas() {
   const [wireDrafts, setWireDrafts] = useState<Point[][]>();
   /** The cursor over a wire: which way the part under the pointer would move. */
   const [edgeCursor, setEdgeCursor] = useState<string>();
-  const [hoverPort, setHoverPort] = useState<string>();
+  /**
+   * The pin and the symbol under the pointer (only that symbol's connection points show, see pin-hints), on the
+   * layout and the view they were found on: once another sheet, a new layout or a scroll moves the drawing under a
+   * pointer that stays still, they are not under it any more (the next move finds what is).
+   */
+  const [hovered, setHovered] = useState<{ port?: string; node?: string; on: LayoutResult; at: View }>();
   const [size, setSize] = useState({ w: 2000, h: 2000 });
   // Shown in the cursor: what a press does now.
   const [gesture, setGesture] = useState<'none' | 'pan' | 'wire'>('none');
@@ -515,7 +521,20 @@ export function EditorCanvas() {
     updateDraft(w);
   };
 
+  // Before the return below: a hook runs on every render.
+  const openBus = useMemo(() => (layout ? openBusHints(layout) : []), [layout]);
+
+  /**
+   * A dragged symbol moves with the pointer: what it pointed at on the layout `was` (before this step of the drag)
+   * is still under it on the new layout. A hover that was out of date already stays so.
+   */
+  const followDrag = (was: LayoutResult | undefined) => {
+    const now = store().layout;
+    if (now && now !== was) setHovered((h) => (h && h.on === was && h.at === view ? { ...h, on: now } : h));
+  };
+
   if (!layout) return null;
+  const pointed = hovered?.on === layout && hovered.at === view ? hovered : undefined;
   const lx = layout.x ?? 0;
   const ly = layout.y ?? 0;
 
@@ -570,7 +589,7 @@ export function EditorCanvas() {
         ev.stopPropagation();
         const w = toWorld(ev.clientX, ev.clientY);
         const s = store();
-        s.startPlacing({ sym: sym as never, ...(s.placing?.sym === sym ? { params: s.placing.params } : {}) });
+        s.startPlacing(s.placing?.sym === sym ? s.placing : { sym: sym as never });
         s.placeAt(w);
       }}
       onPointerDown={(ev) => {
@@ -658,6 +677,7 @@ export function EditorCanvas() {
       }}
       onPointerLeave={() => {
         hover.current = undefined;
+        setHovered(undefined);
       }}
       onPointerMove={(ev) => {
         hover.current = { x: ev.clientX, y: ev.clientY };
@@ -667,7 +687,12 @@ export function EditorCanvas() {
         if (s.placing || m.kind === 'wire') setPointer(w);
         if (m.kind === 'none' || m.kind === 'wire') {
           const hit = hitFrom(m.kind === 'wire' ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target);
-          setHoverPort(hit.port?.port);
+          if (layout) {
+            const port = hit.port?.port;
+            const node = hoveredSymbol(hit);
+            // The same object when nothing changed: a move over the same spot renders nothing.
+            setHovered((h) => (h && h.port === port && h.node === node && h.on === layout && h.at === view ? h : { port, node, on: layout, at: view }));
+          }
           if (m.kind === 'wire') {
             // A drag draws the wire where the pointer goes (see trace); a click-drawn wire waits for clicks.
             if (m.dragging) m.draft = trace(m.draft, { x: snap(w.x), y: snap(w.y) }, Math.max(1.5 * GRID, 12 / view.k));
@@ -689,7 +714,9 @@ export function EditorCanvas() {
             // Always by whole grid steps: symbols stay on the grid, so their pins line up.
             m.dx = snap(w.x - m.start.x);
             m.dy = snap(w.y - m.start.y);
+            const was = s.layout;
             s.previewMove(m.ids, m.dx, m.dy);
+            followDrag(was);
             return;
           }
           case 'press-empty': {
@@ -724,8 +751,11 @@ export function EditorCanvas() {
             return;
           case 'press-node':
             mode.current = { kind: 'none' };
-            if (m.moved) s.moveSelection(m.ids, m.dx, m.dy);
-            else if (!m.additive && s.selection.size > 1) s.select([m.clicked]);
+            if (m.moved) {
+              const was = s.layout;
+              s.moveSelection(m.ids, m.dx, m.dy);
+              followDrag(was);
+            } else if (!m.additive && s.selection.size > 1) s.select([m.clicked]);
             return;
           case 'press-empty': {
             mode.current = { kind: 'none' };
@@ -809,22 +839,36 @@ export function EditorCanvas() {
               pointerEvents="none"
             />
           ))}
+          {/* Bus pins not wired yet: a stub with their bits, so a width shows before the symbol is wired. */}
+          <g pointerEvents="none" data-open-bus-hints="">
+            {openBus.map((h) => (
+              <g key={h.port} data-open-bus={h.port}>
+                <line x1={h.from.x} y1={h.from.y} x2={h.to.x} y2={h.to.y} stroke={theme.muted} strokeWidth={1.4} />
+                <line x1={h.slash.x - 4} y1={h.slash.y + 5} x2={h.slash.x + 4} y2={h.slash.y - 5} stroke={theme.muted} strokeWidth={1.4} />
+                <text x={h.text.x} y={h.text.y} fontSize={10} textAnchor={h.text.anchor} fill={theme.muted} fontFamily={theme.font}>
+                  {h.width}
+                </text>
+              </g>
+            ))}
+          </g>
           <g>
             {layout.nodes.map((n) =>
               n.ports.map((p) => {
-                const open = issues.openPorts?.has(p.id);
-                const hover = hoverPort === p.id;
+                const hover = pointed?.port === p.id;
+                // Only the symbol under the pointer shows its connection points, in green.
+                const shown = hover || pointed?.node === n.id;
                 return (
                   <g key={p.id}>
-                    {(open || hover) && (
+                    {shown && (
                       <circle
                         cx={p.x}
                         cy={p.y}
-                        r={hover ? 4 : 2.5}
-                        fill={hover ? theme.accent : theme.background}
-                        stroke={hover ? theme.accent : theme.muted}
+                        r={hover ? 4 : 3}
+                        fill={theme.port}
+                        stroke={theme.background}
                         strokeWidth={1}
                         pointerEvents="none"
+                        data-pin-dot={p.id}
                       />
                     )}
                     <circle cx={p.x} cy={p.y} r={6} fill="transparent" data-port-id={p.id} data-port-node={n.id} style={{ cursor: 'crosshair' }}>

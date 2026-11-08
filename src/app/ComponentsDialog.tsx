@@ -3,7 +3,7 @@
  * Saving is one undo step; the blocks of a part follow its pins.
  */
 import { useDeferredValue, useMemo, useState } from 'react';
-import { COMPONENTS_EXAMPLE, componentsJson, isPart, parseComponents } from '../editor/components';
+import { COMPONENTS_EXAMPLE, componentsJson, isPart, parseComponents, renamedPresets } from '../editor/components';
 import { sheetsUsing, useStore } from './store';
 import { MOD, useEscape } from './Dialogs';
 
@@ -33,7 +33,8 @@ export function ComponentsDialog({ onClose }: { onClose(): void }) {
   const save = () => {
     const r = parseComponents(text, taken);
     if (!r.defs) return;
-    setComponents(r.defs);
+    // A preset renamed in place: what was placed from it follows it under its new name.
+    setComponents(r.defs, renamedPresets(defs, r.defs));
     onClose();
   };
 
@@ -61,7 +62,8 @@ export function ComponentsDialog({ onClose }: { onClose(): void }) {
           <code>add</code>… and the other fields are what Properties shows for it (<code>inputs</code>, <code>width</code>, <code>parts</code>,{' '}
           <code>shift</code>, <code>value</code>). A <b>part</b> has pins of its own and no logic:{' '}
           <code>{'{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["y[7:0]"] }'}</code>, or numbers of pins such as{' '}
-          <code>{'"inputs": 6'}</code> (named in0, in1…, with <code>width</code> bits each). A part is placed as a block and exported as an empty module.
+          <code>{'"inputs": 6'}</code> (named in0, in1…, with <code>width</code> bits each). A part is placed as a block and exported as an empty module. What is placed
+          from a component changes with it (except a symbol changed on its own).
         </p>
         {!defs?.length && <p className="small muted">An example to start from: change it, or clear it to have none.</p>}
         <textarea

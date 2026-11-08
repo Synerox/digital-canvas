@@ -5,11 +5,13 @@ import {
   componentSymbol,
   componentsJson,
   editComponent,
+  followsPreset,
   freeComponentName,
   loadComponents,
   parseComponents,
   parseSymbolJson,
   partVerilog,
+  renamedPresets,
   settingsHint,
   symbolJson,
 } from './components';
@@ -109,7 +111,7 @@ describe('components in JSON', () => {
   it('edits one component of the library as JSON, in its place', () => {
     const defs = parseComponents(COMPONENTS_EXAMPLE).defs!;
     expect(componentJson(defs[0])).toBe('{ "name": "and5", "title": "AND (5 inputs)", "base": "and", "inputs": 5 }');
-    expect(componentJson(defs[2])).toBe('{ "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }');
+    expect(componentJson(defs[2])).toBe('{ "name": "alu", "title": "ALU", "inputs": ["a", "b", "op[2:0]"], "outputs": ["y", "zero[0:0]"], "width": 8 }');
     // One item to a line, as the window shows one; each reads back to itself either way.
     expect(componentJson(defs[0], true)).toBe('{\n  "name": "and5",\n  "title": "AND (5 inputs)",\n  "base": "and",\n  "inputs": 5\n}');
     expect(componentJson(defs[3], true)).toBe('{\n  "name": "lut6",\n  "inputs": [\n    "in0",\n    "in1",\n    "in2",\n    "in3",\n    "in4",\n    "in5"\n  ],\n  "outputs": [\n    "out"\n  ]\n}');
@@ -133,11 +135,91 @@ describe('components in JSON', () => {
     expect(editComponent(defs, 'alu', '{ "name": "alu", "inputs": 2,').error).toMatch(/^Not valid JSON/);
   });
 
+  it('writes the width of a part whose pins all have it once, so that changing it changes every pin', () => {
+    const x = parseComponents('{ "name": "x", "inputs": 2, "outputs": 1, "width": 4 }').defs![0];
+    expect(componentJson(x)).toBe('{ "name": "x", "inputs": ["in0", "in1"], "outputs": ["out"], "width": 4 }');
+    const wider = editComponent([x], 'x', componentJson(x, true).replace('"width": 4', '"width": 16')).defs![0];
+    expect(wider.pins!.map((p) => p.width)).toEqual([16, 16, 16]);
+    // Buses of other widths, and 1-bit pins, say their bits: "width" is the width of most buses, the data width.
+    const alu = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }').defs![0];
+    expect(componentJson(alu)).toBe('{ "name": "alu", "inputs": ["a", "b", "op[2:0]"], "outputs": ["y", "zero[0:0]"], "width": 8 }');
+    expect(parseComponents(componentJson(alu)).defs).toEqual([alu]);
+    const alu16 = editComponent([alu], 'alu', componentJson(alu, true).replace('"width": 8', '"width": 16')).defs![0];
+    expect(alu16.pins!.map((p) => `${p.name}:${p.width}`)).toEqual(['a:16', 'b:16', 'op:3', 'y:16', 'zero:1']);
+    // Two widths as common: the wider one.
+    expect(componentJson(parseComponents('{ "name": "z", "inputs": ["a[3:0]"], "outputs": ["y[7:0]"] }').defs![0])).toBe(
+      '{ "name": "z", "inputs": ["a[3:0]"], "outputs": ["y"], "width": 8 }',
+    );
+    // Pins written with bits as wide as "width" are the same part.
+    const same = parseComponents('{ "name": "y", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["s[7:0]"] }').defs![0];
+    expect(componentJson(same)).toBe('{ "name": "y", "inputs": ["a", "b"], "outputs": ["s"], "width": 8 }');
+    expect(parseComponents(componentJson(same)).defs).toEqual([same]);
+  });
+
+  it('refuses a part width that no pin takes, rather than leave the pins as they were', () => {
+    const r = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["y[7:0]"], "width": 16 }');
+    expect(r.error).toMatch(/^alu: "width" sets the bits of pins written without them, such as "a"/);
+    expect(editComponent([], 'alu', '{ "name": "alu", "inputs": [{ "name": "a", "width": 8 }], "outputs": ["y[7:0]"], "width": 4 }').error).toMatch(/^alu: "width"/);
+    // Taken by a pin without bits: that pin has it, the others keep theirs.
+    expect(parseComponents('{ "name": "m", "inputs": ["a[7:0]", "b"], "outputs": ["y[7:0]"], "width": 16 }').defs![0].pins!.map((p) => p.width)).toEqual([8, 16, 8]);
+    // As wide as the pins say: nothing to refuse.
+    expect(parseComponents('{ "name": "n", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"], "width": 8 }').defs![0].pins!.map((p) => p.width)).toEqual([8, 8]);
+    // As wide as some of them (the data pins of the JSON shown, written with their bits): the same part, nothing to refuse.
+    const alu = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero[0:0]"], "width": 8 }');
+    expect(alu.defs![0].pins!.map((p) => p.width)).toEqual([8, 8, 3, 8, 1]);
+    // None of them: the message names a pin of another width.
+    expect(parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "op[2:0]"], "outputs": ["y[7:0]"], "width": 16 }').error).toMatch(/such as "a\[7:0\]"/);
+  });
+
+  it('tells a preset renamed in its place in the list', () => {
+    const before = parseComponents('[{ "name": "a", "base": "and" }, { "name": "m", "base": "mux", "width": 8 }, { "name": "p", "inputs": 2, "outputs": 1 }]').defs!;
+    const after = parseComponents('[{ "name": "a", "base": "and" }, { "name": "m8", "base": "mux", "width": 16 }, { "name": "q", "inputs": 2, "outputs": 1 }]').defs!;
+    // A part is not a preset: its blocks name it as a module.
+    expect(renamedPresets(before, after)).toEqual({ m: 'm8' });
+    // Another symbol in its place, a name that was there already, or one that stays: no rename.
+    expect(renamedPresets(before, parseComponents('[{ "name": "a", "base": "and" }, { "name": "m8", "base": "or" }]').defs!)).toEqual({});
+    expect(renamedPresets(before, parseComponents('[{ "name": "m", "base": "mux" }, { "name": "a", "base": "mux" }]').defs!)).toEqual({});
+    expect(renamedPresets(before, before.slice(1))).toEqual({});
+    expect(renamedPresets(undefined, after)).toEqual({});
+    const lib = (json: string) => parseComponents(json).defs!;
+    const two = lib('[{ "name": "and3", "base": "and", "inputs": 3 }, { "name": "and4", "base": "and", "inputs": 4 }]');
+    // One deleted and the other renamed: the one with the new one's settings was renamed, whatever their places.
+    expect(renamedPresets(two, lib('[{ "name": "and_four", "base": "and", "inputs": 4 }]'))).toEqual({ and4: 'and_four' });
+    expect(renamedPresets(lib('{ "name": "a", "base": "and", "inputs": 3 }'), lib('[{ "name": "n", "base": "and", "inputs": 5 }, { "name": "a2", "base": "and", "inputs": 3 }]'))).toEqual({
+      a: 'a2',
+    });
+    // A line edited in place, between the same lines that stay: renamed (and changed).
+    const three = lib('[{ "name": "or2", "base": "or" }, { "name": "and3", "base": "and", "inputs": 3 }, { "name": "xor2", "base": "xor" }]');
+    expect(renamedPresets(three, lib('[{ "name": "or2", "base": "or" }, { "name": "and5", "base": "and", "inputs": 5 }, { "name": "xor2", "base": "xor" }]'))).toEqual({
+      and3: 'and5',
+    });
+    // Two gone and one or two new with no settings to tell them apart: no way to tell which.
+    expect(renamedPresets(two, lib('[{ "name": "and5", "base": "and", "inputs": 5 }]'))).toEqual({});
+    expect(renamedPresets(two, lib('[{ "name": "x", "base": "and", "inputs": 3 }, { "name": "y", "base": "and", "inputs": 3 }]'))).toEqual({});
+    // Deleted here and another added there: no rename, rather than give symbols another preset's settings.
+    expect(renamedPresets(three, lib('[{ "name": "and9", "base": "and", "inputs": 9 }, { "name": "or2", "base": "or" }, { "name": "xor2", "base": "xor" }]'))).toEqual({});
+    expect(renamedPresets(lib('[{ "name": "m", "base": "mux" }, { "name": "a", "base": "and", "inputs": 3 }]'), lib('[{ "name": "x", "base": "and", "inputs": 5 }, { "name": "y", "base": "and", "inputs": 6 }, { "name": "m", "base": "mux" }]'))).toEqual({});
+    const mux = lib('[{ "name": "mux4", "base": "mux", "inputs": 4, "width": 8 }, { "name": "and3", "base": "and", "inputs": 3 }]');
+    expect(renamedPresets(mux, lib('[{ "name": "and3", "base": "and", "inputs": 3 }, { "name": "mux2", "base": "mux", "inputs": 2, "width": 8 }]'))).toEqual({});
+    expect(renamedPresets(two, lib('[{ "name": "and4", "base": "and", "inputs": 4 }, { "name": "and8", "base": "and", "inputs": 8 }]'))).toEqual({});
+  });
+
+  it('links a symbol to its preset only while it has its settings', () => {
+    const defs = parseComponents('[{ "name": "add8", "base": "add", "width": 8 }, { "name": "p", "inputs": 2, "outputs": 1 }]').defs!;
+    const add = (width: number, component?: string) => ({ id: 'u:1', sym: 'add' as const, params: { width }, ...(component ? { component } : {}) });
+    expect(followsPreset(add(8, 'add8'), defs)).toBe(true);
+    expect(followsPreset(add(16, 'add8'), defs)).toBe(false);
+    expect(followsPreset(add(8), defs)).toBe(false);
+    expect(followsPreset(add(8, 'gone'), defs)).toBe(false);
+    expect(followsPreset(add(8, 'p'), defs)).toBe(false);
+    expect(followsPreset({ ...add(8, 'add8'), sym: 'sub' }, defs)).toBe(false);
+  });
+
   it('says what the JSON of a symbol sets', () => {
-    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256');
-    expect(settingsHint('decoder')).toBe('"width" 1–8');
+    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits');
+    expect(settingsHint('decoder')).toBe('"width" 1–8 select bits');
     expect(settingsHint('const')).toBe('"value" a Verilog number such as "4\'d2"');
-    expect(settingsHint('shl')).toBe('"width" 1–256, "shift" 1–16');
+    expect(settingsHint('shl')).toBe('"width" 1–256 bits, "shift" 1–16 bits of the shift amount');
   });
 
   it('finds a free name', () => {

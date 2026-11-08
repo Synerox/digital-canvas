@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Diagram } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
-import { checkSheet, scaleNote, wireShift } from '../editor/check';
+import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-export';
@@ -158,6 +158,11 @@ function lineList(lines: number[]): string {
   return out.join(', ');
 }
 
+/**
+ * Properties of what is selected. Each item's panel (and the drawing's name field) is keyed by it: a field being typed
+ * in belongs to the item it was opened on, so selecting another item (whose value may read the same) starts from that
+ * item's own values.
+ */
 export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
   const s = useStore();
   const nameRef = useRef<HTMLInputElement>(null);
@@ -191,6 +196,8 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
           <label className="prop">
             <span>Module name</span>
             <Field
+              // Of this drawing: what was typed for another one never shows here (the panel's buttons keep their place).
+              key={s.sheet}
               value={module}
               onCommit={(v) => s.renameDrawing(module, v)}
               check={(v) => {
@@ -219,9 +226,23 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
         </p>
         {s.issues.messages.length > 0 && (
           <ul className="issues small">
-            {s.issues.messages.map((m) => (
-              <li key={m}>{m}</li>
-            ))}
+            {s.issues.messages.map((m) =>
+              // The open inputs are not marked on the sheet (a mark on every new symbol's pins reads as an
+              // inverter's bubble): this line finds them.
+              s.issues.openPorts?.size && m === openInputsMessage(s.issues.openPorts.size) ? (
+                <li key={m}>
+                  <button
+                    className="link"
+                    title="Select the symbols that have an input not connected"
+                    onClick={() => s.select(s.layout!.nodes.filter((n) => n.ports.some((p) => s.issues.openPorts!.has(p.id))).map((n) => n.id))}
+                  >
+                    {m}
+                  </button>
+                </li>
+              ) : (
+                <li key={m}>{m}</li>
+              ),
+            )}
           </ul>
         )}
         <div className="prop-actions">
@@ -307,7 +328,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
     const part = user ? partOfBlock(s, node) : undefined;
     const settings = settingsOf(s, id);
     return (
-      <div className="inspector">
+      <div className="inspector" key={id}>
         <h3>{part ? `Part ${part.title ?? part.name}` : title}</h3>
         {renameable && (
           <label className="prop">
@@ -434,7 +455,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
       : `${userEdge.slice.lo + userEdge.slice.width - 1}:${userEdge.slice.lo}`
     : '';
   return (
-    <div className="inspector">
+    <div className="inspector" key={id}>
       <h3>Wire</h3>
       <label className="prop">
         <span>Label</span>

@@ -559,26 +559,113 @@ describe('changing parameters', () => {
     expect(into(s.d, g)).toEqual([`${a}>A`, `${b}>B`]);
   });
 
-  it('never brings back a hidden wire onto an input that another wire drives', () => {
+  it("brings a slice's hidden wire back with the slice, also after the width changed", () => {
     const s = new Drawing();
     const [a, b, c] = ['a', 'b', 'c'].map((n) => s.add('input', n, { width: 4 }));
-    const d = s.add('input', 'd', { width: 8 });
     const cat = s.add('concat', undefined, { parts: 3, width: 4 });
     s.wire(`${a}.out`, `${cat}.[11:8]`);
     s.wire(`${b}.out`, `${cat}.[7:4]`);
     s.wire(`${c}.out`, `${cat}.[3:0]`);
-    // a's wire is hidden, still stored on [11:8]; then the parts are 8 bits and a new top part is wired.
+    // a's wire is hidden with the top slice; the slices are then 8 bits wide, and the top one is back as [23:16].
     s.e = setParams(s.e, cat, { parts: 2 });
+    expect(into(s.d, cat)).toEqual([`${b}>[7:4]`, `${c}>[3:0]`]);
     s.e = setParams(s.e, cat, { width: 8 });
     s.e = setParams(s.e, cat, { parts: 3 });
+    expect(into(s.d, cat)).toEqual([`${a}>[23:16]`, `${b}>[15:8]`, `${c}>[7:0]`]);
+    // Both at once: fewer slices of another width.
+    s.e = setParams(s.e, cat, { parts: 2, width: 2 });
+    expect(into(s.d, cat)).toEqual([`${b}>[3:2]`, `${c}>[1:0]`]);
+    s.e = setParams(s.e, cat, { parts: 3, width: 4 });
+    expect(into(s.d, cat)).toEqual([`${a}>[11:8]`, `${b}>[7:4]`, `${c}>[3:0]`]);
+    expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
+  });
+
+  it('brings back one wire only when two were hidden on one slice (a file saved before hidden wires followed the width)', () => {
+    const s = new Drawing();
+    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((n) => s.add('input', n, { width: 8 }));
+    const cat = s.add('concat', undefined, { parts: 3, width: 8 });
     s.wire(`${d}.out`, `${cat}.[23:16]`);
-    // Back to 4 bits: d's wire moves to [11:8], where a's hidden wire was. Only d's is kept.
-    s.e = setParams(s.e, cat, { width: 4 });
-    expect(into(s.d, cat)).toEqual([`${b}>[7:4]`, `${c}>[3:0]`, `${d}>[11:8]`]);
-    expect(s.e.edges.some((x) => x.source.node === a)).toBe(false);
+    s.wire(`${b}.out`, `${cat}.[15:8]`);
+    s.wire(`${c}.out`, `${cat}.[7:0]`);
+    // a's wire as such a file keeps it: hidden on [11:8], a slice of the width before.
+    s.e = { ...s.e, edges: [...s.e.edges, { id: 'w:old', source: { node: a, port: `${a}.out` }, target: { node: cat, port: `${cat}.[11:8]` } }] };
+    const start = s.e;
+    for (const steps of [[{ parts: 2 }, { width: 4 }, { parts: 3 }], [{ parts: 2, width: 4 }, { parts: 3 }]]) {
+      s.e = start;
+      for (const p of steps) s.e = setParams(s.e, cat, p);
+      expect(into(s.d, cat)).toEqual([`${a}>[11:8]`, `${b}>[7:4]`, `${c}>[3:0]`]);
+      expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
+    }
+  });
+
+  it('brings back a wire before an older one that stays hidden, and both wires of an input shared with an inout', () => {
+    // A split's output: [31:24] to y is hidden, [23:16] to y wired meanwhile and hidden too.
+    const s = new Drawing();
+    const bus = s.add('input', 'bus', { width: 32 });
+    const sp = s.add('split', undefined, { parts: 4, width: 8 });
+    const y = s.add('output', 'y', { width: 8 });
+    s.wire(`${bus}.out`, `${sp}.in`);
+    s.wire(`${sp}.[31:24]`, `${y}.in`);
+    s.e = setParams(s.e, sp, { parts: 3 });
+    s.wire(`${sp}.[23:16]`, `${y}.in`);
+    s.e = setParams(s.e, sp, { parts: 2 });
+    // Three slices of 4 bits: the newer wire is back on [11:8]; the older one ([15:12] now) stays hidden.
+    s.e = setParams(s.e, sp, { parts: 3, width: 4 });
+    expect(s.d.edges.filter((w) => w.target.node === y).map((w) => w.source.port)).toEqual([`${sp}.[11:8]`]);
+    expect(s.e.edges).toHaveLength(3);
+    // Four slices: the older one would be a second driver of y.
+    s.e = setParams(s.e, sp, { parts: 4 });
+    expect(s.d.edges.filter((w) => w.target.node === y).map((w) => w.source.port)).toEqual([`${sp}.[11:8]`]);
     expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
 
-    // The same for a split's output: a hidden wire stays away from an input wired meanwhile.
+    // Two wires hidden at different times, on two slices, coming back at once: one drives y.
+    const r = new Drawing();
+    const rb = r.add('input', 'bus', { width: 32 });
+    const rs = r.add('split', undefined, { parts: 4, width: 8 });
+    const ry = r.add('output', 'y', { width: 8 });
+    r.wire(`${rb}.out`, `${rs}.in`);
+    r.wire(`${rs}.[31:24]`, `${ry}.in`);
+    r.e = setParams(r.e, rs, { parts: 3 });
+    r.wire(`${rs}.[23:16]`, `${ry}.in`);
+    r.e = setParams(r.e, rs, { parts: 2 });
+    r.e = setParams(r.e, rs, { parts: 4 });
+    expect(r.d.edges.filter((w) => w.target.node === ry)).toHaveLength(1);
+    expect(checkSheet(r.d).messages.join(' ')).not.toContain('more than one wire');
+
+    // A wire hidden on another symbol drives nothing: the returning one comes back.
+    const q = new Drawing();
+    const qb = q.add('input', 'bus', { width: 24 });
+    const [q1, q2] = [0, 1].map(() => q.add('split', undefined, { parts: 3, width: 8 }));
+    const qy = q.add('output', 'y', { width: 8 });
+    q.wire(`${qb}.out`, `${q1}.in`);
+    q.wire(`${qb}.out`, `${q2}.in`);
+    q.wire(`${q1}.[23:16]`, `${qy}.in`);
+    q.e = setParams(q.e, q1, { parts: 2 });
+    q.wire(`${q2}.[23:16]`, `${qy}.in`);
+    q.e = setParams(q.e, q2, { parts: 2 });
+    q.e = setParams(q.e, q1, { parts: 3 });
+    expect(q.d.edges.filter((w) => w.target.node === qy).map((w) => w.source.port)).toEqual([`${q1}.[23:16]`]);
+    q.e = setParams(q.e, q2, { parts: 3 });
+    expect(q.d.edges.filter((w) => w.target.node === qy).map((w) => w.source.port)).toEqual([`${q1}.[23:16]`]);
+
+    // An inout's wire and a driver on one slice: both are hidden, and both come back.
+    const iface: InterfaceOf = (m) => (m === 'pad' ? { label: 'pad', ports: [{ name: 'io', dir: 'inout', width: 8 }] } : undefined);
+    const t = new Drawing(iface);
+    const a = t.add('input', 'a', { width: 8 });
+    const cat = t.add('concat', undefined, { parts: 3, width: 8 });
+    const pad = t.add('block', 'p', { module: 'pad' });
+    t.wire(`${pad}.io`, `${cat}.[23:16]`);
+    t.wire(`${a}.out`, `${cat}.[23:16]`);
+    const before = t.d.edges.filter((w) => w.target.node === cat).length;
+    for (const steps of [[{ parts: 2 }, { parts: 3 }], [{ parts: 2 }, { parts: 3, width: 4 }]]) {
+      let e = t.e;
+      for (const p of steps) e = setParams(e, cat, p, iface);
+      expect(effectiveDiagram('m', undefined, e, iface).edges.filter((w) => w.target.node === cat)).toHaveLength(before);
+    }
+  });
+
+  it('never brings back a hidden wire onto an input that another wire drives', () => {
+    // A split's output: a hidden wire stays away from an input wired meanwhile.
     const t = new Drawing();
     const bus = t.add('input', 'bus', { width: 12 });
     const x = t.add('input', 'x', { width: 4 });
@@ -589,7 +676,12 @@ describe('changing parameters', () => {
     t.wire(`${sp}.[7:4]`, `${y1}.in`);
     t.e = setParams(t.e, sp, { parts: 2 });
     t.wire(`${x}.out`, `${y2}.in`);
+    // Slices and width at once (the JSON window, a preset): the wire would come back on [23:16].
+    const once = setParams(t.e, sp, { parts: 3, width: 8 });
     t.e = setParams(t.e, sp, { parts: 3 });
+    expect(t.d.edges.filter((w) => w.target.node === y2).map((w) => w.source.node)).toEqual([x]);
+    expect(checkSheet(t.d).messages.join(' ')).not.toContain('more than one wire');
+    t.e = once;
     expect(t.d.edges.filter((w) => w.target.node === y2).map((w) => w.source.node)).toEqual([x]);
     expect(checkSheet(t.d).messages.join(' ')).not.toContain('more than one wire');
   });
@@ -624,6 +716,22 @@ describe('imported symbols', () => {
 });
 
 describe('Copy to new drawing', () => {
+  it('keeps the bit order of a concatenation into a bus declared [0:n]', async () => {
+    const body = (range: string, rhs: string) => `module t(input a, input b, input c, input d, output ${range} y);\n  assign y = ${rhs};\nendmodule\n`;
+    for (const [range, rhs, bar] of [
+      ['[0:3]', '{a, b, c, d}', 'raw'],
+      ['[0:2]', "{a, 1'b0, b}", 'raw'],
+      ['[3:0]', '{a, b, c, d}', 'concat'],
+    ]) {
+      const base = buildDiagram(await design({ 't.v': body(range, rhs) }), 't');
+      const before = diagramToVerilog(base, 't').code;
+      const drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
+      // The bar stays a frozen copy when a Concatenate would name its slices from the other end.
+      expect(drawing.nodes.find((n) => n.sym === 'concat' || n.raw?.kind === 'join')?.sym, range).toBe(bar);
+      expect(diagramToVerilog(effectiveDiagram('t', undefined, drawing, noModules), 't').code, range).toBe(before);
+    }
+  });
+
   it('never hands out an ID the drawing already uses', async () => {
     const base = buildDiagram(await design({ 't.v': 'module t(input a, output y);\n  assign y = a;\nendmodule\n' }), 't');
     let e = layoutToEdits(emptyEdits(), await layoutDiagram(base), 'existing');
