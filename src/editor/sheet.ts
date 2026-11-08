@@ -6,7 +6,7 @@
  * undo/redo can keep old versions as they are.
  */
 import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
-import { GRID, type LayoutResult, type Point } from '../layout/elk-layout';
+import { GRID, type LayoutResult, type MeasureText, type Point, legacyCellSize, sizeNode } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
 import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
@@ -858,6 +858,48 @@ export interface Size {
 }
 
 /**
+ * makeRoom for the symbols of `d` that have a position, from the size `oldSize` gives each (given its size now).
+ * `d` holds the symbols the user deleted from a Verilog sheet too: they come back where they were (Restore).
+ */
+function growFrom(e: SheetEdits, d: Diagram, measure: MeasureText, oldSize: (n: DNode, now: Size) => Size): SheetEdits {
+  const was = new Map<string, Size>();
+  const now = new Map<string, Size>();
+  const unsized = new Set<string>();
+  for (const n of d.nodes) {
+    if (!e.pos[n.id]) continue;
+    const s = sizeNode(n, measure);
+    const size = { width: s.width, height: s.height };
+    now.set(n.id, size);
+    was.set(n.id, oldSize(n, size));
+    // A block of a module whose Verilog is still loading, or failed, has no pins yet: it is drawn smaller than it is.
+    if (n.attrs?.missingModule) unsized.add(n.id);
+  }
+  return makeRoom(e, was, now, unsized);
+}
+
+/**
+ * A sheet saved with the symbol outlines of before (oldOutlines, see OUTLINES), drawn with today's: the symbols
+ * that grew get room as a block that grew does (makeRoom), so none covers a neighbour, a pin or a wire. An adder
+ * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right. Wires a grown
+ * symbol covers are routed again; so are those to its pins that moved (their ends no longer meet them).
+ * `d` is the sheet's netlist with its hidden symbols (see growFrom).
+ */
+export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText): SheetEdits {
+  const out = { ...growFrom(e, d, measure, (n, now) => legacyCellSize(n, measure) ?? now) };
+  delete out.oldOutlines;
+  return out;
+}
+
+/**
+ * Room right of symbols that got wider when their settings changed (a gate with more inputs; `widths`: how wide
+ * each was before): what is right of one moves right as far, wires too (makeRoom), rather than being covered.
+ * `d` is the sheet's netlist after the change, with its hidden symbols (see growFrom).
+ */
+export function fitWider(e: SheetEdits, d: Diagram, widths: ReadonlyMap<string, number>, measure: MeasureText): SheetEdits {
+  return growFrom(e, d, measure, (n, now) => (widths.has(n.id) ? { width: Math.min(widths.get(n.id)!, now.width), height: now.height } : now));
+}
+
+/**
  * Room for symbols that grew (`was` → `now`: sizes by symbol), with the layout
  * kept. A wider symbol gets a column as wide as its growth put in at its old
  * right edge: everything right of that edge moves right, wire routes and labels
@@ -867,9 +909,11 @@ export interface Size {
  * there, nor close beside it; otherwise downwards, with a row as high as its
  * growth put in at its old bottom the same way, or higher up where something
  * close beside it starts, which then stays beside its pins. Stored routes that
- * run through a grown symbol are dropped, to be routed again.
+ * run through a grown symbol are dropped, to be routed again. Symbols in
+ * `unsized` may be any size right of and below their corner (a block whose
+ * pins are not known yet): nothing grows upwards into where they might reach.
  */
-export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: ReadonlyMap<string, Size>): SheetEdits {
+export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: ReadonlyMap<string, Size>, unsized?: ReadonlySet<string>): SheetEdits {
   const grown = [...now].filter(([id, s]) => e.pos[id] && was.has(id) && (s.width > was.get(id)!.width || s.height > was.get(id)!.height));
   if (grown.length === 0) return e;
   const cols = grown
@@ -892,7 +936,7 @@ export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: Rea
   const side = 2 * GRID;
   const clear = (r: Box, id: string) =>
     Object.keys(pos).every((k) => {
-      const q = rect(k);
+      const q = unsized?.has(k) ? { ...pos[k], width: Infinity, height: Infinity } : rect(k);
       return k === id || r.x >= q.x + q.width + side || q.x >= r.x + r.width + side || r.y >= q.y + q.height + gap || q.y >= r.y + r.height + gap;
     });
   for (const [id, s] of grown.sort(([a], [b]) => pos[a].y - pos[b].y)) {
@@ -918,7 +962,9 @@ export function makeRoom(e: SheetEdits, was: ReadonlyMap<string, Size>, now: Rea
     for (const k of Object.keys(pos)) if (k !== id) pos[k] = my(pos[k]);
     for (const [k, r] of Object.entries(routes)) routes[k] = { ...r, points: r.points.map(my), ...(r.label ? { label: my(r.label) } : {}) };
   }
-  const boxes = grown.map(([id]) => rect(id));
+  // Not the box of a symbol the user deleted (hidden): no wire is routed around it, and those over it are routed
+  // again when it comes back (Restore).
+  const boxes = grown.filter(([id]) => !e.hidden.includes(id)).map(([id]) => rect(id));
   for (const [id, r] of Object.entries(routes)) if (boxes.some((b) => polylineHitsRect(r.points, b))) delete routes[id];
   return { ...e, pos, routes };
 }

@@ -58,7 +58,7 @@ const clean = (v: number) => Math.round(v * 1000) / 1000;
 
 /**
  * The same layout with every symbol on the grid, as many wires straight as moving symbols by a few grid
- * steps allows, and every wire on grid lines (but for its ends on pins off the grid, such as a MUX's select).
+ * steps allows, and every wire on grid lines (but for ends on pins off the grid, should a symbol have any: sizeNode puts them all on it).
  */
 export function alignToGrid(layout: LayoutResult, grid: number): LayoutResult {
   const snap = (v: number) => Math.round(v / grid) * grid;
@@ -376,7 +376,7 @@ export function onGrid(points: Point[], s: RouteEnd, t: RouteEnd, os: Point, ot:
   return out;
 }
 
-/** Whether a wire runs through a symbol (its first leg may start inside its source's box and its last end inside its target's: a pin on a sloped edge). */
+/** Whether a wire runs through a symbol (its first leg may start inside its source's box and its last end inside its target's: a pin inside the box). */
 function runsThroughSymbol(points: Point[], rects: readonly Rect[], cols: ReadonlyMap<number, number[]>, source: number, target: number): boolean {
   const b = boundsOf(points);
   for (const i of near(cols, b.x0, b.x1)) {

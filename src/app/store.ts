@@ -27,6 +27,8 @@ import {
   isDrawnKey,
   isEmptyEdits,
   isPinned,
+  markOldOutlines,
+  OUTLINES,
   parseEdits,
   parseSavedFile,
   sheetKey,
@@ -41,6 +43,8 @@ import {
   copyNodes,
   deleteItems,
   effectiveDiagram,
+  fitNewOutlines,
+  fitWider,
   layoutToEdits,
   makeRoom,
   moveNodes,
@@ -119,6 +123,8 @@ function parsePutAside(text: string): PutAside {
     );
     if (Object.keys(kept).length) out[file] = kept;
   }
+  // Put aside in a file saved with older symbol outlines: they get room when they come back, as the document's do.
+  for (const sheets of Object.values(out)) markOldOutlines(sheets, (JSON.parse(text) as { outlines?: unknown }).outlines);
   return out;
 }
 
@@ -1018,6 +1024,58 @@ export const useStore = create<State>((set, get) => {
   /** False while a Verilog sheet is being opened: what is on screen still belongs to the previous one. */
   const settled = (s: State) => isDrawnKey(s.sheet) || s.loadedSheet === s.sheet;
 
+  /**
+   * A sheet's netlist with the symbols the user deleted from it too (they keep their positions, and come back
+   * there with Restore): room made for a symbol that grew keeps clear of them, and they get room themselves.
+   */
+  const withHidden = (module: string, base: Diagram | undefined, e: SheetEdits, shown?: Diagram): Diagram =>
+    shown && !e.hidden.length ? shown : effectiveDiagram(module, base, restoreHidden(e), interfaceOf);
+
+  /**
+   * A Verilog sheet's netlist before edits (cached, as openPath builds it), when the design has its module. A full
+   * circuit only up to FLAT_CELL_LIMIT cells, as building a bigger one takes a while.
+   */
+  const baseOf = (mode: ViewMode, module: string): Diagram | undefined => {
+    const { rules, design, blockDesign } = get();
+    const cacheKey = `${mode}:${module}:${rulesKey(rules)}`;
+    let base = baseCache.get(cacheKey);
+    if (base) return base;
+    const view = mode === 'blocks' ? (blockDesign ?? design) : design;
+    if (!view?.modules[module] || (mode === 'flat' && flatCellCount(view, module) > FLAT_CELL_LIMIT)) return undefined;
+    base = buildDiagram(mode === 'flat' ? withFlattened(view, module) : view, module, rules);
+    baseCache.set(cacheKey, base);
+    return base;
+  };
+
+  /**
+   * The sheets after symbols on them took other settings (`before` → `after`, as when a preset changes): those
+   * that got wider (a gate with more inputs) make room, as in Properties (see setNodeParams). A Verilog sheet whose
+   * netlist cannot be had now (see baseOf) is left as it is.
+   */
+  const roomForWider = (before: EditDoc['sheets'], after: EditDoc['sheets']): EditDoc['sheets'] => {
+    if (after === before) return after;
+    const measure = measureFor(get().theme);
+    const width = (u: UserNode) => sizeNode(symbolNode(u, interfaceOf), measure).width;
+    let out = after;
+    for (const [key, e] of Object.entries(after)) {
+      const old = before[key];
+      if (!old || old === e) continue;
+      const widths = new Map<string, number>();
+      for (const u of e.nodes) {
+        const was = old.nodes.find((x) => x.id === u.id);
+        if (was && was !== u && e.pos[u.id] && width(u) > width(was)) widths.set(u.id, width(was));
+      }
+      if (!widths.size) continue;
+      const mode = viewModeOf(key);
+      const module = mode ? key.slice(`v:${mode}:`.length) : key.slice(2);
+      const base = mode ? baseOf(mode, module) : undefined;
+      if (mode && !base) continue;
+      if (out === after) out = { ...after };
+      out[key] = fitWider(e, withHidden(module, base, e), widths, measure);
+    }
+    return out;
+  };
+
   /** A history entry for the document as it is now. */
   const here = (): HistoryEntry => ({ doc: get().doc, path: get().path, sheet: get().sheet });
 
@@ -1089,9 +1147,12 @@ export const useStore = create<State>((set, get) => {
     const drawn = isDrawnKey(key);
     // The base of another sheet would be stored under this sheet's key (see loadedSheet).
     if (!drawn && (!s.base || !settled(s))) return;
-    const e = opts.fast ?? edits();
+    let e = opts.fast ?? edits();
     const netlist = effectiveDiagram(currentModule(), drawn ? undefined : s.base, e, interfaceOf);
     const measure = measureFor(s.theme);
+    // Saved with the symbol outlines of before: the symbols that grew since get room, once (stored below).
+    const refitted = !!e.oldOutlines;
+    if (e.oldOutlines) e = fitNewOutlines(e, withHidden(currentModule(), drawn ? undefined : s.base, e, netlist), measure);
     let pos = e.pos;
     let routes = e.routes;
     let placed: string[] = [];
@@ -1114,7 +1175,7 @@ export const useStore = create<State>((set, get) => {
     if (stale.length) issues = { ...issues, flagged: new Set([...issues.flagged, ...stale.map((w) => w.edge)]), messages: [...issues.messages, ...stale.map((w) => w.text)] };
     const selection = new Set([...s.selection].filter((id) => netlist.nodes.some((n) => n.id === id) || netlist.edges.some((x) => x.id === id)));
     const patch: Partial<State> = { netlist, layout: g.layout, issues, selection: selection.size === s.selection.size ? s.selection : selection };
-    if (!opts.fast && (placed.length || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
+    if (!opts.fast && (refitted || placed.length || Object.keys(g.routed).length) && (drawn || isPinned(e))) {
       const stored: SheetEdits = { ...e, pos, routes: { ...e.routes, ...g.routed } };
       patch.doc = { ...s.doc, sheets: { ...s.doc.sheets, [key]: stored } };
       if (copiedWork?.derived === s.doc) copiedWork = { ...copiedWork, derived: patch.doc };
@@ -1216,9 +1277,11 @@ export const useStore = create<State>((set, get) => {
       base = buildDiagram(blockDesign, module, rules);
       baseCache.set(cacheKey, base);
     }
-    const e = doc.sheets[sheetKey({ instance: module, module }, 'blocks')] ?? emptyEdits();
-    const netlist = effectiveDiagram(module, base, e, interfaceOf);
+    const saved = doc.sheets[sheetKey({ instance: module, module }, 'blocks')] ?? emptyEdits();
+    const netlist = effectiveDiagram(module, base, saved, interfaceOf);
     const measure = measureFor(theme);
+    // As refresh() draws it: with room for the symbols that grew since an older file was saved.
+    const e = saved.oldOutlines ? fitNewOutlines(saved, withHidden(module, base, saved, netlist), measure) : saved;
     let { pos, routes } = e;
     if (!isPinned(e) || netlist.nodes.some((n) => !pos[n.id])) {
       const elk = await elkOf(cacheKey, base);
@@ -1943,8 +2006,16 @@ export const useStore = create<State>((set, get) => {
 
     setNodeParams(id, params) {
       const before = get().doc;
-      // Changed on its own, a symbol placed from a preset no longer follows the preset.
-      editSheet((e) => unlinkChanged(setParams(e, id, params, interfaceOf), id, get().doc.components));
+      editSheet((e, _netlist, layout) => {
+        // Changed on its own, a symbol placed from a preset no longer follows the preset.
+        const next = unlinkChanged(setParams(e, id, params, interfaceOf), id, get().doc.components);
+        // Wider now (a gate with more inputs): what is right of it moves right rather than being covered.
+        const was = layout.nodes.find((n) => n.id === id);
+        if (next === e || !was || !next.pos[id]) return next;
+        const s = get();
+        const d = withHidden(currentModule(), isDrawnKey(s.sheet) ? undefined : s.base, next);
+        return fitWider(next, d, new Map([[id, was.width]]), measureFor(s.theme));
+      });
       // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
       const s = get();
       if (s.doc === before || !s.netlist) return;
@@ -2119,7 +2190,7 @@ export const useStore = create<State>((set, get) => {
       if (defs.length) doc.components = defs;
       else delete doc.components;
       // The symbols placed from a preset follow it: one undo step with the change of the library.
-      doc.sheets = followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf);
+      doc.sheets = roomForWider(s.doc.sheets, followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf));
       if (doc.sheets === s.doc.sheets && JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
       const placing = placingNow(s.placing, defs, renamed);
       pushDoc(doc, placing !== s.placing ? { placing } : {});
@@ -2276,6 +2347,7 @@ export const useStore = create<State>((set, get) => {
       return {
         format: FILE_FORMAT,
         version: 1,
+        outlines: OUTLINES,
         files: s.files,
         ...(s.topOverride ? { top: s.topOverride } : {}),
         rules: [...s.rules],

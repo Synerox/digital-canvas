@@ -71,7 +71,7 @@ export interface RouteOptions {
 
 /** Minimum straight piece of wire at a port. */
 const STUB = 10;
-/** A stub also ends at least this far beyond its own symbol's edge (ports may sit inside the box, e.g. on a sloped MUX edge). */
+/** A stub also ends at least this far beyond its own symbol's edge (should a port sit inside the box). */
 const STUB_CLEAR = 6;
 /** Wires keep at least this far from symbols. */
 const INFLATE = 4;
@@ -702,9 +702,14 @@ function stubEnd(end: RouteEnd, len: number, clear: number, grid: number): Point
   }
 }
 
-/** Where the router's straight piece of wire at a port ends (the first bend or branch is no closer). */
-export function portStub(end: RouteEnd, grid = 10): Point {
-  return stubEnd(end, STUB, STUB_CLEAR, grid > 0 ? grid : 10);
+/**
+ * Where the router's straight piece of wire at a port ends (the first bend or branch is no closer). Given the
+ * symbols on the sheet, the end its search uses: short of the grid, or half way across the gap, when another
+ * symbol sits right in front of the pin (see searchStubEnd).
+ */
+export function portStub(end: RouteEnd, grid = 10, obstacles?: Rect[]): Point {
+  const g = grid > 0 ? grid : 10;
+  return obstacles ? searchStubEnd(end, obstacles, g) : stubEnd(end, STUB, STUB_CLEAR, g);
 }
 
 /** Whether a point is inside the keep-out of a symbol other than `own`. */
@@ -714,15 +719,47 @@ const inKeepOut = (pt: Point, obstacles: Rect[], own: Rect) =>
   );
 
 /**
+ * The middle of the gap between a pin's own symbol and the nearest other symbol straight out from the pin,
+ * when a wire fits in it clear of both (more than twice the keep-out apart), or undefined.
+ */
+function gapMiddle(end: RouteEnd, obstacles: Rect[]): Point | undefined {
+  const { point: p, rect: own } = end;
+  const vertical = end.side === 'SOUTH' || end.side === 'NORTH';
+  const sign = end.side === 'SOUTH' || end.side === 'EAST' ? 1 : -1;
+  // Along the stub: where it leaves its symbol's box (the pin may sit inside it), and the nearest face ahead.
+  const at = vertical ? p.y : p.x;
+  const edge = vertical ? (sign > 0 ? own.y + own.height : own.y) : sign > 0 ? own.x + own.width : own.x;
+  const start = sign > 0 ? Math.max(at, edge) : Math.min(at, edge);
+  const across = vertical ? p.x : p.y;
+  let face: number | undefined;
+  for (const r of obstacles) {
+    if (sameRect(r, own)) continue;
+    const lo = (vertical ? r.x : r.y) - INFLATE;
+    const hi = (vertical ? r.x + r.width : r.y + r.height) + INFLATE;
+    if (across <= lo || across >= hi) continue;
+    const near = vertical ? (sign > 0 ? r.y : r.y + r.height) : sign > 0 ? r.x : r.x + r.width;
+    if ((near - start) * sign < 0) continue;
+    if (face === undefined || (near - face) * sign < 0) face = near;
+  }
+  if (face === undefined || Math.abs(face - start) <= 2 * INFLATE) return undefined;
+  const mid = (start + face) / 2;
+  return vertical ? { x: p.x, y: mid } : { x: mid, y: p.y };
+}
+
+/**
  * The stub's end for a search: on the grid, unless that is in another symbol's keep-out (a symbol right
- * under a MUX's select pin) and the shortest stub ends clear of it. A wire to a grid point in there has to
- * cross into the symbol and runs along its outline, dipping down and back up into the pin.
+ * under a pin on the bottom edge) and the shortest stub ends clear of it. A wire to a grid point in there has to
+ * cross into the symbol and runs along its outline, dipping down and back up into the pin. When the other
+ * symbol is closer than the shortest stub too (one grid step under the pin), the stub ends half way across
+ * the gap, off the grid, so the wire runs between the two outlines rather than along the other one.
  */
 function searchStubEnd(end: RouteEnd, obstacles: Rect[], grid: number): Point {
   const snapped = stubEnd(end, STUB, STUB_CLEAR, grid);
   if (!inKeepOut(snapped, obstacles, end.rect)) return snapped;
   const shortest = stubEnd(end, STUB, STUB_CLEAR, 0);
-  return inKeepOut(shortest, obstacles, end.rect) ? snapped : shortest;
+  if (!inKeepOut(shortest, obstacles, end.rect)) return shortest;
+  const between = gapMiddle(end, obstacles);
+  return between && !inKeepOut(between, obstacles, end.rect) ? between : snapped;
 }
 
 /** Direction of travel from a to an axis-aligned b, or -1 when they are the same point or not aligned. */
@@ -755,9 +792,10 @@ function cutUp(pl: Point[]): Seg[] {
 }
 
 // Segments of each wire and pin stub seen. A refresh hands every wire it routes the same wires of the
-// other nets and the same free pins (neither is changed in place), so each is cut up once, not once per wire.
+// other nets, the same free pins and the same symbols (none is changed in place), so each is cut up once,
+// not once per wire.
 const segCache = new WeakMap<Point[], Seg[]>();
-const stubCache = new WeakMap<RouteEnd, { grid: number; segs: Seg[] }>();
+const stubCache = new WeakMap<RouteEnd, { grid: number; obstacles: Rect[]; segs: Seg[] }>();
 
 function segmentsOf(polylines: Point[][]): Seg[] {
   const out: Seg[] = [];
@@ -769,9 +807,15 @@ function segmentsOf(polylines: Point[][]): Seg[] {
   return out;
 }
 
-function stubSegments(end: RouteEnd, grid: number): Seg[] {
+/**
+ * A free pin's stub as the search will draw it once the pin is wired: ending where searchStubEnd ends it, so
+ * that a pin over a symbol one grid step away keeps the point half way across the gap for its own wire (a
+ * wire of another net running across there would be met by that pin's wire, end on).
+ */
+function stubSegments(end: RouteEnd, grid: number, obstacles: Rect[]): Seg[] {
   let c = stubCache.get(end);
-  if (!c || c.grid !== grid) stubCache.set(end, (c = { grid, segs: cutUp([end.point, stubEnd(end, STUB, STUB_CLEAR, grid)]) }));
+  if (!c || c.grid !== grid || c.obstacles !== obstacles)
+    stubCache.set(end, (c = { grid, obstacles, segs: cutUp([end.point, searchStubEnd(end, obstacles, grid)]) }));
   return c.segs;
 }
 
@@ -965,7 +1009,7 @@ export function routeWire(from: RouteEnd, to: RouteEnd, opts: RouteOptions): Poi
   if (samePoint(p, q)) return [{ x: p.x, y: p.y }, { x: q.x, y: q.y }];
   const others = segmentsOf(opts.otherNets ?? []);
   // Free pins' stubs count as wires of other nets.
-  for (const r of opts.reserved ?? []) if (!samePoint(r.point, p) && !samePoint(r.point, q)) for (const s of stubSegments(r, grid)) others.push(s);
+  for (const r of opts.reserved ?? []) if (!samePoint(r.point, p) && !samePoint(r.point, q)) for (const s of stubSegments(r, grid, opts.obstacles)) others.push(s);
   const obstacles = [...opts.obstacles, from.rect, to.rect];
   const texts = opts.texts ?? [];
   const straight = straightRoute(from, to, obstacles, texts, others, grid);

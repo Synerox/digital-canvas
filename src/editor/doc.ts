@@ -54,6 +54,24 @@ export interface SheetEdits {
   edges: UserEdge[];
   /** Counter for new IDs (u:<n>, w:<n>). */
   next: number;
+  /**
+   * Positions and wires saved with the symbol outlines of before OUTLINES: the symbols that grew since get
+   * room when the sheet is next drawn (fitNewOutlines), and this goes. Kept in saved files until then.
+   */
+  oldOutlines?: true;
+}
+
+/**
+ * Version of the symbol outlines, written in saved files. 2 (2026-11): adders 40x60 (were 40x40), MUX 40 wide
+ * (were 60), gates with three or more inputs 50 or 60 wide (were 40). The pinned sheets of a file without it
+ * are marked oldOutlines when it is read.
+ */
+export const OUTLINES = 2;
+
+/** Mark the pinned sheets of a file saved with older symbol outlines (whose `outlines` is missing or older). */
+export function markOldOutlines(sheets: Record<string, SheetEdits>, outlines: unknown): void {
+  if (typeof outlines === 'number' && outlines >= OUTLINES) return;
+  for (const e of Object.values(sheets)) if (isPinned(e)) e.oldOutlines = true;
 }
 
 export interface EditDoc {
@@ -78,6 +96,8 @@ export interface PathEntry {
 export interface SavedFile {
   format: 'digital-canvas';
   version: 1;
+  /** Version of the symbol outlines the positions were saved with (see OUTLINES); missing in older files. */
+  outlines?: number;
   files: Record<string, string>;
   top?: string;
   rules: RuleId[];
@@ -287,6 +307,7 @@ export function parseEdits(v: unknown): SheetEdits {
   e.next = isNum(v.next) && v.next >= 1 ? Math.floor(v.next) : 1;
   // Never hand out an ID that is already used.
   e.next = freeIdFloor(e);
+  if (v.oldOutlines === true && isPinned(e)) e.oldOutlines = true;
   return e;
 }
 
@@ -309,6 +330,7 @@ export function parseSavedFile(text: string): SavedFile {
   if (isObj(d.sheets)) for (const [k, s] of Object.entries(d.sheets)) doc.sheets[k] = parseEdits(s);
   if (Array.isArray(d.drawn)) doc.drawn = [...new Set(d.drawn.filter(isStr))];
   for (const name of doc.drawn) doc.sheets[`d:${name}`] ??= emptyEdits();
+  markOldOutlines(doc.sheets, v.outlines);
   const components = loadComponents(d.components);
   if (components.length) doc.components = components;
   // A symbol follows its preset only while it has the preset's settings (a file edited by hand may say otherwise).
@@ -322,6 +344,7 @@ export function parseSavedFile(text: string): SavedFile {
   return {
     format: FILE_FORMAT,
     version: 1,
+    outlines: OUTLINES,
     files,
     top: isStr(v.top) ? v.top : undefined,
     rules,

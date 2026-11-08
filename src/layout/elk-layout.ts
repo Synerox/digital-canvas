@@ -104,10 +104,71 @@ function edgePinX(k: number, count: number, width: number): number {
   return (width - (count - 1) * ROW) / 2 + k * ROW;
 }
 
+/** Adder, subtractor and multiplier: drawn as an ALU, a trapezoid with a notch between its two operands. */
+export function isAluType(t: string | undefined): boolean {
+  return t === '$add' || t === '$sub' || t === '$mul';
+}
+
+export type GateShape = 'and' | 'or' | 'xor';
+
+/** The outline a logic gate is drawn with, or undefined for a cell that is not one of these gates. */
+export function gateShape(t: string | undefined): GateShape | undefined {
+  switch (t) {
+    case '$and':
+    case '$logic_and':
+    case '$reduce_and':
+    case 'dc:and':
+    case 'dc:nand':
+      return 'and';
+    case '$or':
+    case '$logic_or':
+    case '$reduce_or':
+    case '$reduce_bool':
+    case 'dc:nor':
+      return 'or';
+    case '$xor':
+    case '$xnor':
+    case '$reduce_xor':
+    case '$reduce_xnor':
+      return 'xor';
+    default:
+      return undefined;
+  }
+}
+
+/** Gates with a bubble on their output. */
+export function invertsOutput(t: string | undefined): boolean {
+  return t === 'dc:nand' || t === 'dc:nor' || t === '$xnor' || t === '$reduce_xnor';
+}
+
+/**
+ * Height of a gate's body: as tall as the symbol up to four inputs. A gate with more inputs keeps that
+ * body, centred, and its back edge runs on straight up and down to the outer inputs (as textbooks draw a
+ * gate with many inputs), instead of the body stretching into a long thin bullet. With an odd number of
+ * inputs the body is one input taller, or the outer two of those it covers would meet its corners.
+ */
+export function gateBodyHeight(height: number): number {
+  if (height <= 4 * ROW) return height;
+  return Math.round(height / ROW) % 2 === 1 ? 5 * ROW : 4 * ROW;
+}
+
+/** Width of a gate as tall as `height`: wider as the body grows, so it keeps its shape. */
+function gateWidth(height: number): number {
+  return 40 + (Math.min(gateBodyHeight(height), 4 * ROW) - 40) / 2;
+}
+
+/**
+ * How far a MUX's top and bottom edges drop towards its output: a quarter of its height, but never
+ * steeper than one in two, so a MUX with many inputs keeps a long output edge.
+ */
+export function muxInset(width: number, height: number): number {
+  return Math.min(height / 4, width / 2);
+}
+
 /**
  * Size of a symbol and where its ports are, relative to its top-left corner. Every
- * size and port offset is a multiple of GRID (but for the y of the select pin on a
- * MUX's sloped bottom edge), so a symbol placed on the grid has its pins on it.
+ * size and port offset is a multiple of GRID, so a symbol placed on the grid has its
+ * pins on it.
  */
 export function sizeNode(n: DNode, measure: MeasureText): Sized {
   const west = n.ports.filter((p) => p.side === 'WEST');
@@ -175,23 +236,51 @@ export function sizeNode(n: DNode, measure: MeasureText): Sized {
 
   // Primitive cell: compact operator box; ports on a 20px pitch centred vertically.
   const isMux = isMuxType(n.cellType);
-  const rows = Math.max(west.length, east.length, isMux ? 2 : 1);
-  const height = Math.max(40, rows * ROW + (isMux ? 20 : 0));
-  const width = edgeWidth(Math.max(isMux ? 30 : 40, measure(n.label, FONT.op) + 16), south.length);
+  const isAlu = isAluType(n.cellType);
+  const gate = gateShape(n.cellType);
+  const rows = Math.max(west.length, east.length, isMux || isAlu ? 2 : 1);
+  // A MUX and an ALU have a grid step above and below their inputs, for their sloped edges.
+  const height = Math.max(40, rows * ROW + (isMux || isAlu ? 20 : 0));
+  // A MUX or an ALU is as narrow as a gate, whatever it is called (the MUX writes no name, and an
+  // ALU's sign fits); a gate is wider as its body grows, so the body keeps its shape.
+  const width =
+    isMux || isAlu
+      ? edgeWidth(40, south.length)
+      : gate
+        ? edgeWidth(gateWidth(height), south.length)
+        : edgeWidth(Math.max(40, measure(n.label, FONT.op) + 16), south.length);
   const place = (list: typeof west, x: number) => {
     const start = height / 2 - ((list.length - 1) * ROW) / 2;
     list.forEach((p, k) => (ports[p.id] = { x, y: start + k * ROW }));
   };
-  place(west, 0);
+  if (isAlu && west.length === 2) {
+    // The operands come in above and below the notch, half way along the straight parts of the left edge.
+    ports[west[0].id] = { x: 0, y: GRID };
+    ports[west[1].id] = { x: 0, y: height - GRID };
+  } else {
+    place(west, 0);
+  }
   place(east, width);
-  south.forEach((p, k) => {
-    const x = edgePinX(k, south.length, width);
-    // A MUX's bottom edge slopes up towards the output: put the select pin on the outline
-    // (between two grid lines; the router starts its wire on the grid line below it).
-    const inset = isMux ? (Math.min(10, height / 4) * x) / width : 0;
-    ports[p.id] = { x, y: height - inset };
-  });
+  // Pins on the bottom edge, on the grid: a MUX's select pin is on the grid line under its sloped
+  // bottom edge, which a short lead joins (see the renderer).
+  south.forEach((p, k) => (ports[p.id] = { x: edgePinX(k, south.length, width), y: height }));
   return { width, height, ports };
+}
+
+/**
+ * The size sizeNode gave a cell before the symbol outlines of version 2 (see OUTLINES in editor/doc), for the
+ * cells whose size changed then: an adder was 40x40, a MUX 60 wide, a gate 40 wide whatever its inputs.
+ * Undefined for other symbols, whose size did not change.
+ */
+export function legacyCellSize(n: DNode, measure: MeasureText): { width: number; height: number } | undefined {
+  const isMux = isMuxType(n.cellType);
+  if (n.kind !== 'cell' || !(isMux || isAluType(n.cellType) || gateShape(n.cellType))) return undefined;
+  const count = (side: Side) => n.ports.filter((p) => p.side === side).length;
+  const rows = Math.max(count('WEST'), count('EAST'), isMux ? 2 : 1);
+  return {
+    width: edgeWidth(Math.max(isMux ? 30 : 40, measure(n.label, FONT.op) + 16), count('SOUTH')),
+    height: Math.max(40, rows * ROW + (isMux ? 20 : 0)),
+  };
 }
 
 export function isMuxType(t: string | undefined): boolean {

@@ -428,8 +428,8 @@ export function buildGeometry(input: GeometryInput): Geometry {
       const a = r.points[0];
       const b = r.points[r.points.length - 1];
       if ((near(a, s.point) && near(b, t.point)) || !close(a, s.point) || !close(b, t.point)) continue;
-      // Only routes of that time: an end off the grid while its pin is on it (a pin off the grid, such as a
-      // MUX's select, that moved a little is followed by adjustRoute as before).
+      // Only routes of that time: an end off the grid while its pin is on it (a pin off the grid, as a MUX's
+      // select was before it moved onto the grid line under the MUX, that moved a little is followed by adjustRoute as before).
       const old = (q: Point, pin: Point) => near(q, pin) || (onTheGrid(pin) && !onTheGrid(q));
       if (!old(a, s.point) || !old(b, t.point)) continue;
       const points = onGrid(r.points, s, t, a, b, snapGrid);
@@ -489,7 +489,7 @@ export function buildGeometry(input: GeometryInput): Geometry {
     let line = stubs.get(port);
     if (!line) {
       const end = ends.get(port)!;
-      line = [end.point, portStub(end)];
+      line = [end.point, portStub(end, 10, obstacles)];
       stubs.set(port, line);
     }
     return line;

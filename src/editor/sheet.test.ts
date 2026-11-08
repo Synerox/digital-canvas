@@ -3,7 +3,7 @@ import { type DNode, type DPort, type Diagram, type Side, buildDiagram } from '.
 import { DEFAULT_RULES } from '../core/rules';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
-import { type LayoutResult, type MeasureText, approxMeasure, isMuxType, layoutDiagram, sizeNode } from '../layout/elk-layout';
+import { type LayoutResult, type MeasureText, approxMeasure, layoutDiagram, sizeNode } from '../layout/elk-layout';
 import { checkSheet } from './check';
 import { buildGeometry } from './geometry';
 import { polylineHitsRect } from './router';
@@ -110,9 +110,9 @@ describe('symbol library', () => {
             for (const p of n.ports) {
               const at = s.ports[p.id];
               expect(at.x % 10, `${what}: ${p.name}.x`).toBe(0);
-              // A MUX's select pin sits on its sloped bottom edge, between two grid lines.
-              if (p.side === 'SOUTH' && n.cellType && isMuxType(n.cellType)) expect(at.y > s.height - 10 && at.y <= s.height, `${what}: ${p.name}.y`).toBe(true);
-              else expect(at.y % 10, `${what}: ${p.name}.y`).toBe(0);
+              // A MUX's select pin too: it is on the grid line under its sloped bottom edge.
+              expect(at.y % 10, `${what}: ${p.name}.y`).toBe(0);
+              if (p.side === 'SOUTH') expect(at.y, `${what}: ${p.name} on the bottom edge`).toBe(s.height);
               checked++;
             }
             // Bottom pins (CLK, EN, ARST, S) are apart, inside the edge, and centred on it.
@@ -143,7 +143,7 @@ describe('symbol library', () => {
         const s = sizeNode(n, measure);
         for (const p of n.ports) {
           expect(s.ports[p.id].x % 10, `${n.cellType ?? n.kind}.${p.name}.x`).toBe(0);
-          if (n.cellType !== '$pmux' || p.side !== 'SOUTH') expect(s.ports[p.id].y % 10, `${n.cellType ?? n.kind}.${p.name}.y`).toBe(0);
+          expect(s.ports[p.id].y % 10, `${n.cellType ?? n.kind}.${p.name}.y`).toBe(0);
         }
         const xs = n.ports.filter((p) => p.side === 'SOUTH' || p.side === 'NORTH').map((p) => s.ports[p.id].x);
         for (const x of xs) expect(x > 0 && x < s.width).toBe(true);

@@ -511,6 +511,106 @@ describe('stored wires after edits', () => {
     }
   });
 
+  it('connects wires saved before the adder and MUX outlines changed to their pins now', () => {
+    // An adder was 40x40 (B at y+30, Y at y+20) and a 2:1 MUX 60x60 (select at (30, 55), Y at x+60): pins
+    // that moved since. Wires saved then end where those pins were; drawn by hand or not, they now end on them.
+    const old: Record<string, Point[]> = {
+      'u:1.out>u:4.A': [{ x: 40, y: 110 }, { x: 200, y: 110 }],
+      'u:2.out>u:4.B': [{ x: 40, y: 210 }, { x: 150, y: 210 }, { x: 150, y: 130 }, { x: 200, y: 130 }],
+      'u:4.Y>u:5.A': [{ x: 240, y: 120 }, { x: 400, y: 120 }],
+      'u:2.out>u:5.B': [{ x: 40, y: 210 }, { x: 380, y: 210 }, { x: 380, y: 140 }, { x: 400, y: 140 }],
+      'u:3.out>u:5.S': [{ x: 40, y: 310 }, { x: 430, y: 310 }, { x: 430, y: 155 }],
+      'u:5.Y>u:6.in': [{ x: 460, y: 130 }, { x: 600, y: 130 }],
+    };
+    for (const manual of [false, true]) {
+      const s = new Sheet([
+        ['u:1', 'input', 0, 100],
+        ['u:2', 'input', 0, 200],
+        ['u:3', 'input', 0, 300],
+        ['u:4', 'add', 200, 100],
+        ['u:5', 'mux', 400, 100],
+        ['u:6', 'output', 600, 120],
+      ]);
+      const ids = Object.keys(old).map((k) => {
+        const [from, to] = k.split('>');
+        return [s.wire(from, to), k] as const;
+      });
+      // As loaded from the file: the old routes, and nothing drawn before.
+      const routes = Object.fromEntries(ids.map(([id, k]) => [id, { points: old[k], ...(manual ? { manual: true } : {}) }]));
+      const g = buildGeometry({ netlist: s.d, pos: s.e.pos, routes, measure: approxMeasure });
+      const pins = new Map(g.layout.nodes.flatMap((n) => n.ports.map((p) => [p.id, { x: p.x, y: p.y }])));
+      const label = manual ? 'drawn by hand' : 'routed';
+      // The pins that moved did move (so the old routes cannot be used as they are).
+      expect(pins.get('u:4.B'), label).toEqual({ x: 200, y: 150 });
+      expect(pins.get('u:5.S'), label).toEqual({ x: 420, y: 160 });
+      expect(pins.get('u:5.Y'), label).toEqual({ x: 440, y: 130 });
+      for (const x of g.layout.edges) {
+        const what = `${label}: ${x.id}`;
+        expect(x.points[0], what).toEqual(pins.get(x.source.port));
+        expect(x.points[x.points.length - 1], what).toEqual(pins.get(x.target.port));
+        expect(orthogonal(x.points), what).toBe(true);
+        for (const p of x.points) expect([p.x % 10, p.y % 10], what).toEqual([0, 0]);
+      }
+      expect(crowded(g.layout), label).toEqual([]);
+      expect(crowdedOwn(g.layout), label).toEqual([]);
+      expect(touching(g.layout), label).toEqual([]);
+      // Wires whose pins did not move come back as they were saved; those drawn by hand stay drawn by hand.
+      const edge = (k: string) => g.layout.edges.find((x) => x.id === ids.find(([, kk]) => kk === k)![0])!;
+      for (const k of ['u:1.out>u:4.A', 'u:2.out>u:5.B']) expect(edge(k).points, `${label}: ${k}`).toEqual(old[k]);
+      if (manual) for (const [id] of ids) expect(g.routed[id]?.manual ?? routes[id].manual, `${label}: ${id}`).toBe(true);
+    }
+  });
+
+  it('wires a MUX select or a register clock between its symbol and one a grid step under it', () => {
+    for (const [sym, pin, h] of [
+      ['mux', 'S', 60],
+      ['dff', 'CLK', 40],
+    ] as const) {
+      for (const below of ['mux', 'add', 'and'] as const) {
+        const s = new Sheet([
+          ['u:1', sym, 300, 100],
+          ['u:2', below, 300, 100 + h + 10],
+          ['u:3', 'input', 0, 400],
+        ]);
+        const w = s.wire('u:3.out', `u:1.${pin}`);
+        const pts = s.points(w);
+        const label = `${sym} over ${below}`;
+        expect(pts[pts.length - 1], label).toEqual(s.pin(`u:1.${pin}`));
+        expect(crowded(s.layout!), label).toEqual([]);
+        expect(crowdedOwn(s.layout!), label).toEqual([]);
+      }
+    }
+  });
+
+  it('keeps two pins on a bottom edge over a symbol a grid step under it apart, whichever side their wires come from', () => {
+    // EN at (320,140) and CLK at (340,140) share the one free line half way across the gap (y = 145):
+    // EN's wire, routed first, must keep off the point where CLK's will turn there.
+    for (const below of ['and', 'add', 'mux', 'dff'] as const) {
+      for (const [ex, cx] of [
+        [500, 0],
+        [0, 500],
+        [500, 500],
+        [0, 0],
+      ]) {
+        const s = new Sheet([
+          ['u:1', 'dffe', 300, 100],
+          ['u:2', below, 300, 150],
+          ['u:3', 'input', ex, 300],
+          ['u:4', 'input', cx, 360],
+        ]);
+        expect(s.pin('u:1.EN')).toEqual({ x: 320, y: 140 });
+        expect(s.pin('u:1.CLK')).toEqual({ x: 340, y: 140 });
+        s.wire('u:3.out', 'u:1.EN');
+        s.wire('u:4.out', 'u:1.CLK');
+        const label = `${below}, EN from x=${ex}, CLK from x=${cx}`;
+        expect(touching(s.layout!), label).toEqual([]);
+        expect(crowded(s.layout!), label).toEqual([]);
+        s.refresh();
+        expect(touching(s.layout!), label).toEqual([]);
+      }
+    }
+  });
+
   it('routes a wire drawn by hand again when a symbol is moved, placed or pasted onto it', () => {
     const sheet = () => {
       const s = new Sheet([

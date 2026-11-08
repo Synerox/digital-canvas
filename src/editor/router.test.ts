@@ -166,7 +166,8 @@ describe('routeWire', () => {
   });
 
   it('enters a SOUTH port from below, even one inside its box', () => {
-    // A MUX select pin on the sloped bottom edge, 5px inside the bounding box.
+    // A pin 5px inside its symbol's box (as a MUX's select pin was, on its sloped bottom edge, before it moved onto
+    // the grid line under the MUX).
     const M = R(300, 100, 30, 60);
     const to: RouteEnd = { point: P(315, 155), side: 'SOUTH', rect: M };
     for (const y of [40, 130, 250]) {
@@ -307,8 +308,9 @@ describe('routeWire', () => {
   });
 
   it('enters a SOUTH pin over a symbol right under it without dipping onto that symbol', () => {
-    // A MUX's select pin on its sloped bottom edge, another MUX 10px under it (F12): the grid line the stub
-    // usually ends on is inside the lower MUX, and the wire went down to it along the MUX's outline and back up.
+    // A pin inside its symbol's box (a MUX's select pin on its sloped bottom edge, as it was), another MUX 10px under
+    // it (F12): the grid line the stub usually ends on is inside the lower MUX, and the wire went down to it along the
+    // MUX's outline and back up.
     const upper = R(328, 146, 60, 60);
     const lower = R(330, 216, 60, 60);
     const src = R(239, 588, 40, 40);
@@ -324,6 +326,32 @@ describe('routeWire', () => {
     // With room under the pin, the stub still ends on the grid.
     const roomy = routeWire(from, to, { obstacles: [upper, R(330, 236, 60, 60), src] });
     expect(roomy[roomy.length - 2]).toEqual(P(358, 220));
+  });
+
+  it('enters a pin on the bottom edge over a symbol one grid step under it between the two outlines', () => {
+    // A MUX's select pin is on the grid line under it (as a register's clock is): another symbol 10 px under it
+    // leaves no grid line for the stub to end on, nor room for the shortest stub. The wire comes in half way
+    // across the gap, not along the lower symbol's top edge.
+    const upper = R(330, 140, 40, 60);
+    const lower = R(330, 210, 40, 60);
+    const src = R(239, 588, 40, 40);
+    const from = east(src, 608);
+    const to: RouteEnd = { point: P(350, 200), side: 'SOUTH', rect: upper };
+    const pts = routeWire(from, to, { obstacles: [upper, lower, src] });
+    expectClean(pts, from, to);
+    expect(polylineCrowdsRect(pts, lower)).toBe(false);
+    expect(polylineHitsRect(pts.slice(0, -1), upper)).toBe(false);
+    expect(lastMove(pts)).toBe('N');
+    expect(pts[pts.length - 2]).toEqual(P(350, 205));
+    // The same sideways: a pin on the right edge with a symbol 10 px to its right.
+    const left = R(100, 100, 40, 60);
+    const right = R(150, 90, 40, 80);
+    const out: RouteEnd = { point: P(140, 130), side: 'EAST', rect: left };
+    const far = west(R(400, 300, 40, 40), 320);
+    const side = routeWire(out, far, { obstacles: [left, right, far.rect] });
+    expectClean(side, out, far);
+    expect(polylineCrowdsRect(side, right)).toBe(false);
+    expect(side[1]).toEqual(P(145, 130));
   });
 
   it('falls back to simpleRoute when the search budget is exhausted', () => {
