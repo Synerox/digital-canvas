@@ -16,7 +16,7 @@ function instanceName(view: IRDesign | undefined, doc: EditDoc, mode: ViewMode, 
 export function HierarchyTree() {
   const hierarchy = useStore((s) => s.hierarchy);
   const path = useStore((s) => s.path);
-  const openPath = useStore((s) => s.openPath);
+  const navigate = useStore((s) => s.navigate);
   const doc = useStore((s) => s.doc);
   const mode = useStore((s) => s.viewMode);
   const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
@@ -30,7 +30,7 @@ export function HierarchyTree() {
     const was = name !== n.instance ? `${n.instance} in the Verilog` : undefined;
     return (
       <li key={key}>
-        <button className={`tree-item ${key === current ? 'active' : ''}`} onClick={() => openPath(here)}>
+        <button className={`tree-item ${key === current ? 'active' : ''}`} onClick={() => navigate(here)}>
           {prefix.length === 0 ? (
             <b>{moduleTitle(n.module)}</b>
           ) : n.module.startsWith(`${prefix[prefix.length - 1].module}/`) ? (
@@ -100,7 +100,7 @@ export function ViewToggle() {
 
 export function Breadcrumb() {
   const path = useStore((s) => s.path);
-  const openPath = useStore((s) => s.openPath);
+  const navigate = useStore((s) => s.navigate);
   const doc = useStore((s) => s.doc);
   const mode = useStore((s) => s.viewMode);
   const view = useStore((s) => (s.viewMode === 'blocks' ? (s.blockDesign ?? s.design) : s.design));
@@ -118,7 +118,7 @@ export function Breadcrumb() {
       {path.map((p, i) => (
         <span key={i}>
           {i > 0 && <span className="sep">›</span>}
-          <button className={i === path.length - 1 ? 'current' : ''} onClick={() => openPath(path.slice(0, i + 1))}>
+          <button className={i === path.length - 1 ? 'current' : ''} onClick={() => navigate(path.slice(0, i + 1))}>
             {title(p, i)}
           </button>
         </span>
@@ -131,7 +131,7 @@ export function Breadcrumb() {
 export function Drawings() {
   const drawn = useStore((s) => s.doc.drawn);
   const path = useStore((s) => s.path);
-  const openPath = useStore((s) => s.openPath);
+  const navigate = useStore((s) => s.navigate);
   const newDrawing = useStore((s) => s.newDrawing);
   const current = path.length === 1 && path[0].drawn ? path[0].module : undefined;
   return (
@@ -142,7 +142,7 @@ export function Drawings() {
         <ul className="tree">
           {drawn.map((d) => (
             <li key={d}>
-              <button className={`tree-item ${d === current ? 'active' : ''}`} onClick={() => openPath([{ instance: d, module: d, drawn: true }])}>
+              <button className={`tree-item ${d === current ? 'active' : ''}`} onClick={() => navigate([{ instance: d, module: d, drawn: true }])}>
                 {d}
               </button>
             </li>

@@ -13,9 +13,10 @@
  */
 import type { DNode, DPort, NodeKind, Side } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
-import type { Point } from '../layout/elk-layout';
+import { GRID, type Point } from '../layout/elk-layout';
 import type { RuleId } from '../core/rules';
 import type { ThemeName } from '../render/theme';
+import { type ComponentDef, loadComponents } from './components';
 import { SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode } from './symbols';
 
 export interface Box {
@@ -60,6 +61,8 @@ export interface EditDoc {
   sheets: Record<string, SheetEdits>;
   /** Names of the modules drawn by hand, in the order they were made. */
   drawn: string[];
+  /** Components of the library defined in JSON (see editor/components); left out when there are none. */
+  components?: ComponentDef[];
 }
 
 export type ViewMode = 'blocks' | 'flat';
@@ -253,9 +256,12 @@ function userEdge(v: unknown): UserEdge | undefined {
 export function parseEdits(v: unknown): SheetEdits {
   const e = emptyEdits();
   if (!isObj(v)) return e;
+  // Symbols sit on the grid, so that their pins line up (work saved before that was kept had ELK's
+  // positions, anywhere): the wires stored with them are moved along when the sheet is drawn (see buildGeometry).
+  const snap = (v: number) => Math.round(v / GRID) * GRID;
   if (isObj(v.pos)) for (const [k, p] of Object.entries(v.pos)) {
     const q = point(p);
-    if (q) e.pos[k] = q;
+    if (q) e.pos[k] = { x: snap(q.x), y: snap(q.y) };
   }
   if (isObj(v.routes)) for (const [k, r] of Object.entries(v.routes)) {
     if (!isObj(r) || !Array.isArray(r.points)) continue;
@@ -296,6 +302,8 @@ export function parseSavedFile(text: string): SavedFile {
   if (isObj(d.sheets)) for (const [k, s] of Object.entries(d.sheets)) doc.sheets[k] = parseEdits(s);
   if (Array.isArray(d.drawn)) doc.drawn = [...new Set(d.drawn.filter(isStr))];
   for (const name of doc.drawn) doc.sheets[`d:${name}`] ??= emptyEdits();
+  const components = loadComponents(d.components);
+  if (components.length) doc.components = components;
   const rules = Array.isArray(v.rules) ? (v.rules.filter(isStr) as RuleId[]) : [];
   const path: PathEntry[] = Array.isArray(v.path)
     ? v.path
@@ -321,5 +329,5 @@ export function compactDoc(doc: EditDoc): EditDoc {
   for (const [k, e] of Object.entries(doc.sheets)) {
     if (k.startsWith('d:') ? doc.drawn.includes(k.slice(2)) : !isEmptyEdits(e)) sheets[k] = e;
   }
-  return { sheets, drawn: doc.drawn };
+  return { sheets, drawn: doc.drawn, ...(doc.components?.length ? { components: doc.components } : {}) };
 }

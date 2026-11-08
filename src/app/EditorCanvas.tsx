@@ -1,7 +1,9 @@
 /**
  * The drawing canvas: pan and zoom, select (click, Shift/Ctrl-click, box),
- * move symbols, draw wires from pin to pin (with bends), reshape wire
- * segments, and place symbols chosen in the library.
+ * move symbols, draw wires by hand (see editor/draw-wire: drag from a pin and
+ * the wire follows the pointer, corner by corner; or click a pin, click the
+ * corners, click the end), reshape wires (drag any leg or corner), and place
+ * symbols chosen in the library.
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Side } from '../core/diagram';
@@ -9,9 +11,10 @@ import { GRID, type LEdge, type LayoutResult, type Point, sizeNode } from '../la
 import { DiagramGraphic } from '../render/DiagramGraphic';
 import { THEMES } from '../render/theme';
 import type { WireEnd } from '../editor/sheet';
-import { orthogonalize } from '../editor/router';
+import { type Axis, type WireDraft, clickAt, draftPath, followMoves, legAt, legContaining, legMoves, moveCorner, moveLeg, startDraft, trace, undoCorner } from '../editor/draw-wire';
+import { polylineHitsRect, wiresMeet } from '../editor/router';
 import { symbolNode, newUserNode } from '../editor/symbols';
-import { drawnRoute, measureFor, useStore } from './store';
+import { measureFor, useStore } from './store';
 import { ui } from './ui-events';
 
 interface View {
@@ -26,8 +29,14 @@ type Mode =
   | { kind: 'press-node'; start: Point; cx: number; cy: number; ids: Set<string>; moved: boolean; clicked: string; additive: boolean; dx: number; dy: number }
   | { kind: 'press-empty'; start: Point; cx: number; cy: number; additive: boolean; moved: boolean }
   | { kind: 'press-port'; end: WireEnd; at: Point; side: Side; cx: number; cy: number }
-  | { kind: 'press-edge'; id: string; start: Point; cx: number; cy: number; seg: number; points: Point[]; moved: boolean; draft?: Point[]; shared: boolean }
-  | { kind: 'wire'; from: WireEnd; at: Point; side?: Side; bends: Point[]; dragging: boolean };
+  | { kind: 'press-edge'; id: string; cx: number; cy: number; grab?: Grab; points: Point[]; moved: boolean; drafts?: Record<string, Point[]> }
+  | { kind: 'wire'; from: WireEnd; side?: Side; startAxis: Axis; draft: WireDraft; dragging: boolean };
+
+/** What a press on a wire took hold of: one of its legs, or one of its corners. */
+export interface Grab {
+  kind: 'leg' | 'corner';
+  index: number;
+}
 
 const Graphic = memo(DiagramGraphic);
 
@@ -75,47 +84,81 @@ function nearestOnPolyline(points: Point[], p: Point): Point {
   return best;
 }
 
-/**
- * Whether segment `seg` of a wire runs along another wire of the same net. The
- * router lets branches share their trunk, and every wire keeps its own copy of
- * it: moving the stretch in one wire alone would leave the other copy behind,
- * a loop of doubled wire.
- */
-// Exported for the tests.
-// oxlint-disable-next-line react/only-export-components
-export function sharedSegment(edges: readonly LEdge[], id: string, seg: number): boolean {
-  const e = edges.find((x) => x.id === id);
-  const a = e?.points[seg];
-  const b = e?.points[seg + 1];
-  if (!e || !a || !b) return false;
-  const flat = Math.abs(a.y - b.y) < 0.5;
-  const along = (p: Point) => (flat ? p.x : p.y);
-  const across = (p: Point) => (flat ? p.y : p.x);
-  const lo = Math.min(along(a), along(b));
-  const hi = Math.max(along(a), along(b));
-  for (const o of edges) {
-    if (o.id === id || o.source.port !== e.source.port) continue;
-    for (let i = 1; i < o.points.length; i++) {
-      const p = o.points[i - 1];
-      const q = o.points[i];
-      if (Math.abs(across(p) - across(a)) >= 0.5 || Math.abs(across(q) - across(a)) >= 0.5) continue;
-      if (Math.min(hi, Math.max(along(p), along(q))) - Math.max(lo, Math.min(along(p), along(q))) > 0.5) return true;
-    }
-  }
-  return false;
+/** A point on a wire moved along its leg to the nearest grid line (within the leg): a branch starts on the grid. */
+function onGridAlong(points: readonly Point[], p: Point): Point {
+  const i = legContaining(points, p);
+  const leg = i === undefined ? undefined : legAt(points, i);
+  if (!leg) return p;
+  const along = Math.min(leg.hi, Math.max(leg.lo, snap(leg.axis === 'h' ? p.x : p.y)));
+  return leg.axis === 'h' ? { x: along, y: leg.at } : { x: leg.at, y: along };
 }
 
 /**
- * The dashed draft of a wire being drawn through `points` (pin or wire, bends,
- * pointer or target pin). With bends it has the shape connectEnds will store:
- * out of the start pin first, and into the target pin the way it faces. A wire
- * without bends is routed when it is made; until then a plain elbow shows where
- * it goes.
+ * The corner (an inner point) or leg of a wire nearest to p, within `tol`. Corners win when p is about
+ * as near one as a leg (a corner is on two legs).
  */
 // Exported for the tests.
 // oxlint-disable-next-line react/only-export-components
-export function draftRoute(points: Point[], startSide?: Side, endSide?: Side): Point[] {
-  return points.length > 2 ? drawnRoute(points, startSide, endSide) : orthogonalize(points);
+export function grabAt(points: readonly Point[], p: Point, tol: number): Grab | undefined {
+  let best: Grab | undefined;
+  let bd = Infinity;
+  for (let i = 1; i < points.length - 1; i++) {
+    const d = Math.hypot(points[i].x - p.x, points[i].y - p.y);
+    if (d <= tol * 1.25 && d < bd) {
+      bd = d;
+      best = { kind: 'corner', index: i };
+    }
+  }
+  if (best) return best;
+  for (let i = 0; i + 1 < points.length; i++) {
+    if (!legAt(points, i)) continue;
+    const q = nearestOnPolyline([points[i], points[i + 1]], p);
+    const d = Math.hypot(q.x - p.x, q.y - p.y);
+    if (d <= tol && d < bd) {
+      bd = d;
+      best = { kind: 'leg', index: i };
+    }
+  }
+  return best;
+}
+
+/** The cursor over a grabbed part of a wire: which way it moves. */
+function grabCursor(points: readonly Point[], g: Grab | undefined): string {
+  if (!g) return 'pointer';
+  if (g.kind === 'corner') return 'move';
+  return legAt(points, g.index)?.axis === 'h' ? 'ns-resize' : 'ew-resize';
+}
+
+/**
+ * A wire reshaped by dragging part `g` to p (on the grid), and the other wires of its net that ran along
+ * the moved legs, moved with them (a shared stretch stays shared). By wire ID; only wires that changed.
+ */
+// Exported for the tests.
+// oxlint-disable-next-line react/only-export-components
+export function reshape(edges: readonly LEdge[], id: string, points: Point[], g: Grab, p: Point): Record<string, Point[]> {
+  let next: Point[];
+  if (g.kind === 'corner') next = moveCorner(points, g.index, p);
+  else {
+    const leg = legAt(points, g.index);
+    if (!leg) return {};
+    next = moveLeg(points, g.index, leg.axis === 'h' ? p.y : p.x);
+  }
+  const out: Record<string, Point[]> = { [id]: next };
+  const moves = legMoves(points, next);
+  const net = edges.find((e) => e.id === id)?.source.port;
+  if (moves.length && net !== undefined)
+    for (const o of edges) {
+      if (o.id === id || o.source.port !== net) continue;
+      const f = followMoves(o.points, moves);
+      if (f !== o.points) out[o.id] = f;
+    }
+  return out;
+}
+
+/** Axis across the leg of a wire that point p is on: a branch leaves the wire that way. */
+function acrossAt(points: readonly Point[], p: Point): Axis {
+  const i = legContaining(points, p);
+  return i !== undefined && legAt(points, i)?.axis === 'h' ? 'v' : 'h';
 }
 
 function Ghost({ at }: { at: Point }) {
@@ -170,14 +213,22 @@ export function EditorCanvas() {
   const mode = useRef<Mode>({ kind: 'none' });
   const [pointer, setPointer] = useState<Point>();
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number }>();
-  const [wireDraft, setWireDraft] = useState<Point[]>();
+  /** Wires being drawn or reshaped, drawn dashed over the sheet. */
+  const [wireDrafts, setWireDrafts] = useState<Point[][]>();
+  /** The cursor over a wire: which way the part under the pointer would move. */
+  const [edgeCursor, setEdgeCursor] = useState<string>();
   const [hoverPort, setHoverPort] = useState<string>();
   const [size, setSize] = useState({ w: 2000, h: 2000 });
   // Shown in the cursor: what a press does now.
   const [gesture, setGesture] = useState<'none' | 'pan' | 'wire'>('none');
   const [spaceDown, setSpaceDown] = useState(false);
   /** Set while a fit waits for the layout of a newly opened sheet (`stale`: the layout of the sheet before). */
-  const fitAfter = useRef<{ stale?: LayoutResult } | undefined>({});
+  const fitAfter = useRef<{ stale?: LayoutResult; sheet?: string } | undefined>({});
+  /**
+   * The view each sheet was left in, since the files were opened: going back to a sheet (Ctrl+Z after
+   * opening a block, the breadcrumb) shows it as it was, where a sheet seen for the first time is fitted.
+   */
+  const views = useRef(new Map<string, View>());
   const hasLayout = layout !== undefined;
 
   const fit = useCallback(() => {
@@ -201,11 +252,15 @@ export function EditorCanvas() {
   useEffect(
     () =>
       useStore.subscribe((s, prev) => {
+        const otherFiles = s.files !== prev.files;
+        if (otherFiles) views.current.clear();
         if (s.sheet === prev.sheet) return;
         // A renamed drawing keeps its edits under the new key: the same sheet, so keep the view.
         const e = s.doc.sheets[s.sheet];
         if (e && e === prev.doc.sheets[prev.sheet]) return;
-        fitAfter.current = { stale: prev.layout };
+        // Not while the files are reread (the sheet is then none for a moment): the design may be another one.
+        if (prev.sheet && s.sheet && !otherFiles) views.current.set(prev.sheet, viewRef.current);
+        fitAfter.current = { stale: prev.layout, sheet: s.sheet };
       }),
     [],
   );
@@ -213,7 +268,9 @@ export function EditorCanvas() {
     const pending = fitAfter.current;
     if (!layout || !pending || layout === pending.stale) return;
     fitAfter.current = undefined;
-    fit();
+    const back = pending.sheet ? views.current.get(pending.sheet) : undefined;
+    if (back) setView(back);
+    else fit();
   }, [layout, fit]);
 
   useEffect(() => {
@@ -295,7 +352,7 @@ export function EditorCanvas() {
 
   const cancelWire = useCallback(() => {
     mode.current = { kind: 'none' };
-    setWireDraft(undefined);
+    setWireDrafts(undefined);
     setGesture('none');
   }, []);
 
@@ -317,7 +374,11 @@ export function EditorCanvas() {
     const id = m.from.port;
     const p = layout.nodes.flatMap((n) => n.ports).find((q) => q.id === id);
     if (!p) cancelWire();
-    else m.at = { x: p.x, y: p.y };
+    else if (p.x !== m.draft.points[0].x || p.y !== m.draft.points[0].y) {
+      // Its pin moved (an undo, say): start again from where it is now.
+      m.draft = startDraft({ x: p.x, y: p.y }, p.side);
+      setWireDrafts(undefined);
+    }
   }, [layout, cancelWire]);
 
   // Keys that belong to the canvas while a wire is being drawn or a symbol placed.
@@ -331,8 +392,12 @@ export function EditorCanvas() {
         if (ev.key === 'Escape') {
           cancelWire();
         } else if (ev.key === 'Backspace' || ev.key === 'Delete') {
-          if (m.bends.length) m.bends = m.bends.slice(0, -1);
-          else cancelWire();
+          // Take back the last corner; with none left, stop drawing.
+          const d = undoCorner(m.draft, m.startAxis);
+          if (d) {
+            m.draft = d;
+            setWireDrafts(undefined);
+          } else cancelWire();
         } else return;
         ev.preventDefault();
         ev.stopImmediatePropagation();
@@ -369,27 +434,81 @@ export function EditorCanvas() {
     if (hit.edge) {
       const e = store().layout?.edges.find((x) => x.id === hit.edge);
       if (e) {
-        const at = nearestOnPolyline(e.points, w);
+        const at = onGridAlong(e.points, nearestOnPolyline(e.points, w));
         return { end: { kind: 'wire', edge: e.id, at }, at };
       }
     }
     return undefined;
   };
 
-  const finishWire = (to: WireEnd) => {
-    const m = mode.current;
-    if (m.kind !== 'wire') return;
-    const ok = store().connectEnds(m.from, to, m.bends);
-    if (ok || !m.dragging) cancelWire();
+  /** Where the wire being drawn goes now: to the pin or wire under the pointer (`over`), or to the pointer. */
+  const draftTo = (m: Extract<Mode, { kind: 'wire' }>, w: Point, over?: { end: WireEnd; at: Point }): Point[] => {
+    const own = !!over && isStart(m, over.end);
+    if (over && !own) {
+      const pin = over.end.kind === 'port' ? portInfo(over.end.port) : undefined;
+      return draftPath(m.draft, over.at, pin?.port.side, pin?.node);
+    }
+    return draftPath(m.draft, { x: snap(w.x), y: snap(w.y) });
   };
 
-  /** Redraw the wire being drawn, to the pointer at `w`, or onto the pin `over` when it hovers one. */
-  const updateDraft = (w: Point, over?: string) => {
+  /** Finish the wire being drawn at the pin or wire `over`, as drawn. */
+  const finishWire = (over: { end: WireEnd; at: Point }, w: Point) => {
     const m = mode.current;
     if (m.kind !== 'wire') return;
-    const target = over && !(m.from.kind === 'port' && m.from.port === over) ? portInfo(over)?.port : undefined;
-    const startSide = m.from.kind === 'port' ? portInfo(m.from.port)?.port.side : undefined;
-    setWireDraft(draftRoute([m.at, ...m.bends, target ? { x: target.x, y: target.y } : { x: snap(w.x), y: snap(w.y) }], startSide, target?.side));
+    const path = draftTo(m, w, over);
+    // Dragged straight to the pin, with no corner made, through a symbol in the way: the sheet routes that
+    // wire around it (as the corners were left to the app anyway). Corners the user made are kept as drawn.
+    const free = m.draft.points.length === 1 && !runsThroughSymbol(path, m.from, over.end) && !meetsOtherNet(path, m.from, over.end);
+    const ok = store().connectEnds(m.from, over.end, m.draft.points.length > 1 || free ? path : undefined);
+    if (ok || !m.dragging) {
+      cancelWire();
+      return;
+    }
+    // Refused (say, two outputs): the wire goes on with clicks from where it was, and moving the pointer
+    // without a button held no longer fixes corners as a drag does.
+    m.dragging = false;
+    m.draft = { ...m.draft, turn: undefined, pivot: undefined };
+    updateDraft(w);
+  };
+
+  /** Whether a drawn wire from `a` to `b` runs through a symbol (but for its first and last leg at their pins). */
+  const runsThroughSymbol = (points: Point[], a: WireEnd, b: WireEnd) => {
+    const nodeOf = (e: WireEnd) => (e.kind === 'port' ? e.node : undefined);
+    return (store().layout?.nodes ?? []).some((n) => {
+      if (n.kind === 'text') return false;
+      let line = points;
+      if (n.id === nodeOf(a)) line = line.slice(1);
+      if (n.id === nodeOf(b)) line = line.slice(0, -1);
+      return line.length >= 2 && polylineHitsRect(line, { x: n.x + 1, y: n.y + 1, width: n.width - 2, height: n.height - 2 });
+    });
+  };
+
+  /** Whether a drawn wire from `a` to `b` runs onto a wire of another net, which would read as a connection. */
+  const meetsOtherNet = (points: Point[], a: WireEnd, b: WireEnd) => {
+    const edges = store().layout?.edges ?? [];
+    const netOf = (end: WireEnd) =>
+      end.kind === 'wire' ? edges.find((x) => x.id === end.edge)?.source.port : (edges.find((x) => x.target.port === end.port)?.source.port ?? end.port);
+    const nets = new Set([netOf(a), netOf(b)]);
+    return edges.some((x) => !nets.has(x.source.port) && wiresMeet(points, x.points));
+  };
+
+  /** Whether `end` is where the wire being drawn started: its own pin, or the wire it branches from. */
+  const isStart = (m: Extract<Mode, { kind: 'wire' }>, end: WireEnd) =>
+    (end.kind === 'port' && m.from.kind === 'port' && end.port === m.from.port) || (end.kind === 'wire' && m.from.kind === 'wire' && end.edge === m.from.edge);
+
+  /** Redraw the wire being drawn, to the pointer at `w`, or onto the pin or wire under it. */
+  const updateDraft = (w: Point, hit: Hit = {}) => {
+    const m = mode.current;
+    if (m.kind !== 'wire') return;
+    setWireDrafts([draftTo(m, w, endAt(hit, w))]);
+  };
+
+  /** Start drawing a wire at a pin or on a wire. */
+  const startWire = (from: WireEnd, at: Point, side: Side | undefined, axis: Axis, dragging: boolean, w: Point) => {
+    const draft = startDraft(at, side, axis);
+    mode.current = { kind: 'wire', from, side, startAxis: draft.axis, draft, dragging };
+    setGesture('wire');
+    updateDraft(w);
   };
 
   if (!layout) return null;
@@ -404,7 +523,7 @@ export function EditorCanvas() {
   const gridStep = view.k < 0.4 ? GRID * 5 : view.k < 0.8 ? GRID * 2 : GRID;
 
   const selectedNodes = layout.nodes.filter((n) => selection.has(n.id));
-  const cursor = spaceDown || gesture === 'pan' ? 'grab' : placing ? 'copy' : gesture === 'wire' ? 'crosshair' : 'default';
+  const cursor = spaceDown || gesture === 'pan' ? 'grab' : placing ? 'copy' : gesture === 'wire' ? 'crosshair' : (edgeCursor ?? 'default');
 
   return (
     <div
@@ -449,10 +568,11 @@ export function EditorCanvas() {
         const m = mode.current;
         if (m.kind === 'wire') {
           const end = endAt(hit, w);
-          if (end) finishWire(end.end);
+          if (end && !isStart(m, end.end)) finishWire(end, w);
           else {
-            m.bends = [...m.bends, { x: snap(w.x), y: snap(w.y) }];
-            updateDraft(w);
+            // A click fixes the wire up to here: the corner on the way, and this point.
+            m.draft = clickAt(m.draft, { x: snap(w.x), y: snap(w.y) });
+            updateDraft(w, hit);
           }
           return;
         }
@@ -486,36 +606,23 @@ export function EditorCanvas() {
           return;
         }
         if (hit.edge) {
+          const e = s.layout?.edges.find((x) => x.id === hit.edge);
+          if (ev.altKey && e) {
+            // Alt: a new wire branches off this one here.
+            const end = endAt(hit, w);
+            if (end) startWire(end.end, end.at, undefined, acrossAt(e.points, end.at), true, w);
+            return;
+          }
           if (additive) s.select([hit.edge], 'toggle');
           else s.select([hit.edge]);
-          const e = s.layout?.edges.find((x) => x.id === hit.edge);
-          let seg = -1;
-          if (e) {
-            // Only inner segments can be dragged: the first and last stay on their pins.
-            let bd = Infinity;
-            for (let i = 1; i < e.points.length - 2; i++) {
-              const a = e.points[i];
-              const b = e.points[i + 1];
-              const q = nearestOnPolyline([a, b], w);
-              const d = Math.hypot(q.x - w.x, q.y - w.y);
-              if (d < bd && d < 8 / view.k) {
-                bd = d;
-                seg = i;
-              }
-            }
-          }
-          // A trunk that branches share is not dragged: one wire would leave the others' copy behind.
-          const shared = !!e && seg >= 0 && sharedSegment(s.layout?.edges ?? [], e.id, seg);
           mode.current = {
             kind: 'press-edge',
             id: hit.edge,
-            start: w,
             cx: ev.clientX,
             cy: ev.clientY,
-            seg: shared ? -1 : seg,
+            grab: e ? grabAt(e.points, w, 8 / view.k) : undefined,
             points: e?.points ?? [],
             moved: false,
-            shared,
           };
           return;
         }
@@ -533,7 +640,14 @@ export function EditorCanvas() {
         if (m.kind === 'none' || m.kind === 'wire') {
           const hit = hitFrom(m.kind === 'wire' ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target);
           setHoverPort(hit.port?.port);
-          if (m.kind === 'wire') updateDraft(w, hit.port?.port);
+          if (m.kind === 'wire') {
+            // A drag draws the wire where the pointer goes (see trace); a click-drawn wire waits for clicks.
+            if (m.dragging) m.draft = trace(m.draft, { x: snap(w.x), y: snap(w.y) }, Math.max(1.5 * GRID, 12 / view.k));
+            updateDraft(w, hit);
+          } else {
+            const e = hit.edge ? s.layout?.edges.find((x) => x.id === hit.edge) : undefined;
+            setEdgeCursor(e ? grabCursor(e.points, grabAt(e.points, w, 8 / view.k)) : undefined);
+          }
           return;
         }
         const far = (cx: number, cy: number, d = 3) => Math.abs(ev.clientX - cx) + Math.abs(ev.clientY - cy) > d;
@@ -544,9 +658,9 @@ export function EditorCanvas() {
           case 'press-node': {
             if (!m.moved && !far(m.cx, m.cy)) return;
             m.moved = true;
-            const free = ev.altKey;
-            m.dx = free ? Math.round(w.x - m.start.x) : snap(w.x - m.start.x);
-            m.dy = free ? Math.round(w.y - m.start.y) : snap(w.y - m.start.y);
+            // Always by whole grid steps: symbols stay on the grid, so their pins line up.
+            m.dx = snap(w.x - m.start.x);
+            m.dy = snap(w.y - m.start.y);
             s.previewMove(m.ids, m.dx, m.dy);
             return;
           }
@@ -558,32 +672,15 @@ export function EditorCanvas() {
           }
           case 'press-port': {
             if (!far(m.cx, m.cy, 4)) return;
-            mode.current = { kind: 'wire', from: m.end, at: m.at, side: m.side, bends: [], dragging: true };
-            setGesture('wire');
-            updateDraft(w);
+            startWire(m.end, m.at, m.side, 'h', true, w);
             return;
           }
           case 'press-edge': {
-            if (m.shared && !m.moved && far(m.cx, m.cy)) {
-              m.moved = true;
-              s.setNotice('Several wires of this net run along this stretch. Drag a stretch that belongs to one wire, or move the symbols.');
-            }
-            if (m.seg < 0 || (!m.moved && !far(m.cx, m.cy))) return;
+            if (!m.grab || (!m.moved && !far(m.cx, m.cy))) return;
             m.moved = true;
-            const a = m.points[m.seg];
-            const b = m.points[m.seg + 1];
-            const pts = m.points.map((p) => ({ ...p }));
-            if (Math.abs(a.y - b.y) < 0.5) {
-              const y = ev.altKey ? w.y : snap(w.y);
-              pts[m.seg] = { x: a.x, y };
-              pts[m.seg + 1] = { x: b.x, y };
-            } else {
-              const x = ev.altKey ? w.x : snap(w.x);
-              pts[m.seg] = { x, y: a.y };
-              pts[m.seg + 1] = { x, y: b.y };
-            }
-            m.draft = pts;
-            setWireDraft(pts);
+            // The wire, and the wires of its net that share the moved stretch.
+            m.drafts = reshape(s.layout?.edges ?? [], m.id, m.points, m.grab, { x: snap(w.x), y: snap(w.y) });
+            setWireDrafts(Object.values(m.drafts));
             return;
           }
         }
@@ -625,25 +722,31 @@ export function EditorCanvas() {
             return;
           }
           case 'press-port':
-            // A click on a pin starts a wire; click more points for bends, then a pin to finish.
-            mode.current = { kind: 'wire', from: m.end, at: m.at, side: m.side, bends: [], dragging: false };
-            setGesture('wire');
-            updateDraft(w);
+            // A click on a pin starts a wire; click for corners, then click a pin or a wire to finish.
+            startWire(m.end, m.at, m.side, 'h', false, w);
             return;
           case 'press-edge':
             mode.current = { kind: 'none' };
-            if (m.moved && m.draft) s.setEdgeRoute(m.id, orthogonalize(m.draft));
-            setWireDraft(undefined);
+            if (m.moved && m.drafts) {
+              // A drag that ends where it began (or a wire that cannot move) changes nothing: no undo step, and
+              // the wire is not made one drawn by hand.
+              const was = new Map((s.layout?.edges ?? []).map((x) => [x.id, x.points]));
+              const same = (a: readonly Point[], b: readonly Point[] = []) => a.length === b.length && a.every((p, i) => p.x === b[i].x && p.y === b[i].y);
+              const changed = Object.entries(m.drafts).filter(([id, pts]) => !same(pts, was.get(id)));
+              if (changed.length) s.setEdgeRoutes(Object.fromEntries(changed));
+            }
+            setWireDrafts(undefined);
             return;
           case 'wire': {
             if (!m.dragging) return;
-            const end = endAt(hitFrom(document.elementFromPoint(ev.clientX, ev.clientY)), w);
-            if (end && !(end.end.kind === 'port' && m.from.kind === 'port' && end.end.port === m.from.port)) finishWire(end.end);
+            const hit = hitFrom(document.elementFromPoint(ev.clientX, ev.clientY));
+            const end = endAt(hit, w);
+            if (end && !isStart(m, end.end)) finishWire(end, w);
             else {
-              // Released on empty canvas: keep drawing with a bend there.
+              // Released on empty canvas: the wire is fixed up to here, and goes on with clicks.
               m.dragging = false;
-              if (!end) m.bends = [...m.bends, { x: snap(w.x), y: snap(w.y) }];
-              updateDraft(w);
+              if (!end) m.draft = clickAt({ ...m.draft, turn: undefined, pivot: undefined }, { x: snap(w.x), y: snap(w.y) });
+              updateDraft(w, hit);
             }
             return;
           }
@@ -716,16 +819,36 @@ export function EditorCanvas() {
               }),
             )}
           </g>
-          {wireDraft && (
+          {/* Corners of the selected wires: each can be dragged, and so can each leg. */}
+          {(wireDrafts ? [] : layout.edges.length > selection.size ? [...selection].map((id) => layout.edges.find((x) => x.id === id)) : layout.edges).map((e) =>
+            e && selection.has(e.id)
+              ? e.points.slice(1, -1).map((p, i) => (
+                  <rect
+                    key={`${e.id}:${i}`}
+                    x={p.x - 3 / view.k}
+                    y={p.y - 3 / view.k}
+                    width={6 / view.k}
+                    height={6 / view.k}
+                    fill={theme.background}
+                    stroke={theme.accent}
+                    strokeWidth={1 / view.k}
+                    pointerEvents="none"
+                  />
+                ))
+              : null,
+          )}
+          {wireDrafts?.map((d, i) => (
             <polyline
-              points={wireDraft.map((p) => `${p.x},${p.y}`).join(' ')}
+              key={i}
+              points={d.map((p) => `${p.x},${p.y}`).join(' ')}
               fill="none"
               stroke={theme.accent}
               strokeWidth={1.6}
               strokeDasharray="5 3"
+              strokeLinejoin="round"
               pointerEvents="none"
             />
-          )}
+          ))}
           {marquee && (
             <rect
               x={marquee.x}

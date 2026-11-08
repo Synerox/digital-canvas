@@ -120,6 +120,11 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .library-toggle.on { background: #fbe9e1; border-color: #f2c1ab; color: var(--accent); }
 .palette { width: 172px; flex: none; overflow: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 6px; }
 .palette h4 { margin: 8px 2px 4px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
+.palette h4.palette-head { display: flex; justify-content: space-between; align-items: baseline; }
+.palette h4.palette-head button { text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 11px; }
+.components-dialog code { font-size: 11px; background: var(--bg, #f3f3f3); padding: 0 3px; border-radius: 3px; }
+.prop textarea.json-input { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 11px; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; resize: vertical; }
+.prop textarea.json-input.invalid { border-color: #c92a2a; }
 .palette-search { width: 100%; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; }
 .palette-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .palette-item { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px; font-size: 11px; line-height: 1.15; min-width: 0; }

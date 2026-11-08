@@ -12,7 +12,8 @@
  * New wires keep off the slice names by split and join bars.
  */
 import type { DEdge, DNode, Diagram, Side } from '../core/diagram';
-import { FONT, type LEdge, type LNode, type LPort, type LayoutResult, type MeasureText, type Point, approxMeasure, sizeNode } from '../layout/elk-layout';
+import { FONT, GRID, type LEdge, type LNode, type LPort, type LayoutResult, type MeasureText, type Point, approxMeasure, sizeNode } from '../layout/elk-layout';
+import { onGrid } from '../layout/grid-align';
 import type { Box, RouteRec } from './doc';
 import { type Rect, type RouteEnd, adjustRoute, netJunctions, polylineCrowdsRect, portStub, routeWire, simpleRoute, wiresMeet } from './router';
 
@@ -407,6 +408,54 @@ export function buildGeometry(input: GeometryInput): Geometry {
     }
   const changedIds = new Set(changed.map((k) => k.id));
   let all: Keep[] | undefined;
+  // Stored routes whose ends are at most half a grid step off their pins (saved before symbols were kept on
+  // the grid, when ELK placed them anywhere, and moved to the nearest grid point when loaded): the same shape
+  // moved onto the grid. Checked like a new route, and stored, so they are moved once. A symbol the user
+  // moves goes whole grid steps, so the routes of its wires are not taken for these (adjustRoute stretches them).
+  const nudged = new Set<string>();
+  /** Wires drawn by hand moved onto the grid like that: stored, but kept as wires that did not move. */
+  const movedOnGrid = new Set<string>();
+  let stored = routes;
+  if (!fast) {
+    const close = (a: Point, b: Point) => Math.abs(a.x - b.x) <= GRID / 2 + 0.5 && Math.abs(a.y - b.y) <= GRID / 2 + 0.5;
+    const snapGrid = (v: number) => Math.round(v / GRID) * GRID;
+    const onTheGrid = (q: Point) => Math.abs(q.x - snapGrid(q.x)) < 0.01 && Math.abs(q.y - snapGrid(q.y)) < 0.01;
+    for (const e of netlist.edges) {
+      const r = routes[e.id];
+      const s = ends.get(e.source.port);
+      const t = ends.get(e.target.port);
+      if (!r || !s || !t || r.points.length < 2) continue;
+      const a = r.points[0];
+      const b = r.points[r.points.length - 1];
+      if ((near(a, s.point) && near(b, t.point)) || !close(a, s.point) || !close(b, t.point)) continue;
+      // Only routes of that time: an end off the grid while its pin is on it (a pin off the grid, such as a
+      // MUX's select, that moved a little is followed by adjustRoute as before).
+      const old = (q: Point, pin: Point) => near(q, pin) || (onTheGrid(pin) && !onTheGrid(q));
+      if (!old(a, s.point) || !old(b, t.point)) continue;
+      const points = onGrid(r.points, s, t, a, b, snapGrid);
+      if (!points) continue;
+      if (stored === routes) stored = { ...routes };
+      stored[e.id] = { ...r, points };
+      // A wire drawn by hand stays drawn by hand: moved by a few px with its symbols, it is kept like any other.
+      if (!r.manual) nudged.add(e.id);
+      else movedOnGrid.add(e.id);
+    }
+    // A wire drawn by hand is kept as it is moved, unchecked: unless it now runs onto a wire of another net
+    // (two legs a few px apart moved onto one grid line). Then it is stretched to its pins as before.
+    for (const id of movedOnGrid) {
+      const e = netlist.edges.find((x) => x.id === id)!;
+      const mine = stored[id].points;
+      const box = boundsOf(mine);
+      const meets = netlist.edges.some((o) => {
+        const q = o.id !== id && netOf(o) !== netOf(e) ? stored[o.id]?.points : undefined;
+        return !!q && !apart(box, boundsOf(q)) && wiresMeet(mine, q);
+      });
+      if (meets) {
+        stored[id] = routes[id];
+        movedOnGrid.delete(id);
+      }
+    }
+  }
   // Stored routes that still meet both of their pins, and whether each one is new here or moved along with
   // both of its symbols (pasted, or moved as a group): such a route may have landed on any symbol or wire.
   const fits = new Map<string, boolean>();
@@ -417,15 +466,16 @@ export function buildGeometry(input: GeometryInput): Geometry {
   for (const e of netlist.edges) {
     const s = ends.get(e.source.port);
     const t = ends.get(e.target.port);
-    const r = routes[e.id];
+    const r = stored[e.id];
     if (!s || !t || !r || !near(r.points[0], s.point) || !near(r.points[r.points.length - 1], t.point)) continue;
     const old = settledEdges?.get(e.id);
     // A wire drawn by hand is where the user put it, unless it came along with both of its symbols.
     const isFresh =
-      !fast &&
+      nudged.has(e.id) ||
+      (!fast &&
       (r.manual
         ? changedIds.has(e.source.node) && changedIds.has(e.target.node)
-        : (settledEdges && (!old || !samePoints(old, r.points))) || (!!input.moved?.has(e.source.node) && input.moved.has(e.target.node)));
+        : (settledEdges && (!old || !samePoints(old, r.points))) || (!!input.moved?.has(e.source.node) && input.moved.has(e.target.node))));
     fits.set(e.id, isFresh);
     keptPins.add(e.source.port);
     keptPins.add(e.target.port);
@@ -488,13 +538,14 @@ export function buildGeometry(input: GeometryInput): Geometry {
     const s = ends.get(e.source.port);
     const t = ends.get(e.target.port);
     if (!s || !t) continue;
-    const r = routes[e.id];
+    const r = stored[e.id];
     const isFresh = fits.get(e.id);
     if (r && isFresh !== undefined) {
       // Any other route can only have run into the symbols that changed.
       if (!(isFresh ? crowds(e, r.points, (all ??= nodes.map(keepOut)), keptPins) : crowds(e, r.points, changed, steadyPins))) {
         resolved.set(e.id, { points: r.points, label: r.label });
         if (isFresh) fresh.push(e);
+        if (nudged.has(e.id) || movedOnGrid.has(e.id)) routed[e.id] = r;
         continue;
       }
     } else if (r?.manual && r.points.length >= 2) {
@@ -526,6 +577,7 @@ export function buildGeometry(input: GeometryInput): Geometry {
       const b = boundsOf(points);
       if (!steady.some((o) => o.net !== netOf(e) && !apart(o.box, b) && wiresMeet(points, o.points))) continue;
       resolved.delete(e.id);
+      delete routed[e.id];
       todo.push(e);
     }
   }
@@ -719,10 +771,4 @@ export function buildGeometry(input: GeometryInput): Geometry {
         };
   if (fast && settled) beforeDrag.set(layout, settled);
   return { layout, routed };
-}
-
-/** Where a port's wire stub ends, for drawing a wire that is being made. */
-export function stubPoint(p: Point, side: Side, len = 10): Point {
-  const d = DIR[side];
-  return { x: p.x + d.x * len, y: p.y + d.y * len };
 }

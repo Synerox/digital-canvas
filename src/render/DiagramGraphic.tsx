@@ -590,7 +590,7 @@ function Edges({
       ))}
       {marks}
       {interactive && (
-        <g fill="none" stroke="transparent" strokeWidth={9} style={{ cursor: 'pointer' }}>
+        <g fill="none" stroke="transparent" strokeWidth={9}>
           {edges.map((e) => (
             <path key={e.id} d={pathOf(e.points)} data-edge-id={e.id} />
           ))}

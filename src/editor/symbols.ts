@@ -161,7 +161,7 @@ export const SYMBOL_BY_KEY: Record<SymKey, SymbolDef | undefined> = Object.fromE
 
 export const PARAM_LIMITS: Record<'width' | 'inputs' | 'shift' | 'parts', [number, number]> = {
   width: [1, 256],
-  inputs: [2, 8],
+  inputs: [2, 32],
   shift: [1, 16],
   parts: [2, 16],
 };
@@ -226,7 +226,13 @@ const OP_LABEL: Record<string, string> = {
   $adff: 'DFF',
 };
 
-const LETTERS = 'ABCDEFGH';
+/** Names of a gate's inputs: up to X (Y is its output). */
+const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWX';
+
+/** The name of a gate's input `k`: A, B… X, then I24, I25… (the export goes by their order). */
+export function gateInputName(k: number): string {
+  return k < LETTERS.length ? LETTERS[k] : `I${k}`;
+}
 
 /** Bits needed to number `n` choices (at least 1). */
 export function selectWidth(n: number): number {
@@ -374,7 +380,7 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
         case 'nor':
         case 'xnor': {
           const n = clampParam('inputs', p.inputs, 2);
-          const ins = Array.from({ length: n }, (_, k) => port(id, LETTERS[k], 'in', 'WEST', w));
+          const ins = Array.from({ length: n }, (_, k) => port(id, gateInputName(k), 'in', 'WEST', w));
           return cell([...ins, port(id, 'Y', 'out', 'EAST', w)]);
         }
         case 'not':
