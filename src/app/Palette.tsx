@@ -1,7 +1,7 @@
 /**
  * The symbol library: click a symbol, then click the canvas to place it
  * (Shift-click places more), or drag it onto the canvas. The components
- * defined in JSON (Components…) come first.
+ * defined in JSON (Components…) come first; double-clicking one edits it.
  */
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type LayoutResult, approxMeasure, sizeNode } from '../layout/elk-layout';
@@ -11,6 +11,7 @@ import { SYMBOLS, SYMBOL_BY_KEY, type SymKey, type SymParams, type SymbolGroup, 
 import { componentSymbol, isPart } from '../editor/components';
 import { ComponentsDialog } from './ComponentsDialog';
 import { moduleTitle, useStore } from './store';
+import { openSettings } from './settings';
 import { ui } from './ui-events';
 
 /** The same item of the library: the library's own symbols have no parameters given, components always some. */
@@ -75,14 +76,14 @@ export function Palette() {
   const match = (t: string) => !q || t.toLowerCase().includes(q);
   const modules = blockModules();
 
-  const item = (key: string, sym: SymKey, title: string, hint: string, params?: SymParams) => {
+  const item = (key: string, sym: SymKey, title: string, hint: string, params?: SymParams, component?: string) => {
     // A preset is the same symbol as the library's with other parameters: only one of them is on.
     const active = placing?.sym === sym && sameParams(placing.params, params);
     return (
       <button
         key={key}
         className={`palette-item ${active ? 'on' : ''}`}
-        title={`${hint}. Click, then click the canvas (Shift-click to place several), or drag it there.`}
+        title={`${hint}. Click, then click the canvas (Shift-click to place several), or drag it there.${component ? ' Double-click to edit it as JSON.' : ''}`}
         draggable
         onDragStart={(ev) => {
           ev.dataTransfer.setData('application/x-dc-symbol', sym);
@@ -90,6 +91,15 @@ export function Palette() {
           startPlacing({ sym, params });
         }}
         onClick={() => startPlacing(active ? undefined : { sym, params })}
+        onDoubleClick={
+          component
+            ? (ev) => {
+                // Its two clicks took it up and put it down again: nothing is being placed.
+                startPlacing(undefined);
+                openSettings({ component }, ev.clientX, ev.clientY);
+              }
+            : undefined
+        }
       >
         <Icon sym={sym} params={params} />
         <span>{title}</span>
@@ -120,7 +130,7 @@ export function Palette() {
             const hint = isPart(c)
               ? `${c.title ?? c.name}: a part with ${c.pins.length} pin${c.pins.length === 1 ? '' : 's'} (${c.pins.map((p) => p.name).join(', ')})`
               : `${c.title ?? c.name}: ${SYMBOL_BY_KEY[sym]?.title ?? sym} with ${Object.entries(params).map(([k, v]) => `${k} ${v}`).join(', ') || 'its defaults'}`;
-            return item(`component:${c.name}`, sym, c.title ?? c.name, hint, params);
+            return item(`component:${c.name}`, sym, c.title ?? c.name, hint, params, c.name);
           });
         return (
           <section>

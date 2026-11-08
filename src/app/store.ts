@@ -955,6 +955,9 @@ export function wireUpTo(points: readonly Point[], at: Point): Point[] {
   return i === undefined ? [] : points.slice(0, i + 1);
 }
 
+/** The editor's state and actions, for helpers that read it (see useStore.getState). */
+export type EditorState = State;
+
 export const useStore = create<State>((set, get) => {
   // ---------- helpers that need the store ----------
 

@@ -688,7 +688,7 @@ const HINTS: [string[], string][] = [
   [['Click'], 'Select; Shift or Ctrl adds to the selection'],
   [['Drag', 'empty'], 'Box select (to the right: inside; to the left: touching)'],
   [['↑ ↓ ← →'], 'Nudge the selection (Shift: 5 grid steps)'],
-  [['Double-click'], 'Open a block (' + MOD + '+Z goes back up); rename a pin, note or wire'],
+  [['Double-click'], 'Open a block (' + MOD + '+Z goes back up); edit a symbol, a part or a library component as JSON; rename a pin, note or wire'],
   [['Enter'], 'Rename the selection'],
   [['Delete'], 'Delete the selection'],
   [[MOD, 'C / X / V'], 'Copy, cut, paste'],

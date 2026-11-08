@@ -16,6 +16,7 @@ import { polylineHitsRect, wiresMeet } from '../editor/router';
 import { symbolNode, newUserNode } from '../editor/symbols';
 import { measureFor, useStore } from './store';
 import { ui } from './ui-events';
+import { doubleClickSettings, openSettings } from './settings';
 
 interface View {
   x: number;
@@ -762,7 +763,10 @@ export function EditorCanvas() {
         const s = store();
         if (hit.node) {
           const n = s.layout?.nodes.find((x) => x.id === hit.node);
+          const settings = doubleClickSettings(s, hit.node);
+          // A block opens; a symbol with settings, or a part's block, opens its JSON; the rest is renamed.
           if (n?.kind === 'instance' && n.moduleName && (s.doc.drawn.includes(n.moduleName) || s.viewDesign()?.modules[n.moduleName])) s.openNode(hit.node);
+          else if (settings) openSettings(settings, ev.clientX, ev.clientY);
           else ui.dispatchEvent(new CustomEvent('rename', { detail: hit.node }));
         } else if (hit.edge) {
           ui.dispatchEvent(new CustomEvent('rename', { detail: hit.edge }));

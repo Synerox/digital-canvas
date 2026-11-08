@@ -217,23 +217,43 @@ function pinText(p: ModulePort): string {
   return p.width === 1 ? p.name : `${p.name}[${p.width - 1}:0]`;
 }
 
+/** One component as JSON on one line: `{ "name": "and5", "base": "and", "inputs": 5 }`. */
+export function componentJson(d: ComponentDef): string {
+  const o: Record<string, unknown> = { name: d.name, ...(d.title ? { title: d.title } : {}) };
+  if (isPart(d)) {
+    for (const [key, dir] of [['inputs', 'input'], ['inouts', 'inout'], ['outputs', 'output']] as const) {
+      const pins = d.pins.filter((p) => p.dir === dir);
+      if (pins.length) o[key] = pins.map(pinText);
+    }
+  } else {
+    o.base = d.base;
+    Object.assign(o, d.params);
+  }
+  return oneLine(o);
+}
+
 /** The components as JSON the user can edit (and parseComponents reads back to the same). */
 export function componentsJson(defs: readonly ComponentDef[]): string {
   if (defs.length === 0) return '[]\n';
-  const one = (d: ComponentDef): string => {
-    const o: Record<string, unknown> = { name: d.name, ...(d.title ? { title: d.title } : {}) };
-    if (isPart(d)) {
-      for (const [key, dir] of [['inputs', 'input'], ['inouts', 'inout'], ['outputs', 'output']] as const) {
-        const pins = d.pins.filter((p) => p.dir === dir);
-        if (pins.length) o[key] = pins.map(pinText);
-      }
-    } else {
-      o.base = d.base;
-      Object.assign(o, d.params);
-    }
-    return `  ${oneLine(o)}`;
-  };
-  return `[\n${defs.map(one).join(',\n')}\n]\n`;
+  return `[\n${defs.map((d) => `  ${componentJson(d)}`).join(',\n')}\n]\n`;
+}
+
+/**
+ * Read the JSON of one component (see componentJson) in place of the component named `name`: the library
+ * with it changed, or what is wrong. `taken` says why a new part may not have a name (see parseComponents).
+ */
+export function editComponent(
+  defs: readonly ComponentDef[],
+  name: string,
+  text: string,
+  taken: (name: string) => string | undefined = () => undefined,
+): { defs: ComponentDef[]; error?: undefined } | { error: string; defs?: undefined } {
+  const r = parseComponents(text, taken);
+  if (!r.defs) return { error: r.error.replace(/^Component 1: /, '') };
+  if (r.defs.length !== 1) return { error: 'Write one component here, as { "name": …, … } (Components › Edit… changes the whole list).' };
+  const [d] = r.defs;
+  if (d.name !== name && defs.some((x) => x.name === d.name)) return { error: `Another component is named ${d.name}.` };
+  return { defs: defs.map((x) => (x.name === name ? d : x)) };
 }
 
 /** The components of a saved file: those that are right, as written there. */
@@ -300,6 +320,17 @@ export function symbolJson(sym: SymKey, params: SymParams): string {
   return oneLine(o);
 }
 
+/** What the JSON of a placed symbol may set, with the numbers each takes: `"inputs" 2–32, "width" 1–256`. */
+export function settingsHint(sym: SymKey): string {
+  return presetFields(sym)
+    .map((f) => {
+      if (f === 'value') return `"value" a Verilog number such as "4'd2"`;
+      const [lo, hi] = PARAM_LIMITS[f as keyof typeof PARAM_LIMITS];
+      return `"${f}" ${lo}–${f === 'width' && sym === 'decoder' ? 8 : hi}`;
+    })
+    .join(', ');
+}
+
 /**
  * Read the JSON of a placed symbol (see symbolJson): the parameters it sets, checked as a preset's
  * are. The symbol stays what it is: "sym" may be left out, but not changed.
@@ -315,7 +346,7 @@ export function parseSymbolJson(text: string, sym: SymKey): { params: SymParams;
   const { sym: s, ...rest } = v;
   const title = SYMBOL_BY_KEY[sym]?.title ?? sym;
   const own = Object.keys(rest).find((k) => k === 'name' || k === 'title' || k === 'base');
-  if (own) return { error: `"${own}" is not a setting of a placed symbol (its name is set above).` };
+  if (own) return { error: `"${own}" is not a setting of a placed symbol (Properties names it).` };
   if (s !== undefined && s !== sym) return { error: `This is ${/^[AEIOU]/.test(title) ? 'an' : 'a'} ${title}: "sym" stays "${sym}" (place another symbol to have another one).` };
   try {
     const d = componentOf({ ...rest, name: 'symbol', base: sym }, 0, () => undefined);

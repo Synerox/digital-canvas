@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   COMPONENTS_EXAMPLE,
+  componentJson,
   componentSymbol,
   componentsJson,
+  editComponent,
   freeComponentName,
   loadComponents,
   parseComponents,
   parseSymbolJson,
   partVerilog,
+  settingsHint,
   symbolJson,
 } from './components';
 import { newUserNode, symbolNode } from './symbols';
@@ -99,6 +102,35 @@ describe('components in JSON', () => {
     expect(parseSymbolJson('{ "inputs": 1 }', 'and').error).toBe('"inputs" is a whole number from 2 to 32.');
     expect(parseSymbolJson('[1]', 'and').error).toMatch(/Write the settings/);
     expect(parseSymbolJson('{ "inputs": 3, "title": "My AND" }', 'and').error).toMatch(/"title" is not a setting/);
+  });
+
+  it('edits one component of the library as JSON, in its place', () => {
+    const defs = parseComponents(COMPONENTS_EXAMPLE).defs!;
+    expect(componentJson(defs[0])).toBe('{ "name": "and5", "title": "AND (5 inputs)", "base": "and", "inputs": 5 }');
+    expect(componentJson(defs[2])).toBe('{ "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }');
+    // Each reads back to itself.
+    for (const d of defs) expect(editComponent(defs, d.name, componentJson(d)).defs).toEqual(defs);
+    const r = editComponent(defs, 'alu', '{ "name": "alu", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"] }');
+    expect(r.defs!.map((d) => d.name)).toEqual(['and5', 'mux4x8', 'alu', 'lut6']);
+    expect(r.defs![2].pins!.map((p) => p.name)).toEqual(['a', 'y']);
+    // Renamed in place; not to the name of another component, nor of a module.
+    expect(editComponent(defs, 'and5', '{ "name": "and6", "base": "and", "inputs": 6 }').defs!.map((d) => d.name)).toEqual(['and6', 'mux4x8', 'alu', 'lut6']);
+    expect(editComponent(defs, 'and5', '{ "name": "alu", "base": "and" }').error).toBe('Another component is named alu.');
+    expect(editComponent(defs, 'alu', '{ "name": "top", "inputs": 1 }', (n) => (n === 'top' ? 'a module of your Verilog is named top.' : undefined)).error).toBe(
+      'top: a module of your Verilog is named top.',
+    );
+    // One component, as it should be.
+    expect(editComponent(defs, 'alu', '').error).toMatch(/^Write one component here/);
+    expect(editComponent(defs, 'alu', '[{ "name": "a", "base": "and" }, { "name": "b", "base": "or" }]').error).toMatch(/^Write one component here/);
+    expect(editComponent(defs, 'alu', '{ "base": "and" }').error).toBe('"name" is a name of letters, digits and _ (such as "and5").');
+    expect(editComponent(defs, 'alu', '{ "name": "alu", "inputs": 2,').error).toMatch(/^Not valid JSON/);
+  });
+
+  it('says what the JSON of a symbol sets', () => {
+    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256');
+    expect(settingsHint('decoder')).toBe('"width" 1–8');
+    expect(settingsHint('const')).toBe('"value" a Verilog number such as "4\'d2"');
+    expect(settingsHint('shl')).toBe('"width" 1–256, "shift" 1–16');
   });
 
   it('finds a free name', () => {

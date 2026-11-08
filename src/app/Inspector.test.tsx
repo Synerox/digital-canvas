@@ -30,13 +30,13 @@ function inspect(node: Partial<LNode>): string {
 describe('Inspector', () => {
   it('lists each highlighted Verilog line once, in order, with runs as ranges', () => {
     const html = inspect({ kind: 'instance', label: 'result_valid', src: [src(46), src(31), src(33), src(31), src(35, 38), src(39), src(40, 48), src(46)] });
-    expect(html).toContain('Verilog lines 31, 33, 35–48 are highlighted in Source.');
-    expect(inspect({ src: [src(7), src(7)] })).toContain('Verilog line 7 is highlighted in Source.');
+    expect(html).toContain('From Verilog, lines 31, 33, 35–48 (highlighted in Source).');
+    expect(inspect({ src: [src(7), src(7)] })).toContain('From Verilog, line 7 (highlighted in Source).');
   });
 
   it('counts only lines of the open files, whatever range a damaged file gives', () => {
-    expect(inspect({ src: [src(55, 2e9)] })).toContain('Verilog lines 55–60 are highlighted in Source.');
-    expect(inspect({ src: [src(-5, 2)] })).toContain('Verilog lines 1–2 are highlighted in Source.');
+    expect(inspect({ src: [src(55, 2e9)] })).toContain('lines 55–60 (highlighted in Source)');
+    expect(inspect({ src: [src(-5, 2)] })).toContain('lines 1–2 (highlighted in Source)');
     expect(inspect({ src: [src(1, 1e9, 'gone.v')] })).not.toContain('highlighted');
   });
 
@@ -44,7 +44,7 @@ describe('Inspector', () => {
     const html = inspect({ kind: 'const', label: "4'd0" });
     expect(html).toContain('Constant');
     expect(html).not.toContain('<input');
-    expect(html).toContain('You can move or delete it here.');
+    expect(html).toContain('You can move or delete it here."');
     expect(inspect({ kind: 'input', label: 'bid' })).toContain('<input');
   });
 
