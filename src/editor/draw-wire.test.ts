@@ -69,6 +69,10 @@ describe('reshaping a wire', () => {
     expect(moveLeg(z, 2, 230)).toEqual(pts(100, 100, 150, 100, 150, 230, 290, 230, 290, 200, 300, 200));
     // A straight wire gets a stub at each end.
     expect(moveLeg(pts(0, 0, 100, 0), 0, 30)).toEqual(pts(0, 0, 10, 0, 10, 30, 90, 30, 90, 0, 100, 0));
+    // One too short for a stub at each end and a stretch between them stays.
+    expect(moveLeg(pts(0, 0, 20, 0), 0, 20)).toEqual(pts(0, 0, 20, 0));
+    expect(moveLeg(pts(0, 0, 10, 0), 0, 20)).toEqual(pts(0, 0, 10, 0));
+    expect(moveLeg(pts(0, 0, 30, 0), 0, 20)).toEqual(pts(0, 0, 10, 0, 10, 20, 20, 20, 20, 0, 30, 0));
   });
 
   it('moves a corner anywhere', () => {

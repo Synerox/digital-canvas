@@ -59,6 +59,8 @@ export function Palette() {
   const components = useStore((s) => s.doc.components);
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState(false);
+  // The same parameters each render, so that the icons (memoized by them) are not laid out again.
+  const placed = useMemo(() => new Map((components ?? []).map((c) => [c.name, componentSymbol(c)])), [components]);
   const search = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -113,7 +115,7 @@ export function Palette() {
         const list = (components ?? [])
           .filter((c) => match(c.name) || match(c.title ?? '') || (!isPart(c) && match(c.base!)))
           .map((c) => {
-            const { sym, params } = componentSymbol(c);
+            const { sym, params } = placed.get(c.name)!;
             const hint = isPart(c)
               ? `${c.title ?? c.name}: a part with ${c.pins.length} pin${c.pins.length === 1 ? '' : 's'} (${c.pins.map((p) => p.name).join(', ')})`
               : `${c.title ?? c.name}: ${SYMBOL_BY_KEY[sym]?.title ?? sym} with ${Object.entries(params).map(([k, v]) => `${k} ${v}`).join(', ') || 'its defaults'}`;

@@ -64,7 +64,14 @@ export function alignToGrid(layout: LayoutResult, grid: number): LayoutResult {
   const snap = (v: number) => Math.round(v / grid) * grid;
   const nodes = layout.nodes;
   const portAt = new Map<string, PortAt>();
-  nodes.forEach((n, i) => n.ports.forEach((p) => portAt.set(p.id, { node: i, dx: clean(p.x - n.x), dy: clean(p.y - n.y), side: p.side })));
+  /** Where ELK put each pin. */
+  const elkPin = new Map<string, Point>();
+  nodes.forEach((n, i) =>
+    n.ports.forEach((p) => {
+      portAt.set(p.id, { node: i, dx: clean(p.x - n.x), dy: clean(p.y - n.y), side: p.side });
+      elkPin.set(p.id, { x: p.x, y: p.y });
+    }),
+  );
 
   const xs = nodes.map((n) => snap(n.x));
   const ys = placeRows(layout, portAt, xs, grid);
@@ -100,8 +107,8 @@ export function alignToGrid(layout: LayoutResult, grid: number): LayoutResult {
   for (const e of layout.edges) {
     const s = endOf(e.source.port);
     const t = endOf(e.target.port);
-    const os = portPoint(layout, e.source.port);
-    const ot = portPoint(layout, e.target.port);
+    const os = elkPin.get(e.source.port);
+    const ot = elkPin.get(e.target.port);
     const points = s && t && os && ot ? onGrid(e.points, s, t, os, ot, snap) : undefined;
     if (
       !points ||
@@ -151,9 +158,27 @@ export function alignToGrid(layout: LayoutResult, grid: number): LayoutResult {
   return { ...layout, nodes: moved, edges, width: Math.max(48, Math.ceil(x1 + 24)), height: Math.max(48, Math.ceil(y1 + 24)) };
 }
 
-function portPoint(layout: LayoutResult, id: string): Point | undefined {
-  for (const n of layout.nodes) for (const p of n.ports) if (p.id === id) return { x: p.x, y: p.y };
-  return undefined;
+/** Width of the columns symbols are filed under, so that what is near a symbol is found without looking at all of them. */
+const COLUMN = 200;
+
+/** The symbols by column: those whose span (`xs`, widened by `pad`) reaches into it. */
+function columns(nodes: readonly LNode[], xs: readonly number[], pad: number): Map<number, number[]> {
+  const cols = new Map<number, number[]>();
+  nodes.forEach((n, i) => {
+    for (let c = Math.floor((xs[i] - pad) / COLUMN); c <= Math.floor((xs[i] + n.width + pad) / COLUMN); c++) {
+      const list = cols.get(c);
+      if (list) list.push(i);
+      else cols.set(c, [i]);
+    }
+  });
+  return cols;
+}
+
+/** The symbols filed under the columns from x `lo` to `hi` (each once). */
+function near(cols: ReadonlyMap<number, number[]>, lo: number, hi: number): Set<number> {
+  const out = new Set<number>();
+  for (let c = Math.floor(lo / COLUMN); c <= Math.floor(hi / COLUMN); c++) for (const i of cols.get(c) ?? []) out.add(i);
+  return out;
 }
 
 /**
@@ -187,9 +212,11 @@ function placeRows(layout: LayoutResult, portAt: ReadonlyMap<string, PortAt>, xs
     gap: number;
   }
   const bounds: Bound[][] = nodes.map(() => []);
+  const cols = columns(nodes, xs, grid);
   for (let i = 0; i < nodes.length; i++) {
     const a = nodes[i];
-    for (let j = i + 1; j < nodes.length; j++) {
+    for (const j of near(cols, xs[i] - grid, xs[i] + a.width + grid)) {
+      if (j <= i) continue;
       const b = nodes[j];
       if (!(xs[i] < xs[j] + b.width + grid && xs[j] < xs[i] + a.width + grid)) continue;
       if (a.y + a.height <= b.y + 1e-6) {
@@ -218,12 +245,13 @@ function placeRows(layout: LayoutResult, portAt: ReadonlyMap<string, PortAt>, xs
       if (Math.abs(p.y - q.y) > 1e-6) continue;
       const lo = Math.min(p.x, q.x);
       const hi = Math.max(p.x, q.x);
-      nodes.forEach((n, i) => {
-        if (ends.has(i) || hi <= n.x || lo >= n.x + n.width) return;
+      for (const i of near(cols, lo, hi)) {
+        const n = nodes[i];
+        if (ends.has(i) || hi <= n.x || lo >= n.x + n.width) continue;
         // As far as ELK kept it, up to a grid step.
         const room = Math.min(grid, Math.max(0, n.y - p.y, p.y - n.y - n.height));
         passing[i].push({ y: snap(p.y), room });
-      });
+      }
     }
   }
 

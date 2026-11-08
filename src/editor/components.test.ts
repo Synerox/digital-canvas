@@ -97,5 +97,6 @@ describe('components in JSON', () => {
     expect(freeComponentName(defs, 'and3')).toBe('and3');
     expect(freeComponentName(defs, 'and5')).toBe('and5_2');
     expect(freeComponentName(defs, 'x', (n) => (n === 'x' ? 'taken' : undefined))).toBe('x_2');
+    expect(freeComponentName(defs, 'not')).toBe('not_2');
   });
 });

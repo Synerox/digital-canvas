@@ -408,13 +408,14 @@ export function buildGeometry(input: GeometryInput): Geometry {
     }
   const changedIds = new Set(changed.map((k) => k.id));
   let all: Keep[] | undefined;
-  // Stored routes whose ends are less than a grid step off their pins (saved before symbols were kept on the
-  // grid, when ELK placed them anywhere): the same shape moved onto the grid. Checked like a new route, and
-  // stored, so they are moved once.
+  // Stored routes whose ends are at most half a grid step off their pins (saved before symbols were kept on
+  // the grid, when ELK placed them anywhere, and moved to the nearest grid point when loaded): the same shape
+  // moved onto the grid. Checked like a new route, and stored, so they are moved once. A symbol the user
+  // moves goes whole grid steps, so the routes of its wires are not taken for these (adjustRoute stretches them).
   const nudged = new Set<string>();
   let stored = routes;
   if (!fast) {
-    const close = (a: Point, b: Point) => Math.abs(a.x - b.x) <= GRID + 0.5 && Math.abs(a.y - b.y) <= GRID + 0.5;
+    const close = (a: Point, b: Point) => Math.abs(a.x - b.x) <= GRID / 2 + 0.5 && Math.abs(a.y - b.y) <= GRID / 2 + 0.5;
     const snapGrid = (v: number) => Math.round(v / GRID) * GRID;
     for (const e of netlist.edges) {
       const r = routes[e.id];

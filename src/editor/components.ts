@@ -317,7 +317,8 @@ export function parseSymbolJson(text: string, sym: SymKey): { params: SymParams;
 /** A name for a new component: `stem`, or stem_2, stem_3… when one has it. */
 export function freeComponentName(defs: readonly ComponentDef[] | undefined, stem: string, taken: (name: string) => string | undefined = () => undefined): string {
   const used = new Set((defs ?? []).map((d) => d.name));
-  const ok = (n: string) => !used.has(n) && !taken(n);
+  // Not a Verilog keyword either (a 1-bit NOT would otherwise be named `not`).
+  const ok = (n: string) => NAME.test(n) && verilogIdent(n) === n && !used.has(n) && !taken(n);
   if (ok(stem)) return stem;
   for (let i = 2; ; i++) if (ok(`${stem}_${i}`)) return `${stem}_${i}`;
 }

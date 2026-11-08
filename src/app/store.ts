@@ -59,6 +59,7 @@ import {
 } from '../editor/sheet';
 import { type InterfaceOf, type ModulePort, type SymKey, type SymParams, type UserNode, clampParam, newUserNode, symbolNode } from '../editor/symbols';
 import { orthogonalize } from '../editor/router';
+import { legContaining } from '../editor/draw-wire';
 import { type SheetIssues, checkSheet } from '../editor/check';
 import { verilogIdent } from '../editor/verilog-export';
 import { type ComponentDef, isPart, partInterface, partNamed } from '../editor/components';
@@ -80,6 +81,8 @@ export const FLAT_CELL_LIMIT = 250;
 
 /** How many edits Undo can go back. */
 const HISTORY = 200;
+/** At most this many of the steps in the history only went to another sheet (see HistoryEntry.nav). */
+const NAV_STEPS = 50;
 
 export const AUTOSAVE_KEY = 'digital-canvas:work:v1';
 
@@ -947,15 +950,8 @@ export function planOpen(open: Record<string, string>, putAside: PutAside, picke
  * its net a new wire that starts or ends there shares.
  */
 export function wireUpTo(points: readonly Point[], at: Point): Point[] {
-  const out: Point[] = [points[0]];
-  for (let i = 1; i < points.length; i++) {
-    const p = points[i - 1];
-    const q = points[i];
-    const on = Math.min(p.x, q.x) - 1 <= at.x && at.x <= Math.max(p.x, q.x) + 1 && Math.min(p.y, q.y) - 1 <= at.y && at.y <= Math.max(p.y, q.y) + 1;
-    if (on) return out;
-    out.push(q);
-  }
-  return out;
+  const i = legContaining(points, at);
+  return points.slice(0, i === undefined ? points.length : i + 1);
 }
 
 export const useStore = create<State>((set, get) => {
@@ -1002,7 +998,10 @@ export const useStore = create<State>((set, get) => {
   const navStep = (to?: PathEntry[]) => {
     const s = get();
     if (!s.sheet || (to && samePath(to, s.path))) return;
-    set({ past: [...s.past.slice(-(HISTORY - 1)), { ...here(), nav: true }] });
+    const past = [...s.past, { ...here(), nav: true }];
+    // Browsing must not push the edits out of the history: past NAV_STEPS of them, the oldest goes.
+    if (past.filter((h) => h.nav).length > NAV_STEPS) past.splice(past.findIndex((h) => h.nav), 1);
+    set({ past: past.slice(-HISTORY) });
   };
 
   /** Whether `entry` is where the user is now: the same sheet, reached the same way. */
@@ -1313,7 +1312,7 @@ export const useStore = create<State>((set, get) => {
    */
   const pushFilesStep = (doc: EditDoc, putAside = get().putAside) => {
     const s = get();
-    if (Object.keys(s.files).length === 0 && s.past.length === 0 && doc === s.doc && Object.keys(putAside).length === 0) return;
+    if (Object.keys(s.files).length === 0 && s.past.every((h) => h.nav) && doc === s.doc && Object.keys(putAside).length === 0) return;
     set({ past: [...s.past.slice(-(HISTORY - 1)), hereWithFiles()], future: [], doc, putAside, dirty: true });
   };
 

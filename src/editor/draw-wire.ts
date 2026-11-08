@@ -171,6 +171,17 @@ export function legAt(points: readonly Point[], i: number): LegAt | undefined {
   return axis === 'h' ? { axis, at: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) } : { axis, at: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) };
 }
 
+/** The first leg of a wire that p is on (within `tol` px), by its index. */
+export function legContaining(points: readonly Point[], p: Point, tol = 1): number | undefined {
+  for (let i = 0; i + 1 < points.length; i++) {
+    const leg = legAt(points, i);
+    if (!leg) continue;
+    const [along, across] = leg.axis === 'h' ? [p.x, p.y] : [p.y, p.x];
+    if (Math.abs(across - leg.at) <= tol && along >= leg.lo - tol && along <= leg.hi + tol) return i;
+  }
+  return undefined;
+}
+
 /** The point `k` px from p towards q (along an axis-parallel leg). */
 function toward(p: Point, q: Point, k: number): Point {
   return { x: p.x + Math.sign(q.x - p.x) * k, y: p.y + Math.sign(q.y - p.y) * k };
@@ -187,6 +198,9 @@ export function moveLeg(points: readonly Point[], i: number, at: number, stub = 
   const set = (p: Point) => (leg.axis === 'h' ? { x: p.x, y: at } : { x: at, y: p.y });
   const n = points.length;
   const k = Math.min(stub, leg.hi - leg.lo);
+  // A straight wire from pin to pin moves on a stub at each end: one too short to leave room for both
+  // and a stretch between them (two symbols close together) stays as it is.
+  if (n === 2 && leg.hi - leg.lo - 2 * k < stub) return [...points];
   const out: Point[] = [];
   for (let j = 0; j < n; j++) {
     const p = points[j];

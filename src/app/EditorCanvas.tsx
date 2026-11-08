@@ -11,7 +11,7 @@ import { GRID, type LEdge, type LayoutResult, type Point, sizeNode } from '../la
 import { DiagramGraphic } from '../render/DiagramGraphic';
 import { THEMES } from '../render/theme';
 import type { WireEnd } from '../editor/sheet';
-import { type Axis, type WireDraft, clickAt, draftPath, followMoves, legAt, legMoves, moveCorner, moveLeg, startDraft, trace, undoCorner } from '../editor/draw-wire';
+import { type Axis, type WireDraft, clickAt, draftPath, followMoves, legAt, legContaining, legMoves, moveCorner, moveLeg, startDraft, trace, undoCorner } from '../editor/draw-wire';
 import { symbolNode, newUserNode } from '../editor/symbols';
 import { measureFor, useStore } from './store';
 import { ui } from './ui-events';
@@ -85,17 +85,11 @@ function nearestOnPolyline(points: Point[], p: Point): Point {
 
 /** A point on a wire moved along its leg to the nearest grid line (within the leg): a branch starts on the grid. */
 function onGridAlong(points: readonly Point[], p: Point): Point {
-  for (let i = 0; i + 1 < points.length; i++) {
-    const a = points[i];
-    const b = points[i + 1];
-    const lo = (u: number, v: number) => Math.min(u, v);
-    const hi = (u: number, v: number) => Math.max(u, v);
-    if (Math.abs(a.y - b.y) < 0.5 && Math.abs(p.y - a.y) < 0.5 && p.x >= lo(a.x, b.x) - 0.5 && p.x <= hi(a.x, b.x) + 0.5)
-      return { x: Math.min(hi(a.x, b.x), Math.max(lo(a.x, b.x), snap(p.x))), y: a.y };
-    if (Math.abs(a.x - b.x) < 0.5 && Math.abs(p.x - a.x) < 0.5 && p.y >= lo(a.y, b.y) - 0.5 && p.y <= hi(a.y, b.y) + 0.5)
-      return { x: a.x, y: Math.min(hi(a.y, b.y), Math.max(lo(a.y, b.y), snap(p.y))) };
-  }
-  return p;
+  const i = legContaining(points, p);
+  const leg = i === undefined ? undefined : legAt(points, i);
+  if (!leg) return p;
+  const along = Math.min(leg.hi, Math.max(leg.lo, snap(leg.axis === 'h' ? p.x : p.y)));
+  return leg.axis === 'h' ? { x: along, y: leg.at } : { x: leg.at, y: along };
 }
 
 /**
@@ -162,13 +156,8 @@ export function reshape(edges: readonly LEdge[], id: string, points: Point[], g:
 
 /** Axis across the leg of a wire that point p is on: a branch leaves the wire that way. */
 function acrossAt(points: readonly Point[], p: Point): Axis {
-  for (let i = 0; i + 1 < points.length; i++) {
-    const a = points[i];
-    const b = points[i + 1];
-    if (Math.abs(a.y - b.y) < 0.5 && Math.abs(p.y - a.y) < 1 && p.x >= Math.min(a.x, b.x) - 1 && p.x <= Math.max(a.x, b.x) + 1) return 'v';
-    if (Math.abs(a.x - b.x) < 0.5 && Math.abs(p.x - a.x) < 1 && p.y >= Math.min(a.y, b.y) - 1 && p.y <= Math.max(a.y, b.y) + 1) return 'h';
-  }
-  return 'h';
+  const i = legContaining(points, p);
+  return i !== undefined && legAt(points, i)?.axis === 'h' ? 'v' : 'h';
 }
 
 function Ghost({ at }: { at: Point }) {
@@ -452,7 +441,7 @@ export function EditorCanvas() {
 
   /** Where the wire being drawn goes now: to the pin or wire under the pointer (`over`), or to the pointer. */
   const draftTo = (m: Extract<Mode, { kind: 'wire' }>, w: Point, over?: { end: WireEnd; at: Point }): Point[] => {
-    const own = over?.end.kind === 'port' && m.from.kind === 'port' && over.end.port === m.from.port;
+    const own = !!over && isStart(m, over.end);
     if (over && !own) {
       const side = over.end.kind === 'port' ? portInfo(over.end.port)?.port.side : undefined;
       return draftPath(m.draft, over.at, side);
@@ -465,8 +454,20 @@ export function EditorCanvas() {
     const m = mode.current;
     if (m.kind !== 'wire') return;
     const ok = store().connectEnds(m.from, over.end, draftTo(m, w, over));
-    if (ok || !m.dragging) cancelWire();
+    if (ok || !m.dragging) {
+      cancelWire();
+      return;
+    }
+    // Refused (say, two outputs): the wire goes on with clicks from where it was, and moving the pointer
+    // without a button held no longer fixes corners as a drag does.
+    m.dragging = false;
+    m.draft = { ...m.draft, turn: undefined, pivot: undefined };
+    updateDraft(w);
   };
+
+  /** Whether `end` is where the wire being drawn started: its own pin, or the wire it branches from. */
+  const isStart = (m: Extract<Mode, { kind: 'wire' }>, end: WireEnd) =>
+    (end.kind === 'port' && m.from.kind === 'port' && end.port === m.from.port) || (end.kind === 'wire' && m.from.kind === 'wire' && end.edge === m.from.edge);
 
   /** Redraw the wire being drawn, to the pointer at `w`, or onto the pin or wire under it. */
   const updateDraft = (w: Point, hit: Hit = {}) => {
@@ -540,7 +541,7 @@ export function EditorCanvas() {
         const m = mode.current;
         if (m.kind === 'wire') {
           const end = endAt(hit, w);
-          if (end && !(end.end.kind === 'port' && m.from.kind === 'port' && end.end.port === m.from.port)) finishWire(end, w);
+          if (end && !isStart(m, end.end)) finishWire(end, w);
           else {
             // A click fixes the wire up to here: the corner on the way, and this point.
             m.draft = clickAt(m.draft, { x: snap(w.x), y: snap(w.y) });
@@ -706,7 +707,7 @@ export function EditorCanvas() {
             if (!m.dragging) return;
             const hit = hitFrom(document.elementFromPoint(ev.clientX, ev.clientY));
             const end = endAt(hit, w);
-            if (end && !(end.end.kind === 'port' && m.from.kind === 'port' && end.end.port === m.from.port)) finishWire(end, w);
+            if (end && !isStart(m, end.end)) finishWire(end, w);
             else {
               // Released on empty canvas: the wire is fixed up to here, and goes on with clicks.
               m.dragging = false;

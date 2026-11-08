@@ -10,7 +10,13 @@ import { MOD, useEscape } from './Dialogs';
 export function ComponentsDialog({ onClose }: { onClose(): void }) {
   const defs = useStore((s) => s.doc.components);
   const doc = useStore((s) => s.doc);
-  const taken = useStore((s) => s.componentNameTaken);
+  const nameTaken = useStore((s) => s.componentNameTaken);
+  // A part the library has already keeps its name, also once a drawing or Verilog module has it (that module
+  // then takes its place): only new parts must not take a module's name.
+  const taken = useMemo(() => {
+    const had = new Set((defs ?? []).filter(isPart).map((d) => d.name));
+    return (name: string) => (had.has(name) ? undefined : nameTaken(name));
+  }, [defs, nameTaken]);
   const setComponents = useStore((s) => s.setComponents);
   const [text, setText] = useState(() => (defs?.length ? componentsJson(defs) : COMPONENTS_EXAMPLE));
   useEscape(onClose);

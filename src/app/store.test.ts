@@ -1520,6 +1520,17 @@ endmodule
     expect(st().dirty).toBe(false);
   }, 60_000);
 
+  it('keeps the edits in the history however long one browses', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('a');
+    await settle();
+    st().newDrawing('b');
+    await settle();
+    for (let k = 0; k < 120; k++) await st().navigate([{ instance: k % 2 ? 'b' : 'a', module: k % 2 ? 'b' : 'a', drawn: true }]);
+    expect(st().past.filter((h) => h.nav).length).toBe(50);
+    expect(st().past.filter((h) => !h.nav).length).toBe(2);
+  }, 60_000);
+
   it('passes over a sheet that is gone when Undo goes back', async () => {
     await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
     st().newDrawing('a');
