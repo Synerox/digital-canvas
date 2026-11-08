@@ -16,8 +16,8 @@ import type { SrcRange } from '../core/ir';
 import { GRID, type Point } from '../layout/elk-layout';
 import type { RuleId } from '../core/rules';
 import type { ThemeName } from '../render/theme';
-import { type ComponentDef, loadComponents } from './components';
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam } from './symbols';
+import { type ComponentDef, followsPreset, loadComponents } from './components';
+import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam, drawnWithout } from './symbols';
 
 export interface Box {
   x: number;
@@ -165,6 +165,10 @@ function userNode(v: unknown): UserNode | undefined {
   // Within what the library takes (Properties and the JSON would show the number, the pins the clamped one).
   for (const k of ['width', 'inputs', 'parts', 'shift'] as const) if (isNum(p[k])) params[k] = clampParam(k, p[k], PARAM_LIMITS[k][0]);
   if (sym === 'decoder' && params.width !== undefined) params.width = Math.min(params.width, 8);
+  // A setting the file leaves out is what the symbol is drawn with (see symbolNode), which is not always the
+  // library's default (an Adder without "width" is 1 bit, not 4): Properties and the JSON must show that one.
+  const takes = SYMBOL_BY_KEY[sym]?.params ?? [];
+  for (const k of ['width', 'inputs', 'parts', 'shift'] as const) if (takes.includes(k) && params[k] === undefined) params[k] = drawnWithout(sym, k);
   for (const k of ['value', 'module'] as const) if (isStr(p[k])) params[k] = p[k];
   const out: UserNode = { id: v.id, sym, params };
   if (isStr(v.name)) out.name = v.name;
@@ -307,6 +311,8 @@ export function parseSavedFile(text: string): SavedFile {
   for (const name of doc.drawn) doc.sheets[`d:${name}`] ??= emptyEdits();
   const components = loadComponents(d.components);
   if (components.length) doc.components = components;
+  // A symbol follows its preset only while it has the preset's settings (a file edited by hand may say otherwise).
+  for (const e of Object.values(doc.sheets)) for (const n of e.nodes) if (n.component && !followsPreset(n, doc.components)) delete n.component;
   const rules = Array.isArray(v.rules) ? (v.rules.filter(isStr) as RuleId[]) : [];
   const path: PathEntry[] = Array.isArray(v.path)
     ? v.path

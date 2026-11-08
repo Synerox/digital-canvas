@@ -222,9 +222,12 @@ export function EditorCanvas() {
   const [wireDrafts, setWireDrafts] = useState<Point[][]>();
   /** The cursor over a wire: which way the part under the pointer would move. */
   const [edgeCursor, setEdgeCursor] = useState<string>();
-  const [hoverPort, setHoverPort] = useState<string>();
-  /** The symbol under the pointer: only its connection points show (see pin-hints). */
-  const [hoverNode, setHoverNode] = useState<string>();
+  /**
+   * The pin and the symbol under the pointer (only that symbol's connection points show, see pin-hints), on the
+   * layout and the view they were found on: once another sheet, a new layout or a scroll moves the drawing under a
+   * pointer that stays still, they are not under it any more (the next move finds what is).
+   */
+  const [hovered, setHovered] = useState<{ port?: string; node?: string; on: LayoutResult; at: View }>();
   const [size, setSize] = useState({ w: 2000, h: 2000 });
   // Shown in the cursor: what a press does now.
   const [gesture, setGesture] = useState<'none' | 'pan' | 'wire'>('none');
@@ -522,6 +525,7 @@ export function EditorCanvas() {
   const openBus = useMemo(() => (layout ? openBusHints(layout) : []), [layout]);
 
   if (!layout) return null;
+  const pointed = hovered?.on === layout && hovered.at === view ? hovered : undefined;
   const lx = layout.x ?? 0;
   const ly = layout.y ?? 0;
 
@@ -664,8 +668,7 @@ export function EditorCanvas() {
       }}
       onPointerLeave={() => {
         hover.current = undefined;
-        setHoverPort(undefined);
-        setHoverNode(undefined);
+        setHovered(undefined);
       }}
       onPointerMove={(ev) => {
         hover.current = { x: ev.clientX, y: ev.clientY };
@@ -675,8 +678,7 @@ export function EditorCanvas() {
         if (s.placing || m.kind === 'wire') setPointer(w);
         if (m.kind === 'none' || m.kind === 'wire') {
           const hit = hitFrom(m.kind === 'wire' ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target);
-          setHoverPort(hit.port?.port);
-          setHoverNode(hoveredSymbol(hit));
+          if (layout) setHovered({ port: hit.port?.port, node: hoveredSymbol(hit), on: layout, at: view });
           if (m.kind === 'wire') {
             // A drag draws the wire where the pointer goes (see trace); a click-drawn wire waits for clicks.
             if (m.dragging) m.draft = trace(m.draft, { x: snap(w.x), y: snap(w.y) }, Math.max(1.5 * GRID, 12 / view.k));
@@ -833,9 +835,9 @@ export function EditorCanvas() {
           <g>
             {layout.nodes.map((n) =>
               n.ports.map((p) => {
-                const hover = hoverPort === p.id;
+                const hover = pointed?.port === p.id;
                 // Only the symbol under the pointer shows its connection points, in green.
-                const shown = hover || hoverNode === n.id;
+                const shown = hover || pointed?.node === n.id;
                 return (
                   <g key={p.id}>
                     {shown && (

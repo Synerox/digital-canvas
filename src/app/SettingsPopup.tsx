@@ -70,16 +70,21 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
 
   const apply = () => {
     if (error !== undefined) return;
+    applyTyped();
+    onClose();
+  };
+
+  /** Make what is typed the symbol's settings or the library's component (nothing when it is unchanged). */
+  const applyTyped = () => {
     if (text !== subject.text) {
       if (subject.kind === 'node' && result.params) setNodeParams(subject.id, result.params);
       else if (subject.kind === 'component' && result.defs) {
         // In the same place of the list: when its name changed, what was placed from it follows the new name.
         const from = subject.def.name;
         const to = result.defs[(doc.components ?? []).findIndex((c) => c.name === from)]?.name;
-        setComponents(result.defs, to && to !== from ? { from, to } : undefined);
+        setComponents(result.defs, to && to !== from ? { [from]: to } : undefined);
       }
     }
-    onClose();
   };
 
   /** Add the settings typed to the library as a component of its own (the symbol stays as it is until Apply). */
@@ -139,6 +144,14 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
           .map((el) => el.closest('[data-node-id], [data-settings-from]'))
           .find((el) => el !== null);
         if (from !== undefined && under && (under.getAttribute('data-node-id') ?? under.getAttribute('data-settings-from')) === from) return;
+        // Clicking away keeps what was typed, as a field of Properties does when it is left (Esc or Cancel throws it
+        // away). JSON that is not right yet stays open, with what is wrong, rather than be lost.
+        if (text !== subject.text && error !== undefined) {
+          e.preventDefault();
+          setSaid('Fix the JSON, or press Esc to close without changing anything.');
+          return;
+        }
+        applyTyped();
         onClose();
       }}
     >

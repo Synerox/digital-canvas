@@ -12,7 +12,7 @@ import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
 import { type InterfaceOf, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
 import { verilogIdent } from './verilog-export';
-import { type ComponentDef, componentSymbol, fullSettings, isPart, sameSettings } from './components';
+import { type ComponentDef, componentSymbol, followsPreset, fullSettings, isPart, sameSettings } from './components';
 
 // ---------- effective netlist ----------
 
@@ -332,6 +332,12 @@ export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEd
   const before = symbolNode(old, noModules);
   const after = symbolNode(u, noModules);
   const moved = portSuccessors(before, after);
+  if ((u.sym === 'concat' || u.sym === 'split') && (old.params.width ?? 1) !== (u.params.width ?? 1)) {
+    // Slices are named by their bits, which change with the width: a wire hidden on a slice that is gone (fewer
+    // slices) moves to that slice's new name too, so that it still comes back with it.
+    const all = (n: UserNode) => symbolNode({ ...n, params: { ...n.params, parts: PARAM_LIMITS.parts[1] } }, noModules);
+    for (const [from, to] of portSuccessors(all(old), all(u))) if (!moved.has(from)) moved.set(from, to);
+  }
   // Ports that are back: the wires stored on them were hidden by an earlier change.
   const beforeIds = new Set(before.ports.map((p) => p.id));
   const back = new Set(after.ports.filter((p) => !beforeIds.has(p.id)).map((p) => p.id));
@@ -371,28 +377,34 @@ function linkTo(e: SheetEdits, id: string, component: string | undefined): Sheet
 export function unlinkChanged(e: SheetEdits, id: string, defs: readonly ComponentDef[] | undefined): SheetEdits {
   const n = e.nodes.find((x) => x.id === id);
   if (!n?.component) return e;
-  const def = defs?.find((c) => c.name === n.component);
-  const keep = def && !isPart(def) && def.base === n.sym && sameSettings(n.sym, n.params, def.params ?? {});
-  return keep ? e : linkTo(e, id, undefined);
+  return followsPreset(n, defs) ? e : linkTo(e, id, undefined);
+}
+
+/** The sheet with the links that do not hold (see followsPreset) taken off: those symbols are symbols of their own. */
+export function keepLinks(e: SheetEdits, defs: readonly ComponentDef[] | undefined): SheetEdits {
+  let out = e;
+  for (const n of e.nodes) if (n.component && !followsPreset(n, defs)) out = linkTo(out, n.id, undefined);
+  return out;
 }
 
 /**
  * The sheets after the library changed from `before` to `after`: the symbols placed from a preset take
  * its new settings (with their wires, as a change in Properties would), and follow it when it is renamed
- * (`renamed`). A symbol whose preset is gone, became a part or another symbol keeps its settings and is
- * a symbol of its own. Returns `sheets` itself when nothing changes.
+ * (`renamed`, old name to new). A symbol whose preset is gone, became a part or another symbol keeps its
+ * settings and is a symbol of its own, as is one whose link no longer held (see followsPreset). Returns
+ * `sheets` itself when nothing changes.
  */
 export function followComponents(
   sheets: Record<string, SheetEdits>,
   before: readonly ComponentDef[] | undefined,
   after: readonly ComponentDef[] | undefined,
-  renamed?: { from: string; to: string },
+  renamed?: Readonly<Record<string, string>>,
 ): Record<string, SheetEdits> {
   /** What the symbols placed from each preset become: the preset now (by its name now), or none. */
   const plan = new Map<string, ComponentDef | undefined>();
   for (const old of before ?? []) {
     if (isPart(old)) continue;
-    const name = renamed?.from === old.name ? renamed.to : old.name;
+    const name = renamed && Object.hasOwn(renamed, old.name) ? renamed[old.name] : old.name;
     const now = after?.find((c) => c.name === name);
     plan.set(old.name, now && !isPart(now) && now.base === old.base ? now : undefined);
   }
@@ -400,9 +412,10 @@ export function followComponents(
   for (const [key, e] of Object.entries(sheets)) {
     let next = e;
     for (const n of e.nodes) {
-      if (!n.component || !plan.has(n.component)) continue;
+      if (!n.component) continue;
       const to = plan.get(n.component);
-      if (!to || to.base !== n.sym) {
+      // Only a symbol that still has its preset's settings follows the preset's change.
+      if (!to || to.base !== n.sym || !followsPreset(n, before)) {
         next = linkTo(next, n.id, undefined);
         continue;
       }
@@ -627,7 +640,11 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       const [lo, hi] = PARAM_LIMITS.parts;
       if (slices.length < lo || slices.length > hi || w < 1 || w > PARAM_LIMITS.width[1]) break;
       const u: UserNode = { id, sym: n.kind === 'join' ? 'concat' : 'split', params: { parts: slices.length, width: w } };
-      if (signature(symbolNode(u, iface)) === signature(n)) return u;
+      const drawn = symbolNode(u, iface);
+      // In the same order too: the slices of a bus declared [0:3] are named [0] [1] [2] [3] from the top, and a
+      // Concatenate's [3] [2] [1] [0], so a wire moved by name would take the bit at the other end.
+      const order = (d: DNode) => d.ports.filter((p) => p.dir === slices[0].dir).map((p) => p.name).join(',');
+      if (signature(drawn) === signature(n) && order(drawn) === order(n)) return u;
       break;
     }
     case 'cell': {

@@ -1629,7 +1629,7 @@ endmodule
     await settle();
     expect([widthOf(a), widthOf(b)]).toEqual([16, 16]);
     // Renamed in its window, what was placed from it follows the new name; deleted, it keeps its settings.
-    st().setComponents(parseComponents('[{ "name": "mux16", "base": "mux", "inputs": 4, "width": 16 }]').defs!, { from: 'mux4x8', to: 'mux16' });
+    st().setComponents(parseComponents('[{ "name": "mux16", "base": "mux", "inputs": 4, "width": 16 }]').defs!, { mux4x8: 'mux16' });
     expect(st().doc.sheets['d:top'].nodes.filter((n) => n.component).map((n) => `${n.id}:${n.component}`)).toEqual([`${a}:mux16`, `${b}:mux16`]);
     st().setComponents([]);
     await settle();
@@ -1640,6 +1640,57 @@ endmodule
     const saved = parseSavedFile(JSON.stringify(st().savedFile()));
     expect(saved.doc.sheets['d:top'].nodes.filter((n) => n.component).length).toBe(2);
   }, 60_000);
+
+  it('never links a symbol to a preset whose settings it does not have (undo, paste, sheets put aside)', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('top');
+    await settle();
+    const lib = (inputs: number) => parseComponents(`[{ "name": "and3", "base": "and", "inputs": ${inputs} }]`).defs!;
+    st().setComponents(lib(3));
+    // Chosen to be placed, then the preset changes and Undo takes the change back: it is placed as the preset is.
+    st().startPlacing({ ...componentSymbol(lib(3)[0]), component: 'and3' });
+    st().setComponents(lib(4));
+    expect(st().placing?.params).toEqual({ inputs: 4 });
+    st().undo();
+    expect(st().placing).toEqual({ sym: 'and', params: { inputs: 3 }, component: 'and3' });
+    st().redo();
+    expect(st().placing?.params).toEqual({ inputs: 4 });
+    st().undo();
+    // A placing that does not match the preset (as Undo could leave one before) places a symbol of its own.
+    st().startPlacing({ sym: 'and', params: { inputs: 5 }, component: 'and3' });
+    st().placeAt({ x: 0, y: 0 });
+    st().startPlacing({ ...componentSymbol(lib(3)[0]), component: 'and3' });
+    st().placeAt({ x: 200, y: 0 });
+    await settle();
+    const [own, linked] = st().doc.sheets['d:top'].nodes.map((n) => n.id);
+    const node = (id: string) => st().doc.sheets['d:top'].nodes.find((n) => n.id === id)!;
+    expect([node(own).component, node(linked).component]).toEqual([undefined, 'and3']);
+    // A copy made before the preset changed is pasted as a symbol of its own: the next library change leaves it.
+    st().select([linked]);
+    expect(st().copy()).toBe(true);
+    st().setComponents(lib(6));
+    expect(node(linked).params.inputs).toBe(6);
+    st().paste({ x: 400, y: 200 });
+    await settle();
+    const pasted = [...st().selection][0];
+    expect(node(pasted)).toMatchObject({ sym: 'and', params: { inputs: 3 } });
+    expect(node(pasted).component).toBeUndefined();
+    st().setComponents([...lib(7), ...parseComponents('{ "name": "or2", "base": "or" }').defs!]);
+    expect([node(own).params.inputs, node(linked).params.inputs, node(pasted).params.inputs]).toEqual([5, 7, 3]);
+    // Renamed in the Components window (the whole list as text): what was placed from it follows the new name.
+    st().setComponents(parseComponents('[{ "name": "and7", "base": "and", "inputs": 7 }, { "name": "or2", "base": "or" }]').defs!, { and3: 'and7' });
+    expect(node(linked).component).toBe('and7');
+  }, 60_000);
+
+  it('takes off the links of sheets that come back once the preset changed meanwhile', () => {
+    const components = parseComponents('[{ "name": "g", "base": "and", "inputs": 5 }]').defs!;
+    const nodes = [newUserNode('u:1', 'and', { params: { inputs: 3, width: 1 }, component: 'g' }), newUserNode('u:2', 'and', { params: { inputs: 5, width: 1 }, component: 'g' })];
+    const kept = { 'a.v': { 'v:blocks:m': { ...emptyEdits(), nodes, next: 3 } } };
+    const doc: EditDoc = { drawn: [], sheets: {}, components };
+    const c = changeFiles(doc, kept, { 'a.v': 'module x; endmodule' }, { 'a.v': 'module m; endmodule' });
+    expect(c.restored).toEqual(['m']);
+    expect(c.doc.sheets['v:blocks:m'].nodes.map((n) => n.component)).toEqual([undefined, 'g']);
+  });
 
   it('never gives a drawing a Verilog keyword as its name (C31)', async () => {
     await open({}, { doc: { drawn: [], sheets: {} }, path: [] });

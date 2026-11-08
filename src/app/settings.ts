@@ -3,7 +3,7 @@
  * symbol, a part's block or a component of the library, or Properties' button.
  */
 import type { LNode } from '../layout/elk-layout';
-import { type ComponentDef, PRESET_BASES, componentJson, partNamed, symbolJson } from '../editor/components';
+import { type ComponentDef, PRESET_BASES, componentJson, followsPreset, partNamed, symbolJson } from '../editor/components';
 import { SYMBOL_BY_KEY, type SymKey } from '../editor/symbols';
 import type { EditorState } from './store';
 import { ui } from './ui-events';
@@ -73,7 +73,7 @@ export function subjectOf(s: EditorState, target: SettingsTarget): Subject | und
   if ('node' in target) {
     const user = s.doc.sheets[s.sheet]?.nodes.find((n) => n.id === target.node);
     if (!user || !PRESET_BASES.includes(user.sym)) return undefined;
-    return { kind: 'node', id: user.id, sym: user.sym, text: symbolJson(user.sym, user.params), ...(user.component ? { component: user.component } : {}) };
+    return { kind: 'node', id: user.id, sym: user.sym, text: symbolJson(user.sym, user.params), ...(followsPreset(user, s.doc.components) ? { component: user.component } : {}) };
   }
   const def = s.doc.components?.find((c) => c.name === target.component);
   return def && { kind: 'component', def, text: componentJson(def, true) };

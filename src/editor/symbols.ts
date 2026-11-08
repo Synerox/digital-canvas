@@ -171,6 +171,11 @@ export const PARAM_LIMITS: Record<'width' | 'inputs' | 'shift' | 'parts', [numbe
   parts: [2, 16],
 };
 
+/** What a `sym` symbol is drawn with when its parameters leave the setting `k` out (see symbolNode). */
+export function drawnWithout(sym: SymKey, k: keyof typeof PARAM_LIMITS): number {
+  return k === 'width' ? (sym === 'decoder' ? 2 : 1) : k === 'shift' ? 3 : 2;
+}
+
 export function clampParam(name: keyof typeof PARAM_LIMITS, v: number | undefined, fallback: number): number {
   const [lo, hi] = PARAM_LIMITS[name];
   if (v === undefined || !Number.isFinite(v)) return fallback;
@@ -275,7 +280,7 @@ function sliceNames(parts: number, width: number): string[] {
 export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
   const id = u.id;
   const p = u.params;
-  const w = clampParam('width', p.width, 1);
+  const w = clampParam('width', p.width, drawnWithout(u.sym, 'width'));
   const name = u.name ?? '';
   switch (u.sym) {
     case 'input':
@@ -297,12 +302,12 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
     case 'text':
       return { id, kind: 'text', label: name || 'Note', ports: [], src: [] };
     case 'concat': {
-      const parts = clampParam('parts', p.parts, 2);
+      const parts = clampParam('parts', p.parts, drawnWithout(u.sym, 'parts'));
       const ports = sliceNames(parts, w).map((n) => port(id, n, 'in', 'WEST', w));
       return { id, kind: 'join', label: '{ }', ports: [...ports, port(id, 'out', 'out', 'EAST', parts * w)], src: [] };
     }
     case 'split': {
-      const parts = clampParam('parts', p.parts, 2);
+      const parts = clampParam('parts', p.parts, drawnWithout(u.sym, 'parts'));
       const ports = sliceNames(parts, w).map((n) => port(id, n, 'out', 'EAST', w));
       return { id, kind: 'split', label: '}{', ports: [port(id, 'in', 'in', 'WEST', parts * w), ...ports], src: [] };
     }
@@ -343,7 +348,7 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
       };
     }
     case 'mux': {
-      const n = clampParam('inputs', p.inputs, 2);
+      const n = clampParam('inputs', p.inputs, drawnWithout(u.sym, 'inputs'));
       const sw = selectWidth(n);
       if (n === 2) {
         return {
@@ -384,7 +389,7 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
         case 'nand':
         case 'nor':
         case 'xnor': {
-          const n = clampParam('inputs', p.inputs, 2);
+          const n = clampParam('inputs', p.inputs, drawnWithout(u.sym, 'inputs'));
           const ins = Array.from({ length: n }, (_, k) => port(id, gateInputName(k), 'in', 'WEST', w));
           return cell([...ins, port(id, 'Y', 'out', 'EAST', w)]);
         }
@@ -400,11 +405,11 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
           return cell([port(id, 'A', 'in', 'WEST', w), port(id, 'B', 'in', 'WEST', w), port(id, 'Y', 'out', 'EAST', 1)]);
         case 'shl':
         case 'shr': {
-          const s = clampParam('shift', p.shift, 3);
+          const s = clampParam('shift', p.shift, drawnWithout(u.sym, 'shift'));
           return cell([port(id, 'A', 'in', 'WEST', w), port(id, 'B', 'in', 'WEST', s), port(id, 'Y', 'out', 'EAST', w)]);
         }
         case 'decoder': {
-          const n = Math.min(clampParam('width', p.width, 2), 8);
+          const n = Math.min(clampParam('width', p.width, drawnWithout(u.sym, 'width')), 8);
           return cell([port(id, 'A', 'in', 'WEST', n), port(id, 'Y', 'out', 'EAST', 2 ** n)], { inputs: n, outputs: 2 ** n });
         }
         case 'dff':

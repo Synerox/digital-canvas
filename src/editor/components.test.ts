@@ -5,11 +5,13 @@ import {
   componentSymbol,
   componentsJson,
   editComponent,
+  followsPreset,
   freeComponentName,
   loadComponents,
   parseComponents,
   parseSymbolJson,
   partVerilog,
+  renamedPresets,
   settingsHint,
   symbolJson,
 } from './components';
@@ -162,6 +164,34 @@ describe('components in JSON', () => {
     expect(parseComponents('{ "name": "m", "inputs": ["a[7:0]", "b"], "outputs": ["y[7:0]"], "width": 16 }').defs![0].pins!.map((p) => p.width)).toEqual([8, 16, 8]);
     // As wide as the pins say: nothing to refuse.
     expect(parseComponents('{ "name": "n", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"], "width": 8 }').defs![0].pins!.map((p) => p.width)).toEqual([8, 8]);
+    // As wide as some of them (the data pins of the JSON shown, written with their bits): the same part, nothing to refuse.
+    const alu = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero[0:0]"], "width": 8 }');
+    expect(alu.defs![0].pins!.map((p) => p.width)).toEqual([8, 8, 3, 8, 1]);
+    // None of them: the message names a pin of another width.
+    expect(parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "op[2:0]"], "outputs": ["y[7:0]"], "width": 16 }').error).toMatch(/such as "a\[7:0\]"/);
+  });
+
+  it('tells a preset renamed in its place in the list', () => {
+    const before = parseComponents('[{ "name": "a", "base": "and" }, { "name": "m", "base": "mux", "width": 8 }, { "name": "p", "inputs": 2, "outputs": 1 }]').defs!;
+    const after = parseComponents('[{ "name": "a", "base": "and" }, { "name": "m8", "base": "mux", "width": 16 }, { "name": "q", "inputs": 2, "outputs": 1 }]').defs!;
+    // A part is not a preset: its blocks name it as a module.
+    expect(renamedPresets(before, after)).toEqual({ m: 'm8' });
+    // Another symbol in its place, a name that was there already, or one that stays: no rename.
+    expect(renamedPresets(before, parseComponents('[{ "name": "a", "base": "and" }, { "name": "m8", "base": "or" }]').defs!)).toEqual({});
+    expect(renamedPresets(before, parseComponents('[{ "name": "m", "base": "mux" }, { "name": "a", "base": "mux" }]').defs!)).toEqual({});
+    expect(renamedPresets(before, before.slice(1))).toEqual({});
+    expect(renamedPresets(undefined, after)).toEqual({});
+  });
+
+  it('links a symbol to its preset only while it has its settings', () => {
+    const defs = parseComponents('[{ "name": "add8", "base": "add", "width": 8 }, { "name": "p", "inputs": 2, "outputs": 1 }]').defs!;
+    const add = (width: number, component?: string) => ({ id: 'u:1', sym: 'add' as const, params: { width }, ...(component ? { component } : {}) });
+    expect(followsPreset(add(8, 'add8'), defs)).toBe(true);
+    expect(followsPreset(add(16, 'add8'), defs)).toBe(false);
+    expect(followsPreset(add(8), defs)).toBe(false);
+    expect(followsPreset(add(8, 'gone'), defs)).toBe(false);
+    expect(followsPreset(add(8, 'p'), defs)).toBe(false);
+    expect(followsPreset({ ...add(8, 'add8'), sym: 'sub' }, defs)).toBe(false);
   });
 
   it('says what the JSON of a symbol sets', () => {

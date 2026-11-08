@@ -3,7 +3,7 @@
  * Saving is one undo step; the blocks of a part follow its pins.
  */
 import { useDeferredValue, useMemo, useState } from 'react';
-import { COMPONENTS_EXAMPLE, componentsJson, isPart, parseComponents } from '../editor/components';
+import { COMPONENTS_EXAMPLE, componentsJson, isPart, parseComponents, renamedPresets } from '../editor/components';
 import { sheetsUsing, useStore } from './store';
 import { MOD, useEscape } from './Dialogs';
 
@@ -33,7 +33,8 @@ export function ComponentsDialog({ onClose }: { onClose(): void }) {
   const save = () => {
     const r = parseComponents(text, taken);
     if (!r.defs) return;
-    setComponents(r.defs);
+    // A preset renamed in place: what was placed from it follows it under its new name.
+    setComponents(r.defs, renamedPresets(defs, r.defs));
     onClose();
   };
 

@@ -15,7 +15,7 @@
  * The text the user writes is read by parseComponents, which explains what is wrong; the
  * file loader reads the saved definitions with loadComponents, which drops what is wrong.
  */
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, literalWidth } from './symbols';
+import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, literalWidth } from './symbols';
 import { verilogIdent } from './verilog-export';
 
 export interface ComponentDef {
@@ -174,9 +174,10 @@ function componentOf(v: unknown, k: number, taken: (name: string) => string | un
     ...pinsOf(v.outputs, 'output', width, `${where} output`),
   ];
   if (pins.length === 0) throw new Bad(`${where}: give it "inputs" and "outputs" (or a "base" symbol for a preset).`);
-  // A "width" no pin takes would change nothing: say so, rather than leave the pins as they were.
-  const own = pins.find((p) => p.width !== width.width);
-  if (v.width !== undefined && !width.used && own) {
+  // A "width" that no pin takes and no pin has would change nothing: say so, rather than leave the pins as they
+  // were (one that some pins have already, as the JSON shown writes it, is as good as left out).
+  if (v.width !== undefined && !width.used && !pins.some((p) => p.width === width.width)) {
+    const own = pins[0];
     throw new Bad(
       `${where}: "width" sets the bits of pins written without them, such as "${own.name}"; every pin here has bits of its own (such as "${own.name}[${own.width - 1}:0]"): change those, or write the pins without bits.`,
     );
@@ -340,6 +341,35 @@ export function fullSettings(sym: SymKey, params: SymParams): SymParams {
     const v = params[f as keyof SymParams] ?? def?.defaults[f as keyof SymParams];
     if (v !== undefined) (out as Record<string, unknown>)[f] = v;
   }
+  return out;
+}
+
+/**
+ * Whether the symbol `n` follows the preset it was placed from: the library has that preset, for the same
+ * symbol, with the symbol's settings. A link is kept only while this holds, so that changing a preset never
+ * changes a symbol whose settings are no longer the preset's (one changed on its own, pasted from another file,
+ * or placed again after Undo changed the preset back).
+ */
+export function followsPreset(n: UserNode, defs: readonly ComponentDef[] | undefined): boolean {
+  if (!n.component) return false;
+  const def = defs?.find((c) => c.name === n.component);
+  return !!def && !isPart(def) && def.base === n.sym && sameSettings(n.sym, n.params, componentSymbol(def).params);
+}
+
+/**
+ * The presets renamed from `before` to `after` (old name to new name), told by their place in the list: a
+ * preset in the same place, for the same symbol, under a new name, where the old name is gone. The
+ * Components window edits the whole list as text, so it cannot say; what was placed from them follows them.
+ */
+export function renamedPresets(before: readonly ComponentDef[] | undefined, after: readonly ComponentDef[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  const had = new Set((before ?? []).map((c) => c.name));
+  const has = new Set(after.map((c) => c.name));
+  (before ?? []).forEach((old, k) => {
+    const now = after[k];
+    if (!now || isPart(old) || isPart(now) || old.base !== now.base || has.has(old.name) || had.has(now.name)) return;
+    out[old.name] = now.name;
+  });
   return out;
 }
 
