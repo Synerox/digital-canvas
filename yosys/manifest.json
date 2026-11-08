@@ -1,5 +1,6 @@
 {
-  "bundle": "bundle.js",
+  "bundle": "bundle-52495253e123.js",
+  "version": "0.71.188-dev.1267",
   "modules": {
     "yosys.core.wasm": {
       "chunks": [
@@ -7,28 +8,32 @@
         "yosys.core.1.bin"
       ],
       "gzip": true,
-      "size": 15674130
+      "size": 15674130,
+      "sha256": "bd3954d9a7780a99cde5269203335bfd9b26f74d5acbc5428d12ef17d1b5fec6"
     },
     "yosys.core2.wasm": {
       "chunks": [
         "yosys.core2.0.bin"
       ],
       "gzip": true,
-      "size": 10389
+      "size": 10389,
+      "sha256": "b18d2c8c15b7ce1da4807aaa50ac9d7e47a00b93b1cff0b09b369cf3ec2067e5"
     },
     "yosys.core3.wasm": {
       "chunks": [
         "yosys.core3.0.bin"
       ],
       "gzip": true,
-      "size": 661
+      "size": 661,
+      "sha256": "2f130b9d752387423b990ba3cc6ad95c8d3ef4335c6bf66448aeb920e6cc532f"
     },
     "yosys.core4.wasm": {
       "chunks": [
         "yosys.core4.0.bin"
       ],
       "gzip": true,
-      "size": 404
+      "size": 404,
+      "sha256": "da44f523cff5ad38ca5e0c117e6945d7f90345dbb67604c516031da1c67b6fef"
     }
   }
 }
