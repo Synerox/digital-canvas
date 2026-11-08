@@ -524,6 +524,12 @@ export function EditorCanvas() {
   // Before the return below: a hook runs on every render.
   const openBus = useMemo(() => (layout ? openBusHints(layout) : []), [layout]);
 
+  /** A dragged symbol moves with the pointer: what it points at is still under it on the new layout. */
+  const followDrag = () => {
+    const now = store().layout;
+    if (now) setHovered((h) => h && { ...h, on: now });
+  };
+
   if (!layout) return null;
   const pointed = hovered?.on === layout && hovered.at === view ? hovered : undefined;
   const lx = layout.x ?? 0;
@@ -678,7 +684,12 @@ export function EditorCanvas() {
         if (s.placing || m.kind === 'wire') setPointer(w);
         if (m.kind === 'none' || m.kind === 'wire') {
           const hit = hitFrom(m.kind === 'wire' ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target);
-          if (layout) setHovered({ port: hit.port?.port, node: hoveredSymbol(hit), on: layout, at: view });
+          if (layout) {
+            const port = hit.port?.port;
+            const node = hoveredSymbol(hit);
+            // The same object when nothing changed: a move over the same spot renders nothing.
+            setHovered((h) => (h && h.port === port && h.node === node && h.on === layout && h.at === view ? h : { port, node, on: layout, at: view }));
+          }
           if (m.kind === 'wire') {
             // A drag draws the wire where the pointer goes (see trace); a click-drawn wire waits for clicks.
             if (m.dragging) m.draft = trace(m.draft, { x: snap(w.x), y: snap(w.y) }, Math.max(1.5 * GRID, 12 / view.k));
@@ -701,6 +712,7 @@ export function EditorCanvas() {
             m.dx = snap(w.x - m.start.x);
             m.dy = snap(w.y - m.start.y);
             s.previewMove(m.ids, m.dx, m.dy);
+            followDrag();
             return;
           }
           case 'press-empty': {
@@ -735,8 +747,10 @@ export function EditorCanvas() {
             return;
           case 'press-node':
             mode.current = { kind: 'none' };
-            if (m.moved) s.moveSelection(m.ids, m.dx, m.dy);
-            else if (!m.additive && s.selection.size > 1) s.select([m.clicked]);
+            if (m.moved) {
+              s.moveSelection(m.ids, m.dx, m.dy);
+              followDrag();
+            } else if (!m.additive && s.selection.size > 1) s.select([m.clicked]);
             return;
           case 'press-empty': {
             mode.current = { kind: 'none' };

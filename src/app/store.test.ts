@@ -1677,6 +1677,11 @@ endmodule
     expect(node(pasted).component).toBeUndefined();
     st().setComponents([...lib(7), ...parseComponents('{ "name": "or2", "base": "or" }').defs!]);
     expect([node(own).params.inputs, node(linked).params.inputs, node(pasted).params.inputs]).toEqual([5, 7, 3]);
+    // The same settings written another way (a default spelled out): placed as the library writes it now.
+    st().startPlacing({ ...componentSymbol(lib(7)[0]), component: 'and3' });
+    st().setComponents(parseComponents('[{ "name": "and3", "base": "and", "inputs": 7, "width": 1 }, { "name": "or2", "base": "or" }]').defs!);
+    expect(st().placing).toEqual({ sym: 'and', params: { inputs: 7, width: 1 }, component: 'and3' });
+    st().startPlacing(undefined);
     // Renamed in the Components window (the whole list as text): what was placed from it follows the new name.
     st().setComponents(parseComponents('[{ "name": "and7", "base": "and", "inputs": 7 }, { "name": "or2", "base": "or" }]').defs!, { and3: 'and7' });
     expect(node(linked).component).toBe('and7');

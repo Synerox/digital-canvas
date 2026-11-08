@@ -181,6 +181,16 @@ describe('components in JSON', () => {
     expect(renamedPresets(before, parseComponents('[{ "name": "m", "base": "mux" }, { "name": "a", "base": "mux" }]').defs!)).toEqual({});
     expect(renamedPresets(before, before.slice(1))).toEqual({});
     expect(renamedPresets(undefined, after)).toEqual({});
+    const lib = (json: string) => parseComponents(json).defs!;
+    const two = lib('[{ "name": "and3", "base": "and", "inputs": 3 }, { "name": "and4", "base": "and", "inputs": 4 }]');
+    // One deleted and the other renamed: the one with the new one's settings was renamed, whatever their places.
+    expect(renamedPresets(two, lib('[{ "name": "and_four", "base": "and", "inputs": 4 }]'))).toEqual({ and4: 'and_four' });
+    expect(renamedPresets(lib('{ "name": "a", "base": "and", "inputs": 3 }'), lib('[{ "name": "n", "base": "and", "inputs": 5 }, { "name": "a2", "base": "and", "inputs": 3 }]'))).toEqual({
+      a: 'a2',
+    });
+    // No way to tell: nothing renamed, rather than give symbols another preset's settings.
+    expect(renamedPresets(two, lib('[{ "name": "and5", "base": "and", "inputs": 5 }]'))).toEqual({});
+    expect(renamedPresets(two, lib('[{ "name": "x", "base": "and", "inputs": 3 }, { "name": "y", "base": "and", "inputs": 3 }]'))).toEqual({});
   });
 
   it('links a symbol to its preset only while it has its settings', () => {

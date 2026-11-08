@@ -580,6 +580,22 @@ describe('changing parameters', () => {
     expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
   });
 
+  it('brings back one wire only when two were hidden on one slice (a file saved before hidden wires followed the width)', () => {
+    const s = new Drawing();
+    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((n) => s.add('input', n, { width: 8 }));
+    const cat = s.add('concat', undefined, { parts: 3, width: 8 });
+    s.wire(`${d}.out`, `${cat}.[23:16]`);
+    s.wire(`${b}.out`, `${cat}.[15:8]`);
+    s.wire(`${c}.out`, `${cat}.[7:0]`);
+    // a's wire as such a file keeps it: hidden on [11:8], a slice of the width before.
+    s.e = { ...s.e, edges: [...s.e.edges, { id: 'w:old', source: { node: a, port: `${a}.out` }, target: { node: cat, port: `${cat}.[11:8]` } }] };
+    s.e = setParams(s.e, cat, { parts: 2 });
+    s.e = setParams(s.e, cat, { width: 4 });
+    s.e = setParams(s.e, cat, { parts: 3 });
+    expect(into(s.d, cat)).toHaveLength(3);
+    expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
+  });
+
   it('never brings back a hidden wire onto an input that another wire drives', () => {
     // A split's output: a hidden wire stays away from an input wired meanwhile.
     const t = new Drawing();
@@ -592,7 +608,12 @@ describe('changing parameters', () => {
     t.wire(`${sp}.[7:4]`, `${y1}.in`);
     t.e = setParams(t.e, sp, { parts: 2 });
     t.wire(`${x}.out`, `${y2}.in`);
+    // Slices and width at once (the JSON window, a preset): the wire would come back on [23:16].
+    const once = setParams(t.e, sp, { parts: 3, width: 8 });
     t.e = setParams(t.e, sp, { parts: 3 });
+    expect(t.d.edges.filter((w) => w.target.node === y2).map((w) => w.source.node)).toEqual([x]);
+    expect(checkSheet(t.d).messages.join(' ')).not.toContain('more than one wire');
+    t.e = once;
     expect(t.d.edges.filter((w) => w.target.node === y2).map((w) => w.source.node)).toEqual([x]);
     expect(checkSheet(t.d).messages.join(' ')).not.toContain('more than one wire');
   });

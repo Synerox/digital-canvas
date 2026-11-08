@@ -159,8 +159,9 @@ function lineList(lines: number[]): string {
 }
 
 /**
- * Properties of what is selected. Each item's panel is keyed by it: a field being typed in belongs to the item it
- * was opened on, so selecting another item (whose value may read the same) starts from that item's own values.
+ * Properties of what is selected. Each item's panel (and the drawing's name field) is keyed by it: a field being typed
+ * in belongs to the item it was opened on, so selecting another item (whose value may read the same) starts from that
+ * item's own values.
  */
 export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
   const s = useStore();
@@ -189,12 +190,14 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
   if (sel.length === 0) {
     const hidden = edits?.hidden.length ?? 0;
     return (
-      <div className="inspector" key={s.sheet}>
+      <div className="inspector">
         <h3>{drawn ? 'Drawing' : 'Sheet'}</h3>
         {drawn ? (
           <label className="prop">
             <span>Module name</span>
             <Field
+              // Of this drawing: what was typed for another one never shows here (the panel's buttons keep their place).
+              key={s.sheet}
               value={module}
               onCommit={(v) => s.renameDrawing(module, v)}
               check={(v) => {

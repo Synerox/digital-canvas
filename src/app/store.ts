@@ -65,7 +65,7 @@ import { orthogonalize } from '../editor/router';
 import { legContaining } from '../editor/draw-wire';
 import { type SheetIssues, checkSheet } from '../editor/check';
 import { verilogIdent } from '../editor/verilog-export';
-import { type ComponentDef, componentSymbol, followsPreset, isPart, partInterface, partNamed, sameSettings } from '../editor/components';
+import { type ComponentDef, componentSymbol, followsPreset, isPart, partInterface, partNamed } from '../editor/components';
 
 export type { PathEntry, ViewMode } from '../editor/doc';
 
@@ -584,7 +584,8 @@ export function placingNow(placing: Placing | undefined, defs: readonly Componen
   const def = defs?.find((c) => c.name === name);
   if (!def || isPart(def) || def.base !== placing.sym) return undefined;
   const now: Placing = { ...componentSymbol(def), component: def.name };
-  return now.component === placing.component && sameSettings(now.sym, now.params ?? {}, placing.params ?? {}) ? placing : now;
+  // The params exactly as the library writes them (the palette shows the preset chosen by comparing them).
+  return now.component === placing.component && JSON.stringify(now.params ?? {}) === JSON.stringify(placing.params ?? {}) ? placing : now;
 }
 
 /**

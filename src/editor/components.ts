@@ -357,19 +357,31 @@ export function followsPreset(n: UserNode, defs: readonly ComponentDef[] | undef
 }
 
 /**
- * The presets renamed from `before` to `after` (old name to new name), told by their place in the list: a
- * preset in the same place, for the same symbol, under a new name, where the old name is gone. The
- * Components window edits the whole list as text, so it cannot say; what was placed from them follows them.
+ * The presets renamed from `before` to `after` (old name to new name). The Components window edits the whole
+ * list as text, so it cannot say: a preset whose name is gone is taken as renamed to a new one only when that
+ * is the only way to read it, for the same symbol: the one preset of that symbol gone and the one new, or else
+ * the one gone and the one new with the same settings. Otherwise nothing is renamed (what was placed from it
+ * keeps its settings and follows nothing), never a guess that would give symbols another preset's settings.
  */
 export function renamedPresets(before: readonly ComponentDef[] | undefined, after: readonly ComponentDef[]): Record<string, string> {
   const out: Record<string, string> = {};
   const had = new Set((before ?? []).map((c) => c.name));
   const has = new Set(after.map((c) => c.name));
-  (before ?? []).forEach((old, k) => {
-    const now = after[k];
-    if (!now || isPart(old) || isPart(now) || old.base !== now.base || has.has(old.name) || had.has(now.name)) return;
-    out[old.name] = now.name;
-  });
+  const gone = (before ?? []).filter((c) => !isPart(c) && !has.has(c.name));
+  const fresh = after.filter((c) => !isPart(c) && !had.has(c.name));
+  const same = (a: ComponentDef, b: ComponentDef) => sameSettings(a.base!, componentSymbol(a).params, componentSymbol(b).params);
+  for (const base of new Set(gone.map((c) => c.base))) {
+    const olds = gone.filter((c) => c.base === base);
+    const news = fresh.filter((c) => c.base === base);
+    if (olds.length === 1 && news.length === 1) {
+      out[olds[0].name] = news[0].name;
+      continue;
+    }
+    for (const old of olds) {
+      const match = news.filter((n) => same(old, n));
+      if (match.length === 1 && olds.filter((o) => same(o, match[0])).length === 1) out[old.name] = match[0].name;
+    }
+  }
   return out;
 }
 
