@@ -431,13 +431,6 @@ export default function App() {
             <h3>Drawing rules</h3>
             <RulePanel />
           </section>
-          <section className="help small muted">
-            <p>
-              Draw with the symbol library, or import Verilog and edit what it draws. Drag from a pin to wire it. Double-click a block to open it,
-              or a symbol to edit its settings as JSON. Click a symbol to find its Verilog line.
-            </p>
-            <p>Everything runs in your browser. Your Verilog is never uploaded; your work is kept in this browser and in files you save.</p>
-          </section>
         </aside>
 
         <section className="center">
