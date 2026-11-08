@@ -97,11 +97,20 @@ export function alignToGrid(layout: LayoutResult, grid: number): LayoutResult {
   const netOf = (e: LEdge) => e.source.port;
   const routes = new Map<string, Point[]>();
   const byNet = new Map<string, Point[][]>();
+  // The symbols and the wires laid so far by column, so that a wire is checked only against those near it.
+  const rectCols = columns(moved, xs, 0);
+  const wireCols = new Map<number, { net: string; points: Point[] }[]>();
   const add = (e: LEdge, points: Point[]) => {
     routes.set(e.id, points);
     const list = byNet.get(netOf(e));
     if (list) list.push(points);
     else byNet.set(netOf(e), [points]);
+    const b = boundsOf(points);
+    for (let c = Math.floor(b.x0 / COLUMN); c <= Math.floor(b.x1 / COLUMN); c++) {
+      const col = wireCols.get(c);
+      if (col) col.push({ net: netOf(e), points });
+      else wireCols.set(c, [{ net: netOf(e), points }]);
+    }
   };
   const again: LEdge[] = [];
   for (const e of layout.edges) {
@@ -114,8 +123,8 @@ export function alignToGrid(layout: LayoutResult, grid: number): LayoutResult {
       !points ||
       !s ||
       !t ||
-      runsThroughSymbol(points, rects, portAt.get(e.source.port)!.node, portAt.get(e.target.port)!.node) ||
-      meetsOtherNet(points, netOf(e), byNet)
+      runsThroughSymbol(points, rects, rectCols, portAt.get(e.source.port)!.node, portAt.get(e.target.port)!.node) ||
+      meetsOtherNet(points, netOf(e), wireCols)
     ) {
       again.push(e);
       continue;
@@ -360,8 +369,9 @@ export function onGrid(points: Point[], s: RouteEnd, t: RouteEnd, os: Point, ot:
 }
 
 /** Whether a wire runs through a symbol (its first leg may start inside its source's box and its last end inside its target's: a pin on a sloped edge). */
-function runsThroughSymbol(points: Point[], rects: readonly Rect[], source: number, target: number): boolean {
-  for (let i = 0; i < rects.length; i++) {
+function runsThroughSymbol(points: Point[], rects: readonly Rect[], cols: ReadonlyMap<number, number[]>, source: number, target: number): boolean {
+  const b = boundsOf(points);
+  for (const i of near(cols, b.x0, b.x1)) {
     let line = points;
     if (i === source) line = line.slice(1);
     if (i === target) line = line.slice(0, -1);
@@ -394,14 +404,16 @@ function boundsOf(points: Point[]): Bounds {
 }
 
 /** Whether a wire runs along, or ends on, a wire of another net (it would read as connected to it). */
-function meetsOtherNet(points: Point[], net: string, byNet: ReadonlyMap<string, Point[][]>): boolean {
+function meetsOtherNet(points: Point[], net: string, cols: ReadonlyMap<number, { net: string; points: Point[] }[]>): boolean {
   const b = boundsOf(points);
-  for (const [n, polys] of byNet) {
-    if (n === net) continue;
-    for (const o of polys) {
-      const c = boundsOf(o);
+  const seen = new Set<Point[]>();
+  for (let col = Math.floor((b.x0 - 3) / COLUMN); col <= Math.floor((b.x1 + 3) / COLUMN); col++) {
+    for (const o of cols.get(col) ?? []) {
+      if (o.net === net || seen.has(o.points)) continue;
+      seen.add(o.points);
+      const c = boundsOf(o.points);
       if (c.x1 < b.x0 - 3 || c.x0 > b.x1 + 3 || c.y1 < b.y0 - 3 || c.y0 > b.y1 + 3) continue;
-      if (wiresMeet(points, o)) return true;
+      if (wiresMeet(points, o.points)) return true;
     }
   }
   return false;

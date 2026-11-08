@@ -42,9 +42,10 @@ describe('components in JSON', () => {
     const { sym, params } = componentSymbol(and5);
     const n = symbolNode({ ...newUserNode('u:1', sym), params: { ...newUserNode('u:1', sym).params, ...params } }, () => undefined);
     expect(n.ports.filter((p) => p.dir === 'in').map((p) => p.name)).toEqual(['A', 'B', 'C', 'D', 'E']);
-    // Up to 32 inputs: past Z the names go on as AA, AB…
-    const wide = symbolNode({ ...newUserNode('u:2', 'or'), params: { inputs: 30, width: 1 } }, () => undefined);
-    expect(wide.ports.filter((p) => p.dir === 'in').map((p) => p.name).slice(24)).toEqual(['Y', 'Z', 'AA', 'AB', 'AC', 'AD']);
+    // Up to 32 inputs: past X (Y is the output) they are numbered.
+    const wide = symbolNode({ ...newUserNode('u:2', 'or'), params: { inputs: 32, width: 1 } }, () => undefined);
+    expect(wide.ports.filter((p) => p.dir === 'in').map((p) => p.name).slice(22)).toEqual(['W', 'X', 'I24', 'I25', 'I26', 'I27', 'I28', 'I29', 'I30', 'I31']);
+    expect(new Set(wide.ports.map((p) => p.id)).size).toBe(33);
   });
 
   it('says what is wrong', () => {
@@ -70,6 +71,10 @@ describe('components in JSON', () => {
     const defs = parseComponents(COMPONENTS_EXAMPLE).defs!;
     expect(parseComponents(componentsJson(defs)).defs).toEqual(defs);
     expect(componentsJson([])).toBe('[]\n');
+    // Text inside values is left as it is.
+    const odd = parseComponents('[{ "name": "q", "title": "A\\":B, \\"c", "base": "and" }]').defs!;
+    expect(parseComponents(componentsJson(odd)).defs).toEqual(odd);
+    expect(odd[0].title).toBe('A":B, "c');
     // Saved as they are kept; what is wrong in a file is dropped.
     const saved = JSON.parse(JSON.stringify(defs));
     expect(loadComponents([...saved, { name: 'bad', base: 'nope' }, 'x', { name: 'and5', base: 'or' }])).toEqual(defs);

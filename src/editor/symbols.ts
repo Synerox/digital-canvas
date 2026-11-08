@@ -226,11 +226,12 @@ const OP_LABEL: Record<string, string> = {
   $adff: 'DFF',
 };
 
-const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+/** Names of a gate's inputs: up to X (Y is its output). */
+const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWX';
 
-/** The name of a gate's input `k`: A, B… Z, then AA, AB… (the export goes by their order). */
+/** The name of a gate's input `k`: A, B… X, then I24, I25… (the export goes by their order). */
 export function gateInputName(k: number): string {
-  return k < LETTERS.length ? LETTERS[k] : gateInputName(Math.floor(k / LETTERS.length) - 1) + LETTERS[k % LETTERS.length];
+  return k < LETTERS.length ? LETTERS[k] : `I${k}`;
 }
 
 /** Bits needed to number `n` choices (at least 1). */

@@ -947,11 +947,12 @@ export function planOpen(open: Record<string, string>, putAside: PutAside, picke
 
 /**
  * The points of a wire from its source up to `at`, a point on it (`at` itself left out): the stretch of
- * its net a new wire that starts or ends there shares.
+ * its net a new wire that starts or ends there shares. Nothing when `at` is not on it (the wire was
+ * redrawn meanwhile): the new wire then does not reach its source, and the sheet routes it again.
  */
 export function wireUpTo(points: readonly Point[], at: Point): Point[] {
   const i = legContaining(points, at);
-  return points.slice(0, i === undefined ? points.length : i + 1);
+  return i === undefined ? [] : points.slice(0, i + 1);
 }
 
 export const useStore = create<State>((set, get) => {
@@ -998,10 +999,20 @@ export const useStore = create<State>((set, get) => {
   const navStep = (to?: PathEntry[]) => {
     const s = get();
     if (!s.sheet || (to && samePath(to, s.path))) return;
-    const past = [...s.past, { ...here(), nav: true }];
-    // Browsing must not push the edits out of the history: past NAV_STEPS of them, the oldest goes.
-    if (past.filter((h) => h.nav).length > NAV_STEPS) past.splice(past.findIndex((h) => h.nav), 1);
-    set({ past: past.slice(-HISTORY) });
+    set({ past: withNavStep(s.past, { ...here(), nav: true }) });
+  };
+
+  /**
+   * The history with a navigation step added. Browsing must not push the edits out: past NAV_STEPS
+   * navigation steps, or a full history, the oldest navigation step goes (an edit only when there is no other).
+   */
+  const withNavStep = (past: readonly HistoryEntry[], entry: HistoryEntry): HistoryEntry[] => {
+    const out = [...past, entry];
+    while (out.filter((h) => h.nav).length > NAV_STEPS || out.length > HISTORY) {
+      const i = out.findIndex((h) => h.nav);
+      out.splice(i < out.length - 1 ? i : 0, 1);
+    }
+    return out;
   };
 
   /** Whether `entry` is where the user is now: the same sheet, reached the same way. */
@@ -1225,7 +1236,7 @@ export const useStore = create<State>((set, get) => {
     const clash = s.doc.drawn.filter((d) => moduleNames.includes(d));
     if (clash.length === 0) return;
     const history = [...s.past, ...s.future];
-    const taken = new Set([...moduleNames, ...s.doc.drawn, ...history.flatMap((h) => h.doc.drawn)]);
+    const taken = new Set([...moduleNames, ...s.doc.drawn, ...history.flatMap((h) => h.doc.drawn), ...partNames()]);
     const names = new Map<string, string>();
     for (const from of clash) {
       const to = uniqueModuleName(from, taken);
@@ -2001,7 +2012,7 @@ export const useStore = create<State>((set, get) => {
       if (next.nav) {
         set({ future: s.future.slice(1) });
         if (!canOpen(next) || isHere(next)) return get().redo();
-        set({ past: [...s.past, { ...here(), nav: true }] });
+        set({ past: withNavStep(s.past, { ...here(), nav: true }) });
         void goTo(next);
         return;
       }

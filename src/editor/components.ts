@@ -76,7 +76,7 @@ export function partInterface(def: ComponentDef & { pins: ModulePort[] }): Modul
 
 class Bad extends Error {}
 
-/** A pin given as `"a"`, `"a[7:0]"`, `"a[3]"` or `{ "name": "a", "width": 8 }`. */
+/** A pin given as `"a"`, `"a[7:0]"` or `{ "name": "a", "width": 8 }`. */
 function pinOf(v: unknown, dir: ModulePort['dir'], width: number, where: string): ModulePort {
   if (typeof v === 'string') {
     const m = /^\s*([A-Za-z_][A-Za-z0-9_$]*)\s*(?:\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*$/.exec(v);
@@ -206,6 +206,12 @@ export function parseComponents(
   }
 }
 
+/** An object as JSON on one line, spaced to read: `{ "name": "a", "inputs": ["x", "y"] }`. */
+function oneLine(o: Record<string, unknown>): string {
+  const value = (v: unknown) => (Array.isArray(v) ? `[${v.map((x) => JSON.stringify(x)).join(', ')}]` : JSON.stringify(v));
+  return `{ ${Object.entries(o).map(([k, v]) => `${JSON.stringify(k)}: ${value(v)}`).join(', ')} }`;
+}
+
 /** A pin as the JSON writes it: `a`, or `a[7:0]`. */
 function pinText(p: ModulePort): string {
   return p.width === 1 ? p.name : `${p.name}[${p.width - 1}:0]`;
@@ -225,7 +231,7 @@ export function componentsJson(defs: readonly ComponentDef[]): string {
       o.base = d.base;
       Object.assign(o, d.params);
     }
-    return `  ${JSON.stringify(o).replace(/,"/g, ', "').replace(/":/g, '": ').replace(/^\{/, '{ ').replace(/\}$/, ' }')}`;
+    return `  ${oneLine(o)}`;
   };
   return `[\n${defs.map(one).join(',\n')}\n]\n`;
 }
@@ -287,7 +293,7 @@ export function symbolJson(sym: SymKey, params: SymParams): string {
     const v = params[f as keyof SymParams] ?? def?.defaults[f as keyof SymParams];
     if (v !== undefined) o[f] = v;
   }
-  return JSON.stringify(o).replace(/,"/g, ', "').replace(/":/g, '": ').replace(/^\{/, '{ ').replace(/\}$/, ' }');
+  return oneLine(o);
 }
 
 /**

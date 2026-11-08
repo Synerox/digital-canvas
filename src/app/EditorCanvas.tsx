@@ -257,7 +257,8 @@ export function EditorCanvas() {
         // A renamed drawing keeps its edits under the new key: the same sheet, so keep the view.
         const e = s.doc.sheets[s.sheet];
         if (e && e === prev.doc.sheets[prev.sheet]) return;
-        if (prev.sheet && !otherFiles) views.current.set(prev.sheet, viewRef.current);
+        // Not while the files are reread (the sheet is then none for a moment): the design may be another one.
+        if (prev.sheet && s.sheet && !otherFiles) views.current.set(prev.sheet, viewRef.current);
         fitAfter.current = { stale: prev.layout, sheet: s.sheet };
       }),
     [],
@@ -700,7 +701,14 @@ export function EditorCanvas() {
             return;
           case 'press-edge':
             mode.current = { kind: 'none' };
-            if (m.moved && m.drafts) s.setEdgeRoutes(m.drafts);
+            if (m.moved && m.drafts) {
+              // A drag that ends where it began (or a wire that cannot move) changes nothing: no undo step, and
+              // the wire is not made one drawn by hand.
+              const was = new Map((s.layout?.edges ?? []).map((x) => [x.id, x.points]));
+              const same = (a: readonly Point[], b: readonly Point[] = []) => a.length === b.length && a.every((p, i) => p.x === b[i].x && p.y === b[i].y);
+              const changed = Object.entries(m.drafts).filter(([id, pts]) => !same(pts, was.get(id)));
+              if (changed.length) s.setEdgeRoutes(Object.fromEntries(changed));
+            }
             setWireDrafts(undefined);
             return;
           case 'wire': {

@@ -410,6 +410,8 @@ module other(input a, output y); assign y = a; endmodule`,
     expect(wireUpTo(w, { x: 30, y: 0 })).toEqual([{ x: 0, y: 0 }]);
     expect(wireUpTo(w, { x: 50, y: 40 })).toEqual([{ x: 0, y: 0 }, { x: 50, y: 0 }]);
     expect(wireUpTo(w, { x: 90, y: 80 })).toEqual([{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 80 }]);
+    // Not on it (the wire was redrawn): nothing, rather than the whole wire up to its pin.
+    expect(wireUpTo(w, { x: 200, y: 200 })).toEqual([]);
   });
 });
 
