@@ -17,7 +17,7 @@ import { GRID, type Point } from '../layout/elk-layout';
 import type { RuleId } from '../core/rules';
 import type { ThemeName } from '../render/theme';
 import { type ComponentDef, loadComponents } from './components';
-import { SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode } from './symbols';
+import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam } from './symbols';
 
 export interface Box {
   x: number;
@@ -162,7 +162,9 @@ function userNode(v: unknown): UserNode | undefined {
   if (sym !== 'raw' && !SYMBOL_BY_KEY[sym]) return undefined;
   const p = isObj(v.params) ? v.params : {};
   const params: UserNode['params'] = {};
-  for (const k of ['width', 'inputs', 'parts', 'shift'] as const) if (isNum(p[k])) params[k] = p[k];
+  // Within what the library takes (Properties and the JSON would show the number, the pins the clamped one).
+  for (const k of ['width', 'inputs', 'parts', 'shift'] as const) if (isNum(p[k])) params[k] = clampParam(k, p[k], PARAM_LIMITS[k][0]);
+  if (sym === 'decoder' && params.width !== undefined) params.width = Math.min(params.width, 8);
   for (const k of ['value', 'module'] as const) if (isStr(p[k])) params[k] = p[k];
   const out: UserNode = { id: v.id, sym, params };
   if (isStr(v.name)) out.name = v.name;

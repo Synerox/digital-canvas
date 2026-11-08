@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { parseComponents, sameSettings } from './components';
 import { emptyEdits, parseEdits, type SheetEdits } from './doc';
-import { followComponents, unlinkChanged } from './sheet';
-import { newUserNode } from './symbols';
+import { followComponents, toUserNode, unlinkChanged } from './sheet';
+import { newUserNode, symbolNode } from './symbols';
+import type { DNode } from '../core/diagram';
 
 const lib = (json: string) => parseComponents(json).defs!;
 
@@ -77,5 +78,40 @@ describe('symbols placed from a preset', () => {
       ],
     });
     expect(e.nodes.map((n) => n.component)).toEqual(['m', undefined, undefined]);
+  });
+});
+
+describe('widths that can be changed', () => {
+  it('copies a bar of equal slices as a Concatenate or Split, whose slices and width can be changed', () => {
+    const none = () => undefined;
+    const join: DNode = {
+      id: 'join:x',
+      kind: 'join',
+      label: '{ }',
+      ports: [
+        { id: 'join:x.[5:4]', name: '[5:4]', dir: 'in', side: 'WEST', width: 2 },
+        { id: 'join:x.[3:2]', name: '[3:2]', dir: 'in', side: 'WEST', width: 2 },
+        { id: 'join:x.[1:0]', name: '[1:0]', dir: 'in', side: 'WEST', width: 2 },
+        { id: 'join:x.out', name: 'out', dir: 'out', side: 'EAST', width: 6 },
+      ],
+      src: [],
+    };
+    expect(toUserNode(join, 'u:1', none)).toEqual({ id: 'u:1', sym: 'concat', params: { parts: 3, width: 2 } });
+    const split = symbolNode(newUserNode('s', 'split', { params: { parts: 2, width: 4 } }), none);
+    expect(toUserNode(split, 'u:2', none)).toEqual({ id: 'u:2', sym: 'split', params: { parts: 2, width: 4 } });
+    // Slices of different widths stay a frozen copy: the library bar has one width.
+    const odd: DNode = { ...join, ports: [join.ports[0], { ...join.ports[1], id: 'join:x.[3:0]', name: '[3:0]', width: 4 }, { ...join.ports[3], width: 6 }] };
+    expect(toUserNode(odd, 'u:3', none).sym).toBe('raw');
+  });
+
+  it('reads saved settings within what the library takes, as the pins are drawn', () => {
+    const e = parseEdits({
+      nodes: [
+        { id: 'u:1', sym: 'and', params: { width: 1000, inputs: 1 } },
+        { id: 'u:2', sym: 'decoder', params: { width: 12 } },
+        { id: 'u:3', sym: 'shl', params: { width: 8.4, shift: 3 } },
+      ],
+    });
+    expect(e.nodes.map((n) => n.params)).toEqual([{ width: 256, inputs: 2 }, { width: 8 }, { width: 8, shift: 3 }]);
   });
 });

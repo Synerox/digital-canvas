@@ -62,7 +62,7 @@ export function ComponentsDialog({ onClose }: { onClose(): void }) {
           <code>shift</code>, <code>value</code>). A <b>part</b> has pins of its own and no logic:{' '}
           <code>{'{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["y[7:0]"] }'}</code>, or numbers of pins such as{' '}
           <code>{'"inputs": 6'}</code> (named in0, in1…, with <code>width</code> bits each). A part is placed as a block and exported as an empty module. What is placed
-          from a component changes with it (but a symbol changed on its own).
+          from a component changes with it (except a symbol changed on its own).
         </p>
         {!defs?.length && <p className="small muted">An example to start from: change it, or clear it to have none.</p>}
         <textarea

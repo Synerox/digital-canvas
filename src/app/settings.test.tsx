@@ -87,7 +87,7 @@ describe('the JSON window', () => {
     const preset = show({ component: 'and5' });
     expect(preset).toContain('and5 (component)');
     // What was placed from it follows it.
-    expect(preset).toContain('Changes the symbols placed from and5 on d (but those changed on their own).');
+    expect(preset).toContain('Changes the symbols placed from and5 on d (except those changed on their own).');
     expect(show({ node: 'u:6' })).toContain('Placed from and5: a change here is for this symbol only (it stops following and5).');
     expect(show({ node: 'u:1' })).not.toContain('Placed from');
     expect(preset).not.toContain('Save as a component');

@@ -123,7 +123,7 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
     } else if (blocks.length) {
       note = `Changes every block of ${d.name}.`;
     } else if (placed.length) {
-      note = `Changes the symbols placed from ${d.name} on ${placed.join(', ')} (but those changed on their own).`;
+      note = `Changes the symbols placed from ${d.name} on ${placed.join(', ')} (except those changed on their own).`;
     }
   }
 

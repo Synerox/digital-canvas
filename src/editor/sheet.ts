@@ -619,6 +619,17 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
         if (signature(symbolNode(block, iface)) === signature(n)) return block;
       }
       break;
+    case 'join':
+    case 'split': {
+      // Slices of one width are the library's Concatenate or Split, whose slices and width can be changed.
+      const slices = n.ports.filter((p) => p.dir === (n.kind === 'join' ? 'in' : 'out'));
+      const w = slices[0]?.width ?? 0;
+      const [lo, hi] = PARAM_LIMITS.parts;
+      if (slices.length < lo || slices.length > hi || w < 1 || w > PARAM_LIMITS.width[1]) break;
+      const u: UserNode = { id, sym: n.kind === 'join' ? 'concat' : 'split', params: { parts: slices.length, width: w } };
+      if (signature(symbolNode(u, iface)) === signature(n)) return u;
+      break;
+    }
     case 'cell': {
       const sym = n.cellType ? CELL_TO_SYM[n.cellType] : undefined;
       // Cells with non-default parameters (negedge clock, reset value, signed operands) have no
