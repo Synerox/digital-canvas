@@ -76,19 +76,27 @@ export function partInterface(def: ComponentDef & { pins: ModulePort[] }): Modul
 
 class Bad extends Error {}
 
+/** The part's "width", and whether a pin took it (a pin with bits of its own, `a[7:0]`, does not). */
+interface PartWidth {
+  width: number;
+  used: boolean;
+}
+
 /** A pin given as `"a"`, `"a[7:0]"` or `{ "name": "a", "width": 8 }`. */
-function pinOf(v: unknown, dir: ModulePort['dir'], width: number, where: string): ModulePort {
+function pinOf(v: unknown, dir: ModulePort['dir'], width: PartWidth, where: string): ModulePort {
   if (typeof v === 'string') {
     const m = /^\s*([A-Za-z_][A-Za-z0-9_$]*)\s*(?:\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*$/.exec(v);
     if (!m) throw new Bad(`${where}: "${v}" is not a pin such as "a" or "a[7:0]".`);
+    if (m[2] === undefined) width.used = true;
     // The pins are numbered from 0 ([7:0]): a[8:1] is 8 bits wide too, written a[7:0].
-    const w = m[2] === undefined ? width : Math.abs(Number(m[2]) - Number(m[3])) + 1;
+    const w = m[2] === undefined ? width.width : Math.abs(Number(m[2]) - Number(m[3])) + 1;
     return { name: m[1], dir, width: checkWidth(w, where) };
   }
   if (isObj(v) && typeof v.name === 'string') {
     if (!NAME.test(v.name)) throw new Bad(`${where}: "${v.name}" is not a pin name (letters, digits and _).`);
     for (const k of Object.keys(v)) if (k !== 'name' && k !== 'width') throw new Bad(`${where}: a pin has a "name" and a "width", not "${k}".`);
-    return { name: v.name, dir, width: v.width === undefined ? width : checkWidth(v.width, where) };
+    if (v.width === undefined) width.used = true;
+    return { name: v.name, dir, width: v.width === undefined ? width.width : checkWidth(v.width, where) };
   }
   throw new Bad(`${where}: write a pin as "a", "a[7:0]" or { "name": "a", "width": 8 }.`);
 }
@@ -101,12 +109,13 @@ function checkWidth(w: unknown, where: string): number {
 }
 
 /** The pins of one side: a number of pins (named in0, in1… or out0, out1…) or a list of pins. */
-function pinsOf(v: unknown, dir: ModulePort['dir'], width: number, where: string): ModulePort[] {
+function pinsOf(v: unknown, dir: ModulePort['dir'], width: PartWidth, where: string): ModulePort[] {
   if (v === undefined) return [];
   const stem = dir === 'input' ? 'in' : dir === 'output' ? 'out' : 'io';
   if (typeof v === 'number') {
     if (!Number.isInteger(v) || v < 0 || v > MAX_PINS) throw new Bad(`${where}: a number of pins from 0 to ${MAX_PINS}.`);
-    return Array.from({ length: v }, (_, k) => ({ name: v === 1 && dir === 'output' ? 'out' : `${stem}${k}`, dir, width }));
+    if (v > 0) width.used = true;
+    return Array.from({ length: v }, (_, k) => ({ name: v === 1 && dir === 'output' ? 'out' : `${stem}${k}`, dir, width: width.width }));
   }
   if (!Array.isArray(v)) throw new Bad(`${where}: a number of pins, or a list such as ["a[7:0]", "b"].`);
   return v.map((p, k) => pinOf(p, dir, width, `${where} ${k + 1}`));
@@ -158,13 +167,20 @@ function componentOf(v: unknown, k: number, taken: (name: string) => string | un
   }
   const why = taken(name);
   if (why) throw new Bad(`${where}: ${why}`);
-  const width = v.width === undefined ? 1 : checkWidth(v.width, `${where} "width"`);
+  const width: PartWidth = { width: v.width === undefined ? 1 : checkWidth(v.width, `${where} "width"`), used: false };
   const pins = [
     ...pinsOf(v.inputs, 'input', width, `${where} input`),
     ...pinsOf(v.inouts, 'inout', width, `${where} inout`),
     ...pinsOf(v.outputs, 'output', width, `${where} output`),
   ];
   if (pins.length === 0) throw new Bad(`${where}: give it "inputs" and "outputs" (or a "base" symbol for a preset).`);
+  // A "width" no pin takes would change nothing: say so, rather than leave the pins as they were.
+  const own = pins.find((p) => p.width !== width.width);
+  if (v.width !== undefined && !width.used && own) {
+    throw new Bad(
+      `${where}: "width" sets the bits of pins written without them, such as "${own.name}"; every pin here has bits of its own (such as "${own.name}[${own.width - 1}:0]"): change those, or write the pins without bits.`,
+    );
+  }
   if (pins.length > MAX_PINS) throw new Bad(`${where}: at most ${MAX_PINS} pins.`);
   const seen = new Set<string>();
   for (const p of pins) {
@@ -212,9 +228,15 @@ function oneLine(o: Record<string, unknown>): string {
   return `{ ${Object.entries(o).map(([k, v]) => `${JSON.stringify(k)}: ${value(v)}`).join(', ')} }`;
 }
 
-/** A pin as the JSON writes it: `a`, or `a[7:0]`. */
-function pinText(p: ModulePort): string {
-  return p.width === 1 ? p.name : `${p.name}[${p.width - 1}:0]`;
+/** A pin as the JSON writes it: `a` when it has the bits the part's `width` gives (see partWidth), else `a[7:0]`. */
+function pinText(p: ModulePort, width: number): string {
+  return p.width === width ? p.name : `${p.name}[${p.width - 1}:0]`;
+}
+
+/** The bits every pin of a part has, when they all have the same; else 1 (each wider pin says its own). */
+function partWidth(pins: readonly ModulePort[]): number {
+  const w = pins[0]?.width ?? 1;
+  return pins.every((p) => p.width === w) ? w : 1;
 }
 
 /**
@@ -224,10 +246,13 @@ function pinText(p: ModulePort): string {
 export function componentJson(d: ComponentDef, multiline = false): string {
   const o: Record<string, unknown> = { name: d.name, ...(d.title ? { title: d.title } : {}) };
   if (isPart(d)) {
+    // Pins of one width are written as names and the width once, so that changing "width" changes them all.
+    const width = partWidth(d.pins);
     for (const [key, dir] of [['inputs', 'input'], ['inouts', 'inout'], ['outputs', 'output']] as const) {
       const pins = d.pins.filter((p) => p.dir === dir);
-      if (pins.length) o[key] = pins.map(pinText);
+      if (pins.length) o[key] = pins.map((p) => pinText(p, width));
     }
+    if (width > 1) o.width = width;
   } else {
     o.base = d.base;
     Object.assign(o, d.params);
@@ -326,13 +351,15 @@ export function symbolJson(sym: SymKey, params: SymParams): string {
   return JSON.stringify(o, null, 2);
 }
 
-/** What the JSON of a placed symbol may set, with the numbers each takes: `"inputs" 2–32, "width" 1–256`. */
+/** What the JSON of a placed symbol may set, with the numbers each takes: `"inputs" 2–32, "width" 1–256 bits`. */
 export function settingsHint(sym: SymKey): string {
   return presetFields(sym)
     .map((f) => {
       if (f === 'value') return `"value" a Verilog number such as "4'd2"`;
       const [lo, hi] = PARAM_LIMITS[f as keyof typeof PARAM_LIMITS];
-      return `"${f}" ${lo}–${f === 'width' && sym === 'decoder' ? 8 : hi}`;
+      // "width" is bits, not the size of the drawing: say so (the symbol shows them on its pins).
+      const unit = f === 'width' ? (sym === 'decoder' ? ' select bits' : ' bits') : f === 'shift' ? ' bits of the shift amount' : '';
+      return `"${f}" ${lo}–${f === 'width' && sym === 'decoder' ? 8 : hi}${unit}`;
     })
     .join(', ');
 }

@@ -133,11 +133,35 @@ describe('components in JSON', () => {
     expect(editComponent(defs, 'alu', '{ "name": "alu", "inputs": 2,').error).toMatch(/^Not valid JSON/);
   });
 
+  it('writes the width of a part whose pins all have it once, so that changing it changes every pin', () => {
+    const x = parseComponents('{ "name": "x", "inputs": 2, "outputs": 1, "width": 4 }').defs![0];
+    expect(componentJson(x)).toBe('{ "name": "x", "inputs": ["in0", "in1"], "outputs": ["out"], "width": 4 }');
+    const wider = editComponent([x], 'x', componentJson(x, true).replace('"width": 4', '"width": 16')).defs![0];
+    expect(wider.pins!.map((p) => p.width)).toEqual([16, 16, 16]);
+    // Pins of different widths each say theirs, as before.
+    const alu = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "op[2:0]"], "outputs": ["y[7:0]"] }').defs![0];
+    expect(componentJson(alu)).toBe('{ "name": "alu", "inputs": ["a[7:0]", "op[2:0]"], "outputs": ["y[7:0]"] }');
+    // Pins written with bits as wide as "width" are the same part.
+    const same = parseComponents('{ "name": "y", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["s[7:0]"] }').defs![0];
+    expect(componentJson(same)).toBe('{ "name": "y", "inputs": ["a", "b"], "outputs": ["s"], "width": 8 }');
+    expect(parseComponents(componentJson(same)).defs).toEqual([same]);
+  });
+
+  it('refuses a part width that no pin takes, rather than leave the pins as they were', () => {
+    const r = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["y[7:0]"], "width": 16 }');
+    expect(r.error).toMatch(/^alu: "width" sets the bits of pins written without them, such as "a"/);
+    expect(editComponent([], 'alu', '{ "name": "alu", "inputs": [{ "name": "a", "width": 8 }], "outputs": ["y[7:0]"], "width": 4 }').error).toMatch(/^alu: "width"/);
+    // Taken by a pin without bits: that pin has it, the others keep theirs.
+    expect(parseComponents('{ "name": "m", "inputs": ["a[7:0]", "b"], "outputs": ["y[7:0]"], "width": 16 }').defs![0].pins!.map((p) => p.width)).toEqual([8, 16, 8]);
+    // As wide as the pins say: nothing to refuse.
+    expect(parseComponents('{ "name": "n", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"], "width": 8 }').defs![0].pins!.map((p) => p.width)).toEqual([8, 8]);
+  });
+
   it('says what the JSON of a symbol sets', () => {
-    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256');
-    expect(settingsHint('decoder')).toBe('"width" 1–8');
+    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits');
+    expect(settingsHint('decoder')).toBe('"width" 1–8 select bits');
     expect(settingsHint('const')).toBe('"value" a Verilog number such as "4\'d2"');
-    expect(settingsHint('shl')).toBe('"width" 1–256, "shift" 1–16');
+    expect(settingsHint('shl')).toBe('"width" 1–256 bits, "shift" 1–16 bits of the shift amount');
   });
 
   it('finds a free name', () => {

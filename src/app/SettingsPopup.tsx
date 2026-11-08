@@ -97,7 +97,7 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
     const d = subject.def;
     title = `${d.title ?? d.name} (component)`;
     hint = isPart(d)
-      ? 'Pins: "inputs", "outputs", "inouts" as names such as "a[7:0]", or a number of pins; "width" is their bits.'
+      ? 'Pins: "inputs", "outputs", "inouts" as names such as "a" or "a[7:0]", or a number of pins; "width" is the bits of every pin written without them ("a").'
       : `Sets ${settingsHint(d.base!)}; "base" is the symbol.`;
     const blocks = isPart(d) ? sheetsUsing(doc, d.name) : [];
     const kept = result.defs?.find((c) => c.name === d.name);

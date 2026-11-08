@@ -77,7 +77,7 @@ describe('the JSON window', () => {
     expect(html).toContain('<b>AND</b>');
     expect(html).toContain('rows="5"');
     expect(html).toContain('{\n  &quot;sym&quot;: &quot;and&quot;,\n  &quot;inputs&quot;: 2,\n  &quot;width&quot;: 1\n}</textarea>');
-    expect(html).toContain('Sets &quot;inputs&quot; 2–32, &quot;width&quot; 1–256.');
+    expect(html).toContain('Sets &quot;inputs&quot; 2–32, &quot;width&quot; 1–256 bits.');
     expect(html).toContain('Save as a component');
   });
 
@@ -88,7 +88,9 @@ describe('the JSON window', () => {
     expect(preset).not.toContain('Save as a component');
     const part = show({ component: 'alu' });
     expect(part).toContain('Changes every block of alu.');
-    expect(part).toContain('&quot;inputs&quot;: [\n    &quot;a[7:0]&quot;,\n    &quot;b[7:0]&quot;\n  ],');
+    // Pins all 8 bits wide: written as names and one "width", which changes them all.
+    expect(part).toContain('&quot;inputs&quot;: [\n    &quot;a&quot;,\n    &quot;b&quot;\n  ],');
+    expect(part).toContain('&quot;width&quot;: 8\n}');
   });
 });
 
