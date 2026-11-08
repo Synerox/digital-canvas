@@ -335,8 +335,11 @@ export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEd
   if ((u.sym === 'concat' || u.sym === 'split') && (old.params.width ?? 1) !== (u.params.width ?? 1)) {
     // Slices are named by their bits, which change with the width: a wire hidden on a slice that is gone (fewer
     // slices) moves to that slice's new name too, so that it still comes back with it.
+    // Not onto a slice name a stored wire already ends on (a file saved before hidden wires moved with the width
+    // can hold one there): that wire stays where it is.
     const all = (n: UserNode) => symbolNode({ ...n, params: { ...n.params, parts: PARAM_LIMITS.parts[1] } }, noModules);
-    for (const [from, to] of portSuccessors(all(old), all(u))) if (!moved.has(from)) moved.set(from, to);
+    const used = new Set(e.edges.filter((x) => x.target.node === id).map((x) => x.target.port));
+    for (const [from, to] of portSuccessors(all(old), all(u))) if (!moved.has(from) && !used.has(to)) moved.set(from, to);
   }
   const remap = (end: { node: string; port: string }) => (end.node === id && moved.has(end.port) ? { node: id, port: moved.get(end.port)! } : end);
   const remapped = e.edges.map((x) => {
@@ -351,15 +354,13 @@ export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEd
   const back = (was: { node: string; port: string }, now: { node: string; port: string }) => was.node === id && !beforeIds.has(was.port) && afterIds.has(now.port);
   const returns = e.edges.map((x, i) => back(x.source, remapped[i].source) || back(x.target, remapped[i].target));
   if (!returns.includes(true) && remapped.every((x, i) => x === e.edges[i])) return { ...e, nodes };
-  // A returning wire would be a second driver of an input that another wire drives by now (one moved onto a slice
-  // port that is back under its old name, one wired while it was hidden, or another returning wire): drop it.
-  const driven = new Set(remapped.filter((_, i) => !returns[i]).map((x) => x.target.port));
-  const edges = remapped.filter((x, i) => {
-    if (!returns[i]) return true;
-    if (driven.has(x.target.port)) return false;
-    driven.add(x.target.port);
-    return true;
-  });
+  // A returning wire would be a second driver of an input that a wire shown after the change drives by now (one
+  // moved onto a slice port that is back under its old name, or one wired while it was hidden): drop it. A wire
+  // that stays hidden drives nothing; returning wires that share an input came back together before (an inout's
+  // wire shares a net with a driver), so they all come back.
+  const shown = (end: { node: string; port: string }) => end.node !== id || afterIds.has(end.port);
+  const driven = new Set(remapped.filter((x, i) => !returns[i] && shown(x.source) && shown(x.target)).map((x) => x.target.port));
+  const edges = remapped.filter((x, i) => !returns[i] || !driven.has(x.target.port));
   if (edges.length === remapped.length) return { ...e, nodes, edges };
   const routes = { ...e.routes };
   for (const x of remapped) if (!edges.includes(x)) delete routes[x.id];

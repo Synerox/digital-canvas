@@ -589,11 +589,49 @@ describe('changing parameters', () => {
     s.wire(`${c}.out`, `${cat}.[7:0]`);
     // a's wire as such a file keeps it: hidden on [11:8], a slice of the width before.
     s.e = { ...s.e, edges: [...s.e.edges, { id: 'w:old', source: { node: a, port: `${a}.out` }, target: { node: cat, port: `${cat}.[11:8]` } }] };
-    s.e = setParams(s.e, cat, { parts: 2 });
-    s.e = setParams(s.e, cat, { width: 4 });
-    s.e = setParams(s.e, cat, { parts: 3 });
-    expect(into(s.d, cat)).toHaveLength(3);
+    const start = s.e;
+    for (const steps of [[{ parts: 2 }, { width: 4 }, { parts: 3 }], [{ parts: 2, width: 4 }, { parts: 3 }]]) {
+      s.e = start;
+      for (const p of steps) s.e = setParams(s.e, cat, p);
+      expect(into(s.d, cat)).toEqual([`${a}>[11:8]`, `${b}>[7:4]`, `${c}>[3:0]`]);
+      expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
+    }
+  });
+
+  it('brings back a wire before an older one that stays hidden, and both wires of an input shared with an inout', () => {
+    // A split's output: [31:24] to y is hidden, [23:16] to y wired meanwhile and hidden too.
+    const s = new Drawing();
+    const bus = s.add('input', 'bus', { width: 32 });
+    const sp = s.add('split', undefined, { parts: 4, width: 8 });
+    const y = s.add('output', 'y', { width: 8 });
+    s.wire(`${bus}.out`, `${sp}.in`);
+    s.wire(`${sp}.[31:24]`, `${y}.in`);
+    s.e = setParams(s.e, sp, { parts: 3 });
+    s.wire(`${sp}.[23:16]`, `${y}.in`);
+    s.e = setParams(s.e, sp, { parts: 2 });
+    // Three slices of 4 bits: the newer wire is back on [11:8]; the older one ([15:12] now) stays hidden.
+    s.e = setParams(s.e, sp, { parts: 3, width: 4 });
+    expect(s.d.edges.filter((w) => w.target.node === y).map((w) => w.source.port)).toEqual([`${sp}.[11:8]`]);
+    expect(s.e.edges).toHaveLength(3);
+    // Four slices: the older one would be a second driver of y.
+    s.e = setParams(s.e, sp, { parts: 4 });
+    expect(s.d.edges.filter((w) => w.target.node === y).map((w) => w.source.port)).toEqual([`${sp}.[11:8]`]);
     expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
+
+    // An inout's wire and a driver on one slice: both are hidden, and both come back.
+    const iface: InterfaceOf = (m) => (m === 'pad' ? { label: 'pad', ports: [{ name: 'io', dir: 'inout', width: 8 }] } : undefined);
+    const t = new Drawing(iface);
+    const a = t.add('input', 'a', { width: 8 });
+    const cat = t.add('concat', undefined, { parts: 3, width: 8 });
+    const pad = t.add('block', 'p', { module: 'pad' });
+    t.wire(`${pad}.io`, `${cat}.[23:16]`);
+    t.wire(`${a}.out`, `${cat}.[23:16]`);
+    const before = t.d.edges.filter((w) => w.target.node === cat).length;
+    for (const steps of [[{ parts: 2 }, { parts: 3 }], [{ parts: 2 }, { parts: 3, width: 4 }]]) {
+      let e = t.e;
+      for (const p of steps) e = setParams(e, cat, p);
+      expect(effectiveDiagram('m', undefined, e, iface).edges.filter((w) => w.target.node === cat)).toHaveLength(before);
+    }
   });
 
   it('never brings back a hidden wire onto an input that another wire drives', () => {

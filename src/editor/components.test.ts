@@ -188,9 +188,13 @@ describe('components in JSON', () => {
     expect(renamedPresets(lib('{ "name": "a", "base": "and", "inputs": 3 }'), lib('[{ "name": "n", "base": "and", "inputs": 5 }, { "name": "a2", "base": "and", "inputs": 3 }]'))).toEqual({
       a: 'a2',
     });
-    // No way to tell: nothing renamed, rather than give symbols another preset's settings.
-    expect(renamedPresets(two, lib('[{ "name": "and5", "base": "and", "inputs": 5 }]'))).toEqual({});
-    expect(renamedPresets(two, lib('[{ "name": "x", "base": "and", "inputs": 3 }, { "name": "y", "base": "and", "inputs": 3 }]'))).toEqual({});
+    // Lines edited in place: renamed (and changed).
+    expect(renamedPresets(two, lib('[{ "name": "and5", "base": "and", "inputs": 5 }]'))).toEqual({ and3: 'and5' });
+    expect(renamedPresets(two, lib('[{ "name": "x", "base": "and", "inputs": 3 }, { "name": "y", "base": "and", "inputs": 3 }]'))).toEqual({ and3: 'x', and4: 'y' });
+    // Deleted here and another added there: no rename, rather than give symbols another preset's settings.
+    const mux = lib('[{ "name": "mux4", "base": "mux", "inputs": 4, "width": 8 }, { "name": "and3", "base": "and", "inputs": 3 }]');
+    expect(renamedPresets(mux, lib('[{ "name": "and3", "base": "and", "inputs": 3 }, { "name": "mux2", "base": "mux", "inputs": 2, "width": 8 }]'))).toEqual({});
+    expect(renamedPresets(two, lib('[{ "name": "and4", "base": "and", "inputs": 4 }, { "name": "and8", "base": "and", "inputs": 8 }]'))).toEqual({});
   });
 
   it('links a symbol to its preset only while it has its settings', () => {

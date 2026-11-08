@@ -524,10 +524,13 @@ export function EditorCanvas() {
   // Before the return below: a hook runs on every render.
   const openBus = useMemo(() => (layout ? openBusHints(layout) : []), [layout]);
 
-  /** A dragged symbol moves with the pointer: what it points at is still under it on the new layout. */
-  const followDrag = () => {
+  /**
+   * A dragged symbol moves with the pointer: what it pointed at on the layout `was` (before this step of the drag)
+   * is still under it on the new layout. A hover that was out of date already stays so.
+   */
+  const followDrag = (was: LayoutResult | undefined) => {
     const now = store().layout;
-    if (now) setHovered((h) => h && { ...h, on: now });
+    if (now && now !== was) setHovered((h) => (h && h.on === was && h.at === view ? { ...h, on: now } : h));
   };
 
   if (!layout) return null;
@@ -711,8 +714,9 @@ export function EditorCanvas() {
             // Always by whole grid steps: symbols stay on the grid, so their pins line up.
             m.dx = snap(w.x - m.start.x);
             m.dy = snap(w.y - m.start.y);
+            const was = s.layout;
             s.previewMove(m.ids, m.dx, m.dy);
-            followDrag();
+            followDrag(was);
             return;
           }
           case 'press-empty': {
@@ -748,8 +752,9 @@ export function EditorCanvas() {
           case 'press-node':
             mode.current = { kind: 'none' };
             if (m.moved) {
+              const was = s.layout;
               s.moveSelection(m.ids, m.dx, m.dy);
-              followDrag();
+              followDrag(was);
             } else if (!m.additive && s.selection.size > 1) s.select([m.clicked]);
             return;
           case 'press-empty': {
