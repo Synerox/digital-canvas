@@ -20,7 +20,7 @@
 - **調整導線**：拖曳任何一段線把它平移，相鄰兩段跟著伸縮；拖曳轉角同時移動兩段；接在 pin 上的第一段和最後一段也能拖，pin 端會留一小段短線接回 pin。同一個 net 共用的線段一起移動。選取的導線會顯示轉角控制點。
 - **對齊格點**：所有符號和導線都在 10 px 格點上，相連的 pin 會對齊成直線，不會有 1–9 px 的小斷層或小折角（ELK 排版的結果也會先對齊格點）。舊存檔開啟時自動對齊。
 - **編輯**：點選、Shift/Ctrl 加選、拖曳框選；拖曳移動（對齊格點）；Delete 刪除；Ctrl+C/X/V/D；Ctrl+Z / Ctrl+Shift+Z 復原重做；右側「Properties」只放必要的欄位：名稱、位元寬度、輸入數、常數值、導線標籤與取用位元（腳位清單收在「n pins」裡，手繪圖不顯示 Verilog 原始碼）。
-- **雙擊**：有子模組的 block 進入子模組；有設定的符號（閘、MUX、加法器、暫存器、常數…）開一個小視窗用 JSON 編輯設定，例如 `{ "sym": "and", "inputs": 5, "width": 1 }`，Apply（Ctrl+Enter）套用、Esc 取消，一次套用是一個復原步驟；自訂零件（part）的方塊和符號庫 Components 裡的元件開同樣的小視窗編輯它的定義（改腳位會改到每個方塊）；I/O pin、註解和導線還是改名稱。Properties 的「JSON…」按鈕也能打開。
+- **雙擊**：有子模組的 block 進入子模組；有設定的符號（閘、MUX、加法器、暫存器、常數…）開一個小視窗用 JSON 編輯設定（每個項目一行，例如 `"inputs": 5`），Apply（Ctrl+Enter）套用、Esc 取消，一次套用是一個復原步驟；在那個元件上繼續點不會關掉視窗，點其他地方才會關，關掉後再點兩下一定會再打開；自訂零件（part）的方塊和符號庫 Components 裡的元件開同樣的小視窗編輯它的定義（改腳位會改到每個方塊）；I/O pin、註解和導線還是改名稱。Properties 的「JSON…」按鈕也能打開。
 - **Ctrl+Z 回上一層**：切換到別張圖也是一個復原步驟。雙擊 block 進入子模組後按 Ctrl+Z 回到主模組（畫面停在離開時的位置），Ctrl+Shift+Z 再進去；breadcrumb、階層樹、手繪圖清單和（在 Verilog 圖上）Block diagram / Full circuit 切換都一樣。在子模組裡改過東西時，Ctrl+Z 先復原那些修改，再回上一層。切換圖不會清掉重做紀錄。
 - **JSON 元件**：符號庫最上面的「Components › Add…/Edit…」用 JSON 定義自己的元件，跟作品一起存檔。兩種：
   - 預設組合（preset）：內建符號加上設定，例如 `{ "name": "and5", "base": "and", "inputs": 5 }`、`{ "name": "mux4x8", "base": "mux", "inputs": 4, "width": 8 }`。可設定的欄位就是 Properties 裡的 `inputs`、`width`、`parts`、`shift`、`value`。

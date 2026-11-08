@@ -408,7 +408,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
             <button
               onClick={(e) => {
                 const r = e.currentTarget.getBoundingClientRect();
-                openSettings(settings, r.left, r.bottom);
+                openSettings(settings, r.left, r.bottom, id);
               }}
               title={part ? `The pins of ${part.name}, as JSON (changes every block of it). Double-clicking the block opens it too.` : 'The settings as JSON. Double-clicking the symbol opens them too.'}
             >

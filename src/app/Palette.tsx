@@ -12,6 +12,7 @@ import { componentSymbol, isPart } from '../editor/components';
 import { ComponentsDialog } from './ComponentsDialog';
 import { moduleTitle, useStore } from './store';
 import { openSettings } from './settings';
+import { ClickRun } from './click-run';
 import { ui } from './ui-events';
 
 /** The same item of the library: the library's own symbols have no parameters given, components always some. */
@@ -61,6 +62,7 @@ export function Palette() {
   const components = useStore((s) => s.doc.components);
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState(false);
+  const [clicks] = useState(() => new ClickRun());
   // The same parameters each render, so that the icons (memoized by them) are not laid out again.
   const placed = useMemo(() => new Map((components ?? []).map((c) => [c.name, componentSymbol(c)])), [components]);
   const search = useRef<HTMLInputElement>(null);
@@ -76,6 +78,15 @@ export function Palette() {
   const match = (t: string) => !q || t.toLowerCase().includes(q);
   const modules = blockModules();
 
+  /** Edit a component as JSON (a double-click on it). */
+  const edit = (component: string, ev: React.MouseEvent) => {
+    // Its two clicks took it up and put it down again: nothing is being placed.
+    startPlacing(undefined);
+    openSettings({ component }, ev.clientX, ev.clientY, `library:${component}`);
+    // The next two clicks open it again, however the browser counts them (see ClickRun).
+    clicks.reset();
+  };
+
   const item = (key: string, sym: SymKey, title: string, hint: string, params?: SymParams, component?: string) => {
     // A preset is the same symbol as the library's with other parameters: only one of them is on.
     const active = placing?.sym === sym && sameParams(placing.params, params);
@@ -90,16 +101,12 @@ export function Palette() {
           ev.dataTransfer.effectAllowed = 'copy';
           startPlacing({ sym, params });
         }}
-        onClick={() => startPlacing(active ? undefined : { sym, params })}
-        onDoubleClick={
-          component
-            ? (ev) => {
-                // Its two clicks took it up and put it down again: nothing is being placed.
-                startPlacing(undefined);
-                openSettings({ component }, ev.clientX, ev.clientY);
-              }
-            : undefined
-        }
+        data-settings-from={component ? `library:${component}` : undefined}
+        onClick={(ev) => {
+          startPlacing(active ? undefined : { sym, params });
+          if (component && clicks.click(key, ev.detail)) edit(component, ev);
+        }}
+        onDoubleClick={component ? (ev) => edit(component, ev) : undefined}
       >
         <Icon sym={sym} params={params} />
         <span>{title}</span>
