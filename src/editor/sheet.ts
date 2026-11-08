@@ -321,7 +321,7 @@ function portSuccessors(before: DNode, after: DNode): Map<string, string> {
  * with no successor is kept (hidden), and comes back with its port, unless the
  * input it feeds is driven by another wire by then.
  */
-export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEdits {
+export function setParams(e: SheetEdits, id: string, params: SymParams, iface: InterfaceOf = () => undefined): SheetEdits {
   const old = e.nodes.find((n) => n.id === id);
   if (!old) return e;
   const u: UserNode = { ...old, params: { ...old.params, ...params } };
@@ -347,20 +347,38 @@ export function setParams(e: SheetEdits, id: string, params: SymParams): SheetEd
     const target = remap(x.target);
     return source === x.source && target === x.target ? x : { ...x, source, target };
   });
-  // Wires that come back: stored on a port of this symbol that was not there (hidden by an earlier change), on
-  // a port that is there now (under its old name, or its new one after a change of width).
+  // The pins of the symbols after the change, to tell which wires show (both ends there) and which drive (an
+  // inout's wire only shares a net, as checkSheet counts). Imported symbols are not in the edits, nor the module
+  // of a block `iface` does not know: their ends count as there, and as driving.
+  const userNodes = new Map(nodes.map((n) => [n.id, n]));
+  const pinsOf = new Map<string, Map<string, DPort> | null>();
+  const pinOf = (end: { node: string; port: string }): DPort | null | undefined => {
+    if (!pinsOf.has(end.node)) {
+      const n = userNodes.get(end.node);
+      const known = n && (n.sym !== 'block' || iface(n.params.module ?? ''));
+      pinsOf.set(end.node, known ? new Map((n.id === id ? after : symbolNode(n, iface)).ports.map((p) => [p.id, p])) : null);
+    }
+    const pins = pinsOf.get(end.node);
+    return pins === null ? null : pins!.get(end.port);
+  };
+  const shown = (x: UserEdge) => pinOf(x.source) !== undefined && pinOf(x.target) !== undefined;
+  const drives = (x: UserEdge) => !pinOf(x.source)?.inout;
+  // Wires that come back: stored on a port of this symbol that was not there (hidden by an earlier change), shown
+  // now (on that port under its old name, or its new one after a change of width).
   const beforeIds = new Set(before.ports.map((p) => p.id));
-  const afterIds = new Set(after.ports.map((p) => p.id));
-  const back = (was: { node: string; port: string }, now: { node: string; port: string }) => was.node === id && !beforeIds.has(was.port) && afterIds.has(now.port);
-  const returns = e.edges.map((x, i) => back(x.source, remapped[i].source) || back(x.target, remapped[i].target));
+  const hidden = (end: { node: string; port: string }) => end.node === id && !beforeIds.has(end.port);
+  const returns = e.edges.map((x, i) => (hidden(x.source) || hidden(x.target)) && shown(remapped[i]));
   if (!returns.includes(true) && remapped.every((x, i) => x === e.edges[i])) return { ...e, nodes };
-  // A returning wire would be a second driver of an input that a wire shown after the change drives by now (one
-  // moved onto a slice port that is back under its old name, or one wired while it was hidden): drop it. A wire
-  // that stays hidden drives nothing; returning wires that share an input came back together before (an inout's
-  // wire shares a net with a driver), so they all come back.
-  const shown = (end: { node: string; port: string }) => end.node !== id || afterIds.has(end.port);
-  const driven = new Set(remapped.filter((x, i) => !returns[i] && shown(x.source) && shown(x.target)).map((x) => x.target.port));
-  const edges = remapped.filter((x, i) => !returns[i] || !driven.has(x.target.port));
+  // A returning wire would be a second driver of an input that a shown wire drives by now (one moved onto a slice
+  // port that is back under its old name, or one wired while it was hidden; a wire that stays hidden drives
+  // nothing), or that a wire coming back before it drives: drop it.
+  const driven = new Set(remapped.filter((x, i) => !returns[i] && shown(x) && drives(x)).map((x) => x.target.port));
+  const edges = remapped.filter((x, i) => {
+    if (!returns[i] || !drives(x)) return true;
+    if (driven.has(x.target.port)) return false;
+    driven.add(x.target.port);
+    return true;
+  });
   if (edges.length === remapped.length) return { ...e, nodes, edges };
   const routes = { ...e.routes };
   for (const x of remapped) if (!edges.includes(x)) delete routes[x.id];
@@ -405,6 +423,7 @@ export function followComponents(
   before: readonly ComponentDef[] | undefined,
   after: readonly ComponentDef[] | undefined,
   renamed?: Readonly<Record<string, string>>,
+  iface?: InterfaceOf,
 ): Record<string, SheetEdits> {
   /** What the symbols placed from each preset become: the preset now (by its name now), or none. */
   const plan = new Map<string, ComponentDef | undefined>();
@@ -427,7 +446,7 @@ export function followComponents(
       }
       // All of them: a setting the preset leaves out is the default, not what the symbol had.
       const params = fullSettings(n.sym, componentSymbol(to).params);
-      if (!sameSettings(n.sym, n.params, params)) next = setParams(next, n.id, params);
+      if (!sameSettings(n.sym, n.params, params)) next = setParams(next, n.id, params, iface);
       next = linkTo(next, n.id, to.name);
     }
     if (next !== e) (out ??= { ...sheets })[key] = next;

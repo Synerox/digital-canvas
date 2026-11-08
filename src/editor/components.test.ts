@@ -188,10 +188,17 @@ describe('components in JSON', () => {
     expect(renamedPresets(lib('{ "name": "a", "base": "and", "inputs": 3 }'), lib('[{ "name": "n", "base": "and", "inputs": 5 }, { "name": "a2", "base": "and", "inputs": 3 }]'))).toEqual({
       a: 'a2',
     });
-    // Lines edited in place: renamed (and changed).
-    expect(renamedPresets(two, lib('[{ "name": "and5", "base": "and", "inputs": 5 }]'))).toEqual({ and3: 'and5' });
-    expect(renamedPresets(two, lib('[{ "name": "x", "base": "and", "inputs": 3 }, { "name": "y", "base": "and", "inputs": 3 }]'))).toEqual({ and3: 'x', and4: 'y' });
+    // A line edited in place, between the same lines that stay: renamed (and changed).
+    const three = lib('[{ "name": "or2", "base": "or" }, { "name": "and3", "base": "and", "inputs": 3 }, { "name": "xor2", "base": "xor" }]');
+    expect(renamedPresets(three, lib('[{ "name": "or2", "base": "or" }, { "name": "and5", "base": "and", "inputs": 5 }, { "name": "xor2", "base": "xor" }]'))).toEqual({
+      and3: 'and5',
+    });
+    // Two gone and one or two new with no settings to tell them apart: no way to tell which.
+    expect(renamedPresets(two, lib('[{ "name": "and5", "base": "and", "inputs": 5 }]'))).toEqual({});
+    expect(renamedPresets(two, lib('[{ "name": "x", "base": "and", "inputs": 3 }, { "name": "y", "base": "and", "inputs": 3 }]'))).toEqual({});
     // Deleted here and another added there: no rename, rather than give symbols another preset's settings.
+    expect(renamedPresets(three, lib('[{ "name": "and9", "base": "and", "inputs": 9 }, { "name": "or2", "base": "or" }, { "name": "xor2", "base": "xor" }]'))).toEqual({});
+    expect(renamedPresets(lib('[{ "name": "m", "base": "mux" }, { "name": "a", "base": "and", "inputs": 3 }]'), lib('[{ "name": "x", "base": "and", "inputs": 5 }, { "name": "y", "base": "and", "inputs": 6 }, { "name": "m", "base": "mux" }]'))).toEqual({});
     const mux = lib('[{ "name": "mux4", "base": "mux", "inputs": 4, "width": 8 }, { "name": "and3", "base": "and", "inputs": 3 }]');
     expect(renamedPresets(mux, lib('[{ "name": "and3", "base": "and", "inputs": 3 }, { "name": "mux2", "base": "mux", "inputs": 2, "width": 8 }]'))).toEqual({});
     expect(renamedPresets(two, lib('[{ "name": "and4", "base": "and", "inputs": 4 }, { "name": "and8", "base": "and", "inputs": 8 }]'))).toEqual({});

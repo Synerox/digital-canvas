@@ -1944,7 +1944,7 @@ export const useStore = create<State>((set, get) => {
     setNodeParams(id, params) {
       const before = get().doc;
       // Changed on its own, a symbol placed from a preset no longer follows the preset.
-      editSheet((e) => unlinkChanged(setParams(e, id, params), id, get().doc.components));
+      editSheet((e) => unlinkChanged(setParams(e, id, params, interfaceOf), id, get().doc.components));
       // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
       const s = get();
       if (s.doc === before || !s.netlist) return;
@@ -2119,7 +2119,7 @@ export const useStore = create<State>((set, get) => {
       if (defs.length) doc.components = defs;
       else delete doc.components;
       // The symbols placed from a preset follow it: one undo step with the change of the library.
-      doc.sheets = followComponents(s.doc.sheets, s.doc.components, defs, renamed);
+      doc.sheets = followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf);
       if (doc.sheets === s.doc.sheets && JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
       const placing = placingNow(s.placing, defs, renamed);
       pushDoc(doc, placing !== s.placing ? { placing } : {});

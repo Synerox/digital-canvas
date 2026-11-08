@@ -618,6 +618,36 @@ describe('changing parameters', () => {
     expect(s.d.edges.filter((w) => w.target.node === y).map((w) => w.source.port)).toEqual([`${sp}.[11:8]`]);
     expect(checkSheet(s.d).messages.join(' ')).not.toContain('more than one wire');
 
+    // Two wires hidden at different times, on two slices, coming back at once: one drives y.
+    const r = new Drawing();
+    const rb = r.add('input', 'bus', { width: 32 });
+    const rs = r.add('split', undefined, { parts: 4, width: 8 });
+    const ry = r.add('output', 'y', { width: 8 });
+    r.wire(`${rb}.out`, `${rs}.in`);
+    r.wire(`${rs}.[31:24]`, `${ry}.in`);
+    r.e = setParams(r.e, rs, { parts: 3 });
+    r.wire(`${rs}.[23:16]`, `${ry}.in`);
+    r.e = setParams(r.e, rs, { parts: 2 });
+    r.e = setParams(r.e, rs, { parts: 4 });
+    expect(r.d.edges.filter((w) => w.target.node === ry)).toHaveLength(1);
+    expect(checkSheet(r.d).messages.join(' ')).not.toContain('more than one wire');
+
+    // A wire hidden on another symbol drives nothing: the returning one comes back.
+    const q = new Drawing();
+    const qb = q.add('input', 'bus', { width: 24 });
+    const [q1, q2] = [0, 1].map(() => q.add('split', undefined, { parts: 3, width: 8 }));
+    const qy = q.add('output', 'y', { width: 8 });
+    q.wire(`${qb}.out`, `${q1}.in`);
+    q.wire(`${qb}.out`, `${q2}.in`);
+    q.wire(`${q1}.[23:16]`, `${qy}.in`);
+    q.e = setParams(q.e, q1, { parts: 2 });
+    q.wire(`${q2}.[23:16]`, `${qy}.in`);
+    q.e = setParams(q.e, q2, { parts: 2 });
+    q.e = setParams(q.e, q1, { parts: 3 });
+    expect(q.d.edges.filter((w) => w.target.node === qy).map((w) => w.source.port)).toEqual([`${q1}.[23:16]`]);
+    q.e = setParams(q.e, q2, { parts: 3 });
+    expect(q.d.edges.filter((w) => w.target.node === qy).map((w) => w.source.port)).toEqual([`${q1}.[23:16]`]);
+
     // An inout's wire and a driver on one slice: both are hidden, and both come back.
     const iface: InterfaceOf = (m) => (m === 'pad' ? { label: 'pad', ports: [{ name: 'io', dir: 'inout', width: 8 }] } : undefined);
     const t = new Drawing(iface);
@@ -629,7 +659,7 @@ describe('changing parameters', () => {
     const before = t.d.edges.filter((w) => w.target.node === cat).length;
     for (const steps of [[{ parts: 2 }, { parts: 3 }], [{ parts: 2 }, { parts: 3, width: 4 }]]) {
       let e = t.e;
-      for (const p of steps) e = setParams(e, cat, p);
+      for (const p of steps) e = setParams(e, cat, p, iface);
       expect(effectiveDiagram('m', undefined, e, iface).edges.filter((w) => w.target.node === cat)).toHaveLength(before);
     }
   });
