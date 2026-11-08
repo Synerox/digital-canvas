@@ -440,6 +440,21 @@ export function buildGeometry(input: GeometryInput): Geometry {
       if (!r.manual) nudged.add(e.id);
       else movedOnGrid.add(e.id);
     }
+    // A wire drawn by hand is kept as it is moved, unchecked: unless it now runs onto a wire of another net
+    // (two legs a few px apart moved onto one grid line). Then it is stretched to its pins as before.
+    for (const id of movedOnGrid) {
+      const e = netlist.edges.find((x) => x.id === id)!;
+      const mine = stored[id].points;
+      const box = boundsOf(mine);
+      const meets = netlist.edges.some((o) => {
+        const q = o.id !== id && netOf(o) !== netOf(e) ? stored[o.id]?.points : undefined;
+        return !!q && !apart(box, boundsOf(q)) && wiresMeet(mine, q);
+      });
+      if (meets) {
+        stored[id] = routes[id];
+        movedOnGrid.delete(id);
+      }
+    }
   }
   // Stored routes that still meet both of their pins, and whether each one is new here or moved along with
   // both of its symbols (pasted, or moved as a group): such a route may have landed on any symbol or wire.

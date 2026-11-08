@@ -45,8 +45,8 @@ export interface WireDraft {
   turn?: Point;
   /** While a drag is traced: where the pointer last ran along the next leg (see trace). */
   pivot?: Point;
-  /** What each click (or traced corner) fixed: the points and axis before it, for Backspace. */
-  steps?: { n: number; axis: Axis }[];
+  /** The draft before each click (or traced corner) fixed more of it: its points and axis, for Backspace. */
+  steps?: { points: Point[]; axis: Axis }[];
 }
 
 /** A new draft at a pin (`side`), or at a point on a wire, leaving it along `axis` (across the wire). */
@@ -116,7 +116,7 @@ function fixTo(d: WireDraft, legs: Point[]): WireDraft {
   if (points.length === d.points.length && same(last(points), last(d.points))) return d;
   const n = points.length;
   const axis = n >= 2 ? (axisOf(points[n - 2], points[n - 1]) ?? d.axis) : d.axis;
-  return { points, axis: n >= 2 ? other(axis) : d.axis, side: d.side, steps: [...(d.steps ?? []), { n: d.points.length, axis: d.axis }] };
+  return { points, axis: n >= 2 ? other(axis) : d.axis, side: d.side, steps: [...(d.steps ?? []), { points: d.points, axis: d.axis }] };
 }
 
 /** A click at p: the legs up to p are fixed, and the wire goes on from there. */
@@ -157,7 +157,7 @@ export function trace(d: WireDraft, p: Point, sideways: number): WireDraft {
 export function undoCorner(d: WireDraft, startAxis: Axis): WireDraft | undefined {
   if (d.points.length <= 1) return undefined;
   const step = d.steps?.[d.steps.length - 1];
-  if (step && step.n < d.points.length) return { points: d.points.slice(0, step.n), axis: step.axis, side: d.side, steps: d.steps!.slice(0, -1) };
+  if (step) return { points: step.points, axis: step.axis, side: d.side, steps: d.steps!.slice(0, -1) };
   const points = d.points.slice(0, -1);
   const n = points.length;
   const axis = n >= 2 ? other(axisOf(points[n - 2], points[n - 1]) ?? startAxis) : startAxis;

@@ -98,6 +98,7 @@ describe('components in JSON', () => {
     expect(parseSymbolJson('{ "sym": "or" }', 'and').error).toMatch(/This is an AND: "sym" stays "and"/);
     expect(parseSymbolJson('{ "inputs": 1 }', 'and').error).toBe('"inputs" is a whole number from 2 to 32.');
     expect(parseSymbolJson('[1]', 'and').error).toMatch(/Write the settings/);
+    expect(parseSymbolJson('{ "inputs": 3, "title": "My AND" }', 'and').error).toMatch(/"title" is not a setting/);
   });
 
   it('finds a free name', () => {

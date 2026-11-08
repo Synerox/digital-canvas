@@ -12,7 +12,7 @@ import { DiagramGraphic } from '../render/DiagramGraphic';
 import { THEMES } from '../render/theme';
 import type { WireEnd } from '../editor/sheet';
 import { type Axis, type WireDraft, clickAt, draftPath, followMoves, legAt, legContaining, legMoves, moveCorner, moveLeg, startDraft, trace, undoCorner } from '../editor/draw-wire';
-import { polylineHitsRect } from '../editor/router';
+import { polylineHitsRect, wiresMeet } from '../editor/router';
 import { symbolNode, newUserNode } from '../editor/symbols';
 import { measureFor, useStore } from './store';
 import { ui } from './ui-events';
@@ -458,7 +458,7 @@ export function EditorCanvas() {
     const path = draftTo(m, w, over);
     // Dragged straight to the pin, with no corner made, through a symbol in the way: the sheet routes that
     // wire around it (as the corners were left to the app anyway). Corners the user made are kept as drawn.
-    const free = m.draft.points.length === 1 && !runsThroughSymbol(path, m.from, over.end);
+    const free = m.draft.points.length === 1 && !runsThroughSymbol(path, m.from, over.end) && !meetsOtherNet(path, m.from, over.end);
     const ok = store().connectEnds(m.from, over.end, m.draft.points.length > 1 || free ? path : undefined);
     if (ok || !m.dragging) {
       cancelWire();
@@ -481,6 +481,15 @@ export function EditorCanvas() {
       if (n.id === nodeOf(b)) line = line.slice(0, -1);
       return line.length >= 2 && polylineHitsRect(line, { x: n.x + 1, y: n.y + 1, width: n.width - 2, height: n.height - 2 });
     });
+  };
+
+  /** Whether a drawn wire from `a` to `b` runs onto a wire of another net, which would read as a connection. */
+  const meetsOtherNet = (points: Point[], a: WireEnd, b: WireEnd) => {
+    const edges = store().layout?.edges ?? [];
+    const netOf = (end: WireEnd) =>
+      end.kind === 'wire' ? edges.find((x) => x.id === end.edge)?.source.port : (edges.find((x) => x.target.port === end.port)?.source.port ?? end.port);
+    const nets = new Set([netOf(a), netOf(b)]);
+    return edges.some((x) => !nets.has(x.source.port) && wiresMeet(points, x.points));
   };
 
   /** Whether `end` is where the wire being drawn started: its own pin, or the wire it branches from. */
@@ -811,8 +820,8 @@ export function EditorCanvas() {
             )}
           </g>
           {/* Corners of the selected wires: each can be dragged, and so can each leg. */}
-          {layout.edges.map((e) =>
-            selection.has(e.id) && !wireDrafts
+          {(wireDrafts ? [] : layout.edges.length > selection.size ? [...selection].map((id) => layout.edges.find((x) => x.id === id)) : layout.edges).map((e) =>
+            e && selection.has(e.id)
               ? e.points.slice(1, -1).map((p, i) => (
                   <rect
                     key={`${e.id}:${i}`}

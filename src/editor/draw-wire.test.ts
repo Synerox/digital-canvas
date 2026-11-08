@@ -40,6 +40,10 @@ describe('drawing a wire', () => {
     expect(d.points).toEqual(pts(100, 100));
     expect(d.axis).toBe('h');
     expect(undoCorner(startDraft(P(0, 0), 'EAST'), 'h')).toBeUndefined();
+    // A click further along the same line merges into its leg; Backspace still takes back just that click.
+    const two = clickAt(clickAt(startDraft(P(0, 0), 'EAST'), P(100, 0)), P(200, 0));
+    expect(two.points).toEqual(pts(0, 0, 200, 0));
+    expect(undoCorner(two, 'h')!.points).toEqual(pts(0, 0, 100, 0));
   });
 
   it('follows a drag corner by corner', () => {

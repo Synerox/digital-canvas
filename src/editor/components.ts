@@ -314,6 +314,8 @@ export function parseSymbolJson(text: string, sym: SymKey): { params: SymParams;
   if (!isObj(v)) return { error: 'Write the settings as { "inputs": 3, … }.' };
   const { sym: s, ...rest } = v;
   const title = SYMBOL_BY_KEY[sym]?.title ?? sym;
+  const own = Object.keys(rest).find((k) => k === 'name' || k === 'title' || k === 'base');
+  if (own) return { error: `"${own}" is not a setting of a placed symbol (its name is set above).` };
   if (s !== undefined && s !== sym) return { error: `This is ${/^[AEIOU]/.test(title) ? 'an' : 'a'} ${title}: "sym" stays "${sym}" (place another symbol to have another one).` };
   try {
     const d = componentOf({ ...rest, name: 'symbol', base: sym }, 0, () => undefined);
