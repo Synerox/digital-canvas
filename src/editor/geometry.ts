@@ -417,6 +417,7 @@ export function buildGeometry(input: GeometryInput): Geometry {
   if (!fast) {
     const close = (a: Point, b: Point) => Math.abs(a.x - b.x) <= GRID / 2 + 0.5 && Math.abs(a.y - b.y) <= GRID / 2 + 0.5;
     const snapGrid = (v: number) => Math.round(v / GRID) * GRID;
+    const onTheGrid = (q: Point) => Math.abs(q.x - snapGrid(q.x)) < 0.01 && Math.abs(q.y - snapGrid(q.y)) < 0.01;
     for (const e of netlist.edges) {
       const r = routes[e.id];
       const s = ends.get(e.source.port);
@@ -425,6 +426,10 @@ export function buildGeometry(input: GeometryInput): Geometry {
       const a = r.points[0];
       const b = r.points[r.points.length - 1];
       if ((near(a, s.point) && near(b, t.point)) || !close(a, s.point) || !close(b, t.point)) continue;
+      // Only routes of that time: an end off the grid while its pin is on it (a pin off the grid, such as a
+      // MUX's select, that moved a little is followed by adjustRoute as before).
+      const old = (q: Point, pin: Point) => near(q, pin) || (onTheGrid(pin) && !onTheGrid(q));
+      if (!old(a, s.point) || !old(b, t.point)) continue;
       const points = onGrid(r.points, s, t, a, b, snapGrid);
       if (!points) continue;
       if (stored === routes) stored = { ...routes };

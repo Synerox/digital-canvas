@@ -426,7 +426,12 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
               className="link small"
               title="Add a component with these settings to the library (Components)"
               onClick={() => {
-                const params = parseSymbolJson(symbolJson(user.sym, user.params), user.sym).params ?? {};
+                const r = parseSymbolJson(symbolJson(user.sym, user.params), user.sym);
+                if (r.error !== undefined) {
+                  s.setNotice(`Not saved as a component: ${r.error}`);
+                  return;
+                }
+                const params = r.params;
                 const stem = `${user.sym}${params.inputs ?? params.parts ?? (params.width && params.width > 1 ? params.width : '')}`;
                 const name = freeComponentName(s.doc.components, stem, s.componentNameTaken);
                 s.setComponents([...(s.doc.components ?? []), { name, base: user.sym, params }]);

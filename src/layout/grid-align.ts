@@ -160,9 +160,15 @@ export function alignToGrid(layout: LayoutResult, grid: number): LayoutResult {
     x1 = Math.max(x1, n.x + n.width);
     y1 = Math.max(y1, n.y + n.height);
   }
-  for (const e of edges) for (const p of e.points) {
-    x1 = Math.max(x1, p.x);
-    y1 = Math.max(y1, p.y);
+  for (const e of edges) {
+    for (const p of e.points) {
+      x1 = Math.max(x1, p.x);
+      y1 = Math.max(y1, p.y);
+    }
+    if (e.labelBox) {
+      x1 = Math.max(x1, e.labelBox.x + e.labelBox.width);
+      y1 = Math.max(y1, e.labelBox.y + e.labelBox.height);
+    }
   }
   return { ...layout, nodes: moved, edges, width: Math.max(48, Math.ceil(x1 + 24)), height: Math.max(48, Math.ceil(y1 + 24)) };
 }

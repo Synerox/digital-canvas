@@ -12,6 +12,7 @@ import { DiagramGraphic } from '../render/DiagramGraphic';
 import { THEMES } from '../render/theme';
 import type { WireEnd } from '../editor/sheet';
 import { type Axis, type WireDraft, clickAt, draftPath, followMoves, legAt, legContaining, legMoves, moveCorner, moveLeg, startDraft, trace, undoCorner } from '../editor/draw-wire';
+import { polylineHitsRect } from '../editor/router';
 import { symbolNode, newUserNode } from '../editor/symbols';
 import { measureFor, useStore } from './store';
 import { ui } from './ui-events';
@@ -444,8 +445,8 @@ export function EditorCanvas() {
   const draftTo = (m: Extract<Mode, { kind: 'wire' }>, w: Point, over?: { end: WireEnd; at: Point }): Point[] => {
     const own = !!over && isStart(m, over.end);
     if (over && !own) {
-      const side = over.end.kind === 'port' ? portInfo(over.end.port)?.port.side : undefined;
-      return draftPath(m.draft, over.at, side);
+      const pin = over.end.kind === 'port' ? portInfo(over.end.port) : undefined;
+      return draftPath(m.draft, over.at, pin?.port.side, pin?.node);
     }
     return draftPath(m.draft, { x: snap(w.x), y: snap(w.y) });
   };
@@ -454,7 +455,11 @@ export function EditorCanvas() {
   const finishWire = (over: { end: WireEnd; at: Point }, w: Point) => {
     const m = mode.current;
     if (m.kind !== 'wire') return;
-    const ok = store().connectEnds(m.from, over.end, draftTo(m, w, over));
+    const path = draftTo(m, w, over);
+    // Dragged straight to the pin, with no corner made, through a symbol in the way: the sheet routes that
+    // wire around it (as the corners were left to the app anyway). Corners the user made are kept as drawn.
+    const free = m.draft.points.length === 1 && !runsThroughSymbol(path, m.from, over.end);
+    const ok = store().connectEnds(m.from, over.end, m.draft.points.length > 1 || free ? path : undefined);
     if (ok || !m.dragging) {
       cancelWire();
       return;
@@ -464,6 +469,18 @@ export function EditorCanvas() {
     m.dragging = false;
     m.draft = { ...m.draft, turn: undefined, pivot: undefined };
     updateDraft(w);
+  };
+
+  /** Whether a drawn wire from `a` to `b` runs through a symbol (but for its first and last leg at their pins). */
+  const runsThroughSymbol = (points: Point[], a: WireEnd, b: WireEnd) => {
+    const nodeOf = (e: WireEnd) => (e.kind === 'port' ? e.node : undefined);
+    return (store().layout?.nodes ?? []).some((n) => {
+      if (n.kind === 'text') return false;
+      let line = points;
+      if (n.id === nodeOf(a)) line = line.slice(1);
+      if (n.id === nodeOf(b)) line = line.slice(0, -1);
+      return line.length >= 2 && polylineHitsRect(line, { x: n.x + 1, y: n.y + 1, width: n.width - 2, height: n.height - 2 });
+    });
   };
 
   /** Whether `end` is where the wire being drawn started: its own pin, or the wire it branches from. */

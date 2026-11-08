@@ -45,6 +45,8 @@ export interface WireDraft {
   turn?: Point;
   /** While a drag is traced: where the pointer last ran along the next leg (see trace). */
   pivot?: Point;
+  /** What each click (or traced corner) fixed: the points and axis before it, for Backspace. */
+  steps?: { n: number; axis: Axis }[];
 }
 
 /** A new draft at a pin (`side`), or at a point on a wire, leaving it along `axis` (across the wire). */
@@ -83,7 +85,7 @@ function leavesTo(points: Point[], side: Side): boolean {
  * The wire as it would be drawn now: through the fixed corners, then to `to`. When `to` is a pin (its
  * `side` given), the wire goes into it the way it faces, on a stub; otherwise it ends at `to`.
  */
-export function draftPath(d: WireDraft, to: Point, side?: Side): Point[] {
+export function draftPath(d: WireDraft, to: Point, side?: Side, rect?: { x: number; y: number; width: number; height: number }): Point[] {
   if (!side) return simplify([...d.points, ...legsTo(d, to)]);
   const o = OUT[side];
   const s = { x: to.x + o.x * STUB, y: to.y + o.y * STUB };
@@ -92,9 +94,17 @@ export function draftPath(d: WireDraft, to: Point, side?: Side): Point[] {
     const pts = simplify([...d.points, ...legsTo({ ...d, axis }, s), to]);
     if (ok(pts)) return pts;
   }
-  // Straight towards the pin from behind it: around, two grid steps off its line.
+  // Straight towards the pin from behind it: around its symbol (`rect`), on the side nearer the wire, or
+  // two grid steps off the pin's line.
   const a = last(d.points);
-  const off = AXIS_OF[side] === 'h' ? { x: 0, y: 2 * STUB } : { x: 2 * STUB, y: 0 };
+  let off = AXIS_OF[side] === 'h' ? { x: 0, y: 2 * STUB } : { x: 2 * STUB, y: 0 };
+  if (rect && AXIS_OF[side] === 'h') {
+    const y = a.y < to.y ? rect.y - STUB : rect.y + rect.height + STUB;
+    off = { x: 0, y: y - s.y };
+  } else if (rect) {
+    const x = a.x < to.x ? rect.x - STUB : rect.x + rect.width + STUB;
+    off = { x: x - s.x, y: 0 };
+  }
   const via = { x: s.x + off.x, y: s.y + off.y };
   const around = simplify([...d.points, ...legsTo(d, { x: AXIS_OF[side] === 'h' ? a.x : via.x, y: AXIS_OF[side] === 'h' ? via.y : a.y }), via, s, to]);
   return around;
@@ -106,7 +116,7 @@ function fixTo(d: WireDraft, legs: Point[]): WireDraft {
   if (points.length === d.points.length && same(last(points), last(d.points))) return d;
   const n = points.length;
   const axis = n >= 2 ? (axisOf(points[n - 2], points[n - 1]) ?? d.axis) : d.axis;
-  return { points, axis: n >= 2 ? other(axis) : d.axis, side: d.side };
+  return { points, axis: n >= 2 ? other(axis) : d.axis, side: d.side, steps: [...(d.steps ?? []), { n: d.points.length, axis: d.axis }] };
 }
 
 /** A click at p: the legs up to p are fixed, and the wire goes on from there. */
@@ -141,9 +151,11 @@ export function trace(d: WireDraft, p: Point, sideways: number): WireDraft {
   return { ...fixed, axis: d.axis, pivot: d.turn };
 }
 
-/** Take back the last fixed corner (Backspace). Undefined when only the start is left. */
+/** Take back the last click, with what it fixed (Backspace). Undefined when only the start is left. */
 export function undoCorner(d: WireDraft, startAxis: Axis): WireDraft | undefined {
   if (d.points.length <= 1) return undefined;
+  const step = d.steps?.[d.steps.length - 1];
+  if (step && step.n < d.points.length) return { points: d.points.slice(0, step.n), axis: step.axis, side: d.side, steps: d.steps!.slice(0, -1) };
   const points = d.points.slice(0, -1);
   const n = points.length;
   const axis = n >= 2 ? other(axisOf(points[n - 2], points[n - 1]) ?? startAxis) : startAxis;

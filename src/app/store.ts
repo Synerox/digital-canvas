@@ -1500,7 +1500,8 @@ export const useStore = create<State>((set, get) => {
 
     async setViewMode(mode) {
       if (mode === get().viewMode) return;
-      navStep();
+      // On a drawing the switch changes only the hierarchy listed, not the sheet: no step to go back.
+      if (!get().path[get().path.length - 1]?.drawn) navStep();
       applyViewMode(mode);
       const { design } = get();
       if (!design) return;

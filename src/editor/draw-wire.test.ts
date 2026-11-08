@@ -24,6 +24,10 @@ describe('drawing a wire', () => {
     expect(draftPath(startDraft(P(100, 300), 'EAST'), P(300, 160), 'SOUTH')).toEqual(pts(100, 300, 300, 300, 300, 160));
     // Level with the pin, straight in.
     expect(draftPath(out, P(300, 100), 'WEST')).toEqual(pts(100, 100, 300, 100));
+    // An input behind the output, on a symbol 60 high: around that symbol, not through it.
+    expect(draftPath(startDraft(P(300, 0), 'EAST'), P(0, 0), 'WEST', { x: 0, y: -30, width: 40, height: 60 })).toEqual(
+      pts(300, 0, 310, 0, 310, 40, -10, 40, -10, 0, 0, 0),
+    );
   });
 
   it('keeps the corners clicked and goes on across the last leg', () => {
@@ -31,8 +35,10 @@ describe('drawing a wire', () => {
     expect(d.points).toEqual(pts(100, 100, 200, 100, 200, 160));
     // After a vertical leg the next one runs horizontally.
     expect(draftPath(d, P(300, 220))).toEqual(pts(100, 100, 200, 100, 200, 160, 300, 160, 300, 220));
+    // Backspace takes back the whole click: the corner on the way too.
     d = undoCorner(d, 'h')!;
-    expect(d.points).toEqual(pts(100, 100, 200, 100));
+    expect(d.points).toEqual(pts(100, 100));
+    expect(d.axis).toBe('h');
     expect(undoCorner(startDraft(P(0, 0), 'EAST'), 'h')).toBeUndefined();
   });
 
