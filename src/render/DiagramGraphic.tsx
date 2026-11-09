@@ -3,6 +3,7 @@
  * Uses presentation attributes only, so the markup can be exported as-is.
  */
 import type { JSX } from 'react';
+import { pinStyleOf } from '../core/diagram';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
 import { FONT, approxMeasure, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, muxInset } from '../layout/elk-layout';
 import type { Theme } from './theme';
@@ -21,6 +22,9 @@ export interface GraphicProps {
 }
 
 const STROKE = 1.4;
+
+/** Space between the name of a pin drawn as text and its connection point (clear of the point's 6px hit circle). */
+const TEXT_PIN_GAP = 6;
 
 /** Register pins on the bottom edge that are written next to their pin (the clock has its triangle). */
 const REGISTER_PINS = new Set(['EN', 'ARST', 'SRST']);
@@ -444,6 +448,23 @@ function NodeShape({ n, p, names }: { n: LNode; p: GraphicProps; names: Readonly
     case 'input':
     case 'output':
     case 'inout': {
+      if (pinStyleOf(n) === 'text') {
+        // The name only, at the end of its wire: an input's ends next to its connection point (right), an output's
+        // starts next to it (left), an inout's sits between its two. The symbol keeps its size, so its wires and
+        // the room around it stay as they are; the editor draws the box for clicks and the selection.
+        const sel = !!p.selection?.has(n.id);
+        const [tx, anchor]: [number, 'start' | 'middle' | 'end'] =
+          n.kind === 'input' ? [x + w - TEXT_PIN_GAP, 'end'] : n.kind === 'output' ? [x + TEXT_PIN_GAP, 'start'] : [x + w / 2, 'middle'];
+        body = (
+          <g>
+            {(p.interactive || sel) && <rect x={x} y={y} width={w} height={h} fill={sel ? theme.accentFill : 'transparent'} stroke={sel ? theme.accent : 'none'} />}
+            <text x={tx} y={y + h / 2 + 4} fontSize={FONT.pin} textAnchor={anchor} fill={theme.ink} fontFamily={theme.font}>
+              {n.label}
+            </text>
+          </g>
+        );
+        break;
+      }
       const tip = 8;
       const left = n.kind === 'inout' ? tip : 0;
       body = (

@@ -23,6 +23,34 @@ import { ARITHMETIC, applyRules } from './rules';
 export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'inout' | 'const' | 'join' | 'split' | 'text';
 export type Side = 'WEST' | 'EAST' | 'NORTH' | 'SOUTH';
 
+/**
+ * How a module pin is drawn: its name in a label outline (`label`, the default), or the name alone, written at the
+ * end of its wire (`text`). Only the look: the pin's size, connection points and wires are the same either way.
+ */
+export type PinStyle = 'label' | 'text';
+
+/** Whether a node of this kind is a module pin (input, output or inout). */
+export function isPinKind(kind: NodeKind): kind is 'input' | 'output' | 'inout' {
+  return kind === 'input' || kind === 'output' || kind === 'inout';
+}
+
+/** How the pin `n` is drawn (its `attrs.style`); `label` for a node that is no pin. */
+export function pinStyleOf(n: Pick<DNode, 'kind' | 'attrs'>): PinStyle {
+  return isPinKind(n.kind) && n.attrs?.style === 'text' ? 'text' : 'label';
+}
+
+/** The pin `n` drawn in `style` (a label has no `attrs.style`); a node that is no pin as it is. */
+export function withPinStyle<T extends Pick<DNode, 'kind' | 'attrs'>>(n: T, style: PinStyle | undefined): T {
+  if (!isPinKind(n.kind) || pinStyleOf(n) === (style ?? 'label')) return n;
+  const attrs: Record<string, string | number | boolean> = { ...n.attrs };
+  delete attrs.style;
+  if (style === 'text') attrs.style = 'text';
+  if (Object.keys(attrs).length) return { ...n, attrs };
+  const out = { ...n };
+  delete out.attrs;
+  return out;
+}
+
 export interface DPort {
   /** Globally unique within the diagram: `${nodeId}.${name}`. */
   id: string;

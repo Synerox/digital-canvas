@@ -151,6 +151,11 @@ function componentOf(v: unknown, k: number, taken: (name: string) => string | un
         params.value = val.trim();
         continue;
       }
+      if (key === 'style') {
+        if (val !== 'label' && val !== 'text') throw new Bad(`${where}: "style" is "label" (the name in a label outline) or "text" (the name only).`);
+        params.style = val;
+        continue;
+      }
       const lim = PARAM_LIMITS[key as keyof typeof PARAM_LIMITS];
       const hi = key === 'width' && base === 'decoder' ? 8 : lim[1];
       if (typeof val !== 'number' || !Number.isInteger(val) || val < lim[0] || val > hi) {
@@ -424,6 +429,7 @@ export function settingsHint(sym: SymKey): string {
   return presetFields(sym)
     .map((f) => {
       if (f === 'value') return `"value" a Verilog number such as "4'd2"`;
+      if (f === 'style') return `"style" "label" (the name in a label outline) or "text" (the name only)`;
       const [lo, hi] = PARAM_LIMITS[f as keyof typeof PARAM_LIMITS];
       // "width" is bits, not the size of the drawing: say so (the symbol shows them on its pins).
       const unit = f === 'width' ? (sym === 'decoder' ? ' select bits' : ' bits') : f === 'shift' ? ' bits of the shift amount' : '';

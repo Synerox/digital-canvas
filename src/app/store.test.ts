@@ -1953,6 +1953,50 @@ endmodule
     expect(st().doc.drawn).toEqual(['module_']);
   }, 60_000);
 
+  it('draws pins as text or as labels, imported ones and those of a preset too, in one undo step, and saves it', async () => {
+    const src = 'module top(input [3:0] a, input b, output [3:0] y);\n  assign y = b ? a : 4\'d0;\nendmodule\n';
+    const ui = parseComponents('[{ "name": "in8", "base": "input", "width": 8 }]').defs!;
+    await open({ 't.v': src }, { doc: { drawn: [], sheets: {}, components: ui }, path: [{ instance: 'top', module: 'top' }] });
+    await settle();
+    const key = st().sheet;
+    st().startPlacing({ ...componentSymbol(ui[0]), component: 'in8' });
+    st().placeAt({ x: 600, y: 300 });
+    await settle();
+    const own = st().doc.sheets[key].nodes[0].id;
+    expect(st().doc.sheets[key].nodes[0].component).toBe('in8');
+    const look = () => Object.fromEntries(st().netlist!.nodes.filter(isPin).map((n) => [n.id, n.attrs?.style ?? 'label']));
+    const box = (id: string) => (({ x, y, width, height }) => ({ x, y, width, height }))(st().layout!.nodes.find((n) => n.id === id)!);
+    const was = box('in:a');
+    const steps = st().past.length;
+    st().setPinStyle(['in:a', 'out:y', own, 'w:none'], 'text');
+    await settle();
+    expect(st().past.length).toBe(steps + 1);
+    expect(look()).toEqual({ 'in:a': 'text', 'in:b': 'label', 'out:y': 'text', [own]: 'text' });
+    expect(st().doc.sheets[key].pinStyles).toEqual({ 'in:a': 'text', 'out:y': 'text' });
+    // The pin keeps its place and size; one changed on its own no longer follows its preset.
+    expect(box('in:a')).toEqual(was);
+    expect(st().doc.sheets[key].nodes[0]).toMatchObject({ params: { width: 8, style: 'text' } });
+    expect(st().doc.sheets[key].nodes[0].component).toBeUndefined();
+    // Nothing changes: no undo step.
+    st().setPinStyle(['in:a'], 'text');
+    expect(st().past.length).toBe(steps + 1);
+    // Saved and opened again.
+    const saved = JSON.stringify(st().savedFile());
+    st().undo();
+    await settle();
+    expect(look()).toEqual({ 'in:a': 'label', 'in:b': 'label', 'out:y': 'label', [own]: 'label' });
+    expect(st().doc.sheets[key].nodes[0].component).toBe('in8');
+    st().redo();
+    await settle();
+    expect(look()['in:a']).toBe('text');
+    await st().loadSaved(saved);
+    await settle();
+    expect(look()).toEqual({ 'in:a': 'text', 'in:b': 'label', 'out:y': 'text', [own]: 'text' });
+    // Back to labels: the sheet keeps no entry for them.
+    st().setPinStyle(['in:a', 'out:y'], 'label');
+    expect(st().doc.sheets[key].pinStyles).toBeUndefined();
+  }, 60_000);
+
   it('refuses to give a pin the name another pin has (F13)', async () => {
     await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
     st().newDrawing('pins');

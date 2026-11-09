@@ -5,7 +5,7 @@
  * Every operation returns a new SheetEdits and never changes its input, so
  * undo/redo can keep old versions as they are.
  */
-import type { DEdge, DNode, DPort, Diagram } from '../core/diagram';
+import { type DEdge, type DNode, type DPort, type Diagram, type PinStyle, isPinKind, pinStyleOf, withPinStyle } from '../core/diagram';
 import { GRID, type LayoutResult, type MeasureText, type Point, legacyCellSize, sizeNode } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
 import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
@@ -43,7 +43,7 @@ export function userIds(e: SheetEdits): Set<string> {
 
 /**
  * The netlist the sheet shows: the imported diagram minus what the user
- * deleted, with renamed labels, plus the symbols and wires drawn by hand.
+ * deleted, with renamed labels and pins drawn as text, plus the symbols and wires drawn by hand.
  * Wires whose ports no longer exist (after a re-import or a parameter
  * change) are left out.
  */
@@ -52,7 +52,7 @@ export function effectiveDiagram(module: string, base: Diagram | undefined, e: S
   const nodes: DNode[] = [];
   for (const n of base?.nodes ?? []) {
     if (hidden.has(n.id)) continue;
-    nodes.push(applyLabel(n, e.labels[n.id]));
+    nodes.push(withPinStyle(applyLabel(n, e.labels[n.id]), e.pinStyles?.[n.id]));
   }
   const seen = new Set(nodes.map((n) => n.id));
   for (const u of e.nodes) {
@@ -274,6 +274,30 @@ export function rename(e: SheetEdits, id: string, text: string): SheetEdits {
   const w = e.edges.find((x) => x.id === id);
   if (w) return { ...e, edges: e.edges.map((x) => (x.id === id ? { ...x, label: text || undefined } : x)) };
   return { ...e, labels: { ...e.labels, [id]: text } };
+}
+
+/**
+ * Draw the pins among `ids` (symbols of the netlist `d`) in `style`: a pin drawn by hand takes it as its setting, an
+ * imported pin keeps it in the sheet's pinStyles. What is no pin is left as it is.
+ */
+export function stylePins(e: SheetEdits, d: Diagram, ids: Iterable<string>, style: PinStyle): SheetEdits {
+  const want = new Set(ids);
+  const own = new Set(e.nodes.map((n) => n.id));
+  const styles = { ...e.pinStyles };
+  const restyled = new Set<string>();
+  for (const n of d.nodes) {
+    if (!want.has(n.id) || !isPinKind(n.kind) || pinStyleOf(n) === style) continue;
+    if (own.has(n.id)) restyled.add(n.id);
+    else if (style === 'text') styles[n.id] = style;
+    else delete styles[n.id];
+  }
+  const nodes = restyled.size ? e.nodes.map((n) => (restyled.has(n.id) ? { ...n, params: { ...n.params, style } } : n)) : e.nodes;
+  const same = (a: Record<string, PinStyle> | undefined, b: Record<string, PinStyle>) =>
+    Object.keys(a ?? {}).length === Object.keys(b).length && Object.entries(b).every(([k, v]) => a?.[k] === v);
+  if (nodes === e.nodes && same(e.pinStyles, styles)) return e;
+  const out: SheetEdits = { ...e, nodes, pinStyles: styles };
+  if (Object.keys(styles).length === 0) delete out.pinStyles;
+  return out;
 }
 
 /** Undo a rename of an imported symbol or wire. */
@@ -643,7 +667,7 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
     case 'inout': {
       // A library pin is at most PARAM_LIMITS.width bits; a wider one stays a frozen copy.
       const w = n.ports[0]?.width ?? 1;
-      if (w <= PARAM_LIMITS.width[1]) return { id, sym: n.kind, params: { width: w }, name: n.label };
+      if (w <= PARAM_LIMITS.width[1]) return { id, sym: n.kind, params: { width: w, style: pinStyleOf(n) }, name: n.label };
       break;
     }
     case 'const':
@@ -691,9 +715,10 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       break;
     }
   }
-  // Frozen copy: the node as it is drawn, ports renamed to the new ID.
-  const raw: DNode = { ...n, id, ports: n.ports.map((p) => ({ ...p, id: `${id}.${p.name}` })) };
-  return { id, sym: 'raw', params: {}, raw, ...(n.kind === 'instance' ? { name: n.subLabel ?? n.instanceName } : {}) };
+  // Frozen copy: the node as it is drawn, ports renamed to the new ID. A pin's look is a setting (see symbolNode).
+  const raw: DNode = { ...withPinStyle(n, 'label'), id, ports: n.ports.map((p) => ({ ...p, id: `${id}.${p.name}` })) };
+  const params: SymParams = isPinKind(n.kind) ? { style: pinStyleOf(n) } : {};
+  return { id, sym: 'raw', params, raw, ...(n.kind === 'instance' ? { name: n.subLabel ?? n.instanceName } : {}) };
 }
 
 // ---------- copy and paste ----------
