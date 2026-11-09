@@ -1,12 +1,12 @@
 /**
  * Quick checks of a drawing, shown in the editor only (never in exports):
  * wires whose width does not match the input they feed, inputs fed by two
- * wires, pins left unconnected, and pins the Verilog has to rename.
+ * wires, pins left unconnected, and pins whose block port has to be renamed.
  */
 import type { DEdge, Diagram } from '../core/diagram';
 import { moduleTitle } from '../core/names';
 import { ARITHMETIC } from '../core/rules';
-import { verilogIdent } from './verilog-export';
+import { verilogIdent } from './verilog-ident';
 
 export interface SheetIssues {
   /** Wires drawn in the warning colour. */
@@ -27,8 +27,8 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 export const openInputsMessage = (n: number) => `${plural(n, 'input')} not connected.`;
 
 /**
- * Low zero bits a wire appends to what it carries (an imported `×4` wire has 2), read as the
- * export reads them: only from its `shift`. Its label is text the user may rename, never logic.
+ * Low zero bits a wire appends to what it carries (an imported `×4` wire has 2), read only
+ * from its `shift`. Its label is text the user may rename, never logic.
  */
 export function wireShift(e: Pick<DEdge, 'shift'>): number {
   return e.shift !== undefined && Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
@@ -40,13 +40,13 @@ export const scaleNote = (shift: number) => `×${2 ** shift}`;
 const list = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
 
 /**
- * Pins whose names the Verilog export changes to keep its ports apart. diagramToVerilog names the
- * pins first, in drawing order, as verilogIdent of their labels, and writes a name that is already
- * taken as a_2, a_3…: two pins drawn as `a` would be one signal to a reader but two ports there.
+ * Pins of a drawing whose block ports are renamed to keep them apart. drawingPorts names the ports
+ * in drawing order as verilogIdent of the pins' labels, and a name that is already taken as a_2,
+ * a_3…: two pins drawn as `a` would be one signal to a reader but two ports of its blocks.
  */
 function pinNameClashes(d: Diagram): string[] {
   const used = new Set<string>();
-  /** Pins by the Verilog name they ask for: their labels, and the names the export writes. */
+  /** Pins by the Verilog name they ask for: their labels, and the names their ports get. */
   const wanted = new Map<string, { labels: string[]; written: string[] }>();
   for (const n of d.nodes) {
     if (n.kind !== 'input' && n.kind !== 'output' && n.kind !== 'inout') continue;
@@ -66,18 +66,22 @@ function pinNameClashes(d: Diagram): string[] {
     const k = labels.length;
     // Only a pin named like another's written name (a_2 next to two pins a) is renamed on its own.
     if (k === 1) {
-      out.push(`Another pin is written as ${ident}, so the Verilog calls pin ${labels[0]} ${renamed[0]}.`);
+      out.push(`Another pin's port is ${ident}, so blocks of this drawing call pin ${labels[0]} ${renamed[0]}.`);
       continue;
     }
     const names = [...new Set(labels)];
     const who = names.length === 1 ? `${k === 2 ? 'Two' : k} pins are named ${names[0]}` : `Pins ${list(names)} have the same Verilog name ${ident}`;
     const which = renamed.length === k ? 'them' : k === 2 ? 'the second' : 'the others';
-    out.push(`${who}; the Verilog calls ${which} ${list(renamed)}.`);
+    out.push(`${who}; blocks of this drawing call ${which} ${list(renamed)}.`);
   }
   return out;
 }
 
-export function checkSheet(d: Diagram): SheetIssues {
+/**
+ * `verilog`: the sheet of a Verilog module, whose blocks take their ports from the Verilog: its pin
+ * names are only labels, so repeated ones are not reported.
+ */
+export function checkSheet(d: Diagram, opts: { verilog?: boolean } = {}): SheetIssues {
   const flagged = new Set<string>();
   const reasons = new Map<string, string>();
   const flag = (id: string, reason: string) => {
@@ -133,7 +137,7 @@ export function checkSheet(d: Diagram): SheetIssues {
     for (const p of n.ports) if (p.dir === 'in' && !p.inout && n.kind !== 'inout' && !into.has(p.id)) openPorts.add(p.id);
   }
   if (openPorts.size) messages.push(openInputsMessage(openPorts.size));
-  const clashes = pinNameClashes(d);
+  const clashes = opts.verilog ? [] : pinNameClashes(d);
   messages.push(...clashes.slice(0, 3));
   if (clashes.length > 3) messages.push(`${clashes.length - 3} more repeated pin names.`);
   const missing = d.nodes.filter((n) => n.attrs?.missingModule);

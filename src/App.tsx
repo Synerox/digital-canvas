@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { EditorCanvas } from './app/EditorCanvas';
 import { ExportDialog } from './app/ExportDialog';
-import { Hints, ImportDialog, MOD, VerilogExportDialog } from './app/Dialogs';
+import { Hints, ImportDialog, MOD } from './app/Dialogs';
 import { Inspector } from './app/Inspector';
 import { Menu, type MenuItem } from './app/Menu';
 import { Palette } from './app/Palette';
@@ -117,7 +117,6 @@ export default function App() {
   const [showExport, setShowExport] = useState(false);
   /** The Import dialog, with the code of a dropped file it opens with (see dropVerilog). */
   const [showImport, setShowImport] = useState<boolean | { name: string; code: string }>(false);
-  const [showVerilog, setShowVerilog] = useState(false);
   const [showHints, setShowHints] = useState(false);
   const [showLibrary, setShowLibrary] = useState(true);
 
@@ -296,7 +295,6 @@ export default function App() {
     { label: 'Open drawing…', shortcut: `${MOD}+O`, onSelect: openDrawing },
     { label: 'Save drawing', shortcut: `${MOD}+S`, onSelect: saveDrawing },
     { label: 'Export image (SVG / PNG)…', onSelect: () => useStore.getState().layout && setShowExport(true) },
-    { label: 'Export Verilog…', onSelect: () => useStore.getState().netlist && setShowVerilog(true) },
   ];
   const editMenu: MenuItem[] = [
     { label: 'Undo', shortcut: `${MOD}+Z`, onSelect: () => s.undo() },
@@ -511,7 +509,7 @@ export default function App() {
         </section>
 
         <aside className="code-pane">
-          <Inspector onExportVerilog={() => setShowVerilog(true)} />
+          <Inspector />
           {/* A drawing has no Verilog of its own: the files open are about other sheets. */}
           {!drawn && (
             <>
@@ -529,7 +527,6 @@ export default function App() {
         <ExportDialog layout={exportLayout} name={currentModule.replace(/[^A-Za-z0-9_.-]/g, '_')} onClose={() => setShowExport(false)} />
       )}
       {showImport && <ImportDialog initial={showImport === true ? undefined : showImport} onClose={() => setShowImport(false)} />}
-      {showVerilog && <VerilogExportDialog onClose={() => setShowVerilog(false)} />}
       <SettingsPopup />
     </div>
   );

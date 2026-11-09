@@ -19,21 +19,21 @@ vi.mock('../yosys/client', async () => {
   };
 });
 
+import type { DNode } from '../core/diagram';
 import { DEFAULT_RULES, RULES } from '../core/rules';
 import type { EditDoc, SavedFile, SheetEdits } from '../editor/doc';
 import type { ComponentDef } from '../editor/components';
 import { OUTLINES, emptyEdits, parseSavedFile } from '../editor/doc';
 import { componentSymbol, parseComponents } from '../editor/components';
 import { polylineHitsRect } from '../editor/router';
-import { effectiveDiagram } from '../editor/sheet';
+import { drawingPorts, effectiveDiagram } from '../editor/sheet';
 import { type InterfaceOf, type UserNode, newUserNode, symbolNode } from '../editor/symbols';
-import { diagramToVerilog } from '../editor/verilog-export';
+import { verilogIdent } from '../editor/verilog-ident';
 import { type Point, sizeNode } from '../layout/elk-layout';
 import {
   AUTOSAVE_KEY,
   changeFiles,
   copyKeys,
-  drawingPorts,
   followPinRenames,
   importedTop,
   moduleTitle,
@@ -50,7 +50,6 @@ import {
   withoutVerilogEdits,
   wireUpTo,
 } from './store';
-import { exportCurrent } from './Dialogs';
 import { elaborate } from '../yosys/client';
 import { declaredModules } from '../yosys/script';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
@@ -137,8 +136,10 @@ endmodule
 `;
 const drawing = (nodes: UserNode[], edges: SheetEdits['edges'] = []): SheetEdits => ({ ...emptyEdits(), nodes, edges, next: 100 });
 
+const isPin = (n: DNode) => n.kind === 'input' || n.kind === 'output' || n.kind === 'inout';
+
 describe('drawing interfaces (pins → block ports)', () => {
-  it('names block ports as the exported module names its pins, so no pin is lost (C37)', () => {
+  it('names block ports after their pins, one Verilog name per pin, so no pin is lost (C37)', () => {
     const leaf = drawing([
       pin('u:1', 'input', 'a b'),
       pin('u:2', 'input', 'a_b'),
@@ -147,18 +148,19 @@ describe('drawing interfaces (pins → block ports)', () => {
       pin('u:5', 'output', 'y'),
     ]);
     const ports = drawingPorts(leaf);
-    // The first a_b keeps its own name; the repeated ones take the exported name.
+    // The first a_b keeps its own name; the repeated ones take a name of their own.
     expect(ports.map((p) => p.name)).toEqual(['a b', 'a_b_2', 'x', 'x_2', 'y']);
+    expect(ports.map((p) => p.pin)).toEqual(['u:1', 'u:2', 'u:3', 'u:4', 'u:5']);
     const iface: InterfaceOf = (m) => (m === 'leaf' ? { label: 'leaf', ports: drawingPorts(leaf) } : undefined);
-    const leafV = diagramToVerilog(effectiveDiagram('leaf', undefined, leaf, iface), 'leaf').code;
-    const header = /module leaf \(([\s\S]*?)\);/.exec(leafV)![1];
-    const modulePorts = [...header.matchAll(/(?:input|output|inout) wire (?:\[[^\]]*\] )?(\w+)/g)].map((m) => m[1]);
+    const pins = effectiveDiagram('leaf', undefined, leaf, iface).nodes.filter(isPin);
     const block: UserNode = { ...newUserNode('u:9', 'block'), params: { module: 'leaf' }, name: 'u1' };
-    const top = drawing([block]);
-    const topV = diagramToVerilog(effectiveDiagram('top', undefined, top, iface), 'top').code;
-    const connected = [...topV.matchAll(/\.(\w+)\(/g)].map((m) => m[1]);
-    // Every port of the module is connected once by the instance.
-    expect(connected.slice().sort()).toEqual(modulePorts.slice().sort());
+    const top = effectiveDiagram('top', undefined, drawing([block]), iface);
+    const b = top.nodes.find((n) => n.id === 'u:9')!;
+    // A port of the block for every pin, in drawing order and direction, and no two of one Verilog name:
+    // a wire to each port reaches its own pin.
+    expect(b.ports.map((p) => [p.name, p.dir])).toEqual(pins.map((n, i) => [ports[i].name, n.kind === 'output' ? 'out' : 'in']));
+    expect(new Set(b.ports.map((p) => verilogIdent(p.name))).size).toBe(pins.length);
+    expect(new Set(b.ports.map((p) => p.id)).size).toBe(pins.length);
   });
 
   it('keeps the port name (and port ID) of a pin whose name only needs illegal characters replaced', () => {
@@ -221,14 +223,22 @@ describe('drawing interfaces (pins → block ports)', () => {
       ['y', 'output', 300],
       ['z', 'output', 1],
     ]);
-    // The exported module has the same ports, in the same order.
-    const iface: InterfaceOf = () => undefined;
-    const header = /module leaf \(([\s\S]*?)\);/.exec(diagramToVerilog(effectiveDiagram('leaf', undefined, leaf, iface), 'leaf').code)![1];
-    expect([...header.matchAll(/(input|output) wire (?:\[(\d+):0\] )?(\w+)/g)].map((m) => [m[3], m[1], Number(m[2] ?? 0) + 1])).toEqual([
+    // The drawing's own pins are the same, in the same order: a block's port is as wide as the pin it reaches.
+    const iface: InterfaceOf = (m) => (m === 'leaf' ? { label: 'leaf', ports: drawingPorts(leaf) } : undefined);
+    const pins = effectiveDiagram('leaf', undefined, leaf, iface).nodes.filter(isPin);
+    expect(pins.map((n) => [n.label, n.kind, n.ports[0].width])).toEqual([
       ['a', 'input', 300],
       ['b', 'input', 1],
       ['y', 'output', 300],
       ['z', 'output', 1],
+    ]);
+    const block: UserNode = { ...newUserNode('u:9', 'block'), params: { module: 'leaf' } };
+    const b = effectiveDiagram('top', undefined, drawing([block]), iface).nodes.find((n) => n.id === 'u:9')!;
+    expect(b.ports.map((p) => [p.name, p.dir, p.width])).toEqual([
+      ['a', 'in', 300],
+      ['b', 'in', 1],
+      ['y', 'out', 300],
+      ['z', 'out', 1],
     ]);
   });
 });
@@ -457,15 +467,27 @@ describe('store', () => {
     await settle();
     expect(st().sheet).toBe('d:top_drawing');
     expect(st().netlist!.edges.length).toBe(wires);
-    // Nor does another design: no block loses its pins, and Yosys reads the exported Verilog alone.
+    // Nor does another design: no block loses its pins, and the copy needs no Verilog: every block, all the way
+    // down, is a block of one of its drawings.
     await st().loadExample('auction');
     await settle();
     await st().openPath([{ instance: 'top_drawing', module: 'top_drawing', drawn: true }]);
     expect(st().netlist!.edges.length).toBe(wires);
     expect(st().netlist!.nodes.filter((n) => n.attrs?.missingModule)).toEqual([]);
-    const out = exportCurrent();
-    expect(Object.keys(out.check.files)).toEqual(['top_drawing.v']);
-    await expect(elaborate(out.check.files, out.check.top)).resolves.toBeDefined();
+    const used = new Set<string>();
+    const walk = (m: string) => {
+      if (used.has(m)) return;
+      used.add(m);
+      const d = effectiveDiagram(m, undefined, st().doc.sheets[`d:${m}`], st().interfaceOf);
+      for (const n of d.nodes.filter((x) => x.kind === 'instance')) {
+        expect(st().doc.drawn).toContain(n.moduleName);
+        expect(n.attrs?.missingModule).toBeUndefined();
+        expect(n.ports.length).toBeGreaterThan(0);
+        walk(n.moduleName!);
+      }
+    };
+    walk('top_drawing');
+    expect([...used].sort()).toEqual([...st().doc.drawn].sort());
     // Instances of Verilog modules stay instances of those modules, and the notice says so.
     await st().openPath([{ instance: 'auction_top', module: 'auction_top' }]);
     await st().setViewMode('blocks');
@@ -1059,20 +1081,28 @@ describe('store', () => {
     expect(box([...st().selection][0])).toMatchObject({ x: p4.x, y: p4.y });
   }, 60_000);
 
-  it('names the drawings of a copy apart from the automatic blocks the Verilog export writes (F6)', async () => {
+  it('names the drawings of a copy apart from the Verilog names of the automatic blocks (F6)', async () => {
     await open({ [FRUIT_FILE]: FRUIT_SOURCE });
-    const before = exportCurrent();
+    const before = st().netlist!;
     await st().convertToDrawing();
     await settle();
-    // The copy's export is as quiet as the sheet's: the block that drives output game_result is named apart from it, as the export names the instance.
     expect(st().sheet).toBe('d:top_drawing');
-    expect(exportCurrent().warnings).toEqual([]);
-    expect(st().doc.sheets['d:top_drawing'].nodes.find((n) => n.params.module === 'top_drawing_game_result')?.name).toBe('game_result_2');
+    // No drawing takes the Verilog name of an automatic block (top/score → top_score) or of a module.
+    const madeUp = Object.keys(st().blockDesign!.modules).map(verilogIdent);
+    expect(madeUp.length).toBeGreaterThan(1);
+    const taken = new Set([...madeUp, ...Object.keys(st().design!.modules)]);
+    expect(st().doc.drawn.filter((n) => taken.has(verilogIdent(n)))).toEqual([]);
+    // The block that drives output game_result is named apart from it: in Verilog an instance and a port cannot share a name.
+    const copy = st().doc.sheets['d:top_drawing'].nodes;
+    expect(copy.find((n) => n.params.module === 'top_drawing_game_result')?.name).toBe('game_result_2');
+    const pinNames = new Set(st().netlist!.nodes.filter(isPin).map((n) => verilogIdent(n.label)));
+    const blockNames = st().netlist!.nodes.filter((n) => n.kind === 'instance').map((n) => verilogIdent(n.instanceName!));
+    expect(blockNames.filter((n) => pinNames.has(n))).toEqual([]);
+    expect(st().issues.messages).toEqual([]);
+    // The sheet it was copied from is as it was.
     await st().openPath([{ instance: 'top', module: 'top' }]);
     await settle();
-    const after = exportCurrent();
-    expect(after.warnings).toEqual(before.warnings);
-    expect(after.code).toBe(before.code);
+    expect(st().netlist).toEqual(before);
   }, 60_000);
 
   it('keeps the notice about a renamed drawing when an import is shown as the top (N25)', async () => {
@@ -1375,13 +1405,17 @@ endmodule
     expect(blocks()).toEqual(['baud_gen', 'baud_gen']);
     const wires = st().netlist!.edges.length;
     expect(wires).toBe(6);
-    /** The drawing as it is drawn and exported now. */
+    /** The drawing as it is drawn now: every block has the ports of its module, with all its wires, and nothing to warn about. */
     const check = async () => {
       await st().openPath([{ instance: 'uart_top_drawing', module: 'uart_top_drawing', drawn: true }]);
       await settle();
       expect(st().netlist!.nodes.filter((n) => n.attrs?.missingModule)).toEqual([]);
+      for (const b of st().netlist!.nodes.filter((n) => n.kind === 'instance')) {
+        const ports = st().blockDesign!.modules[b.moduleName!].ports;
+        expect(b.ports.map((p) => `${p.name}:${p.width}`)).toEqual(ports.map((p) => `${p.name}:${p.bits.length}`));
+      }
       expect(st().layout!.edges.length).toBe(wires);
-      expect(exportCurrent().warnings).toEqual([]);
+      expect(st().issues.messages).toEqual([]);
     };
     // No sheet of baud_gen has edits: the blocks follow all the same.
     await st().setFiles({ 'uart.v': baudUart(12) }, false, { newVersion: true });
@@ -1435,24 +1469,36 @@ endmodule
     const qWidth = () => copies().find((n) => n.raw!.moduleName!.includes('counter'))!.raw!.ports.find((p) => p.name === 'q')!.width;
     expect(copies().map((n) => n.sym)).toEqual(['raw', 'raw']);
     expect(modules()).toEqual(['baud_gen #(DIV=10)', 'counter #(W=8)']);
-    /** The drawing as it is exported now. */
-    const exported = async () => {
+    /**
+     * The drawing as it is drawn now: the module each instance uses (a module of the elaborated design), and the
+     * widths of the wire from u_cnt's q and of the output q it drives.
+     */
+    const drawn = async () => {
       await st().openPath([{ instance: 'uart_top_drawing', module: 'uart_top_drawing', drawn: true }]);
       await settle();
-      return exportCurrent();
+      const d = st().netlist!;
+      expect(d.nodes.filter((n) => n.attrs?.missingModule)).toEqual([]);
+      const instances = d.nodes.filter((n) => n.kind === 'instance');
+      for (const n of instances) expect(st().blockDesign!.modules[n.moduleName!]).toBeDefined();
+      const q = d.nodes.find((n) => n.kind === 'output' && n.label === 'q')!;
+      const wire = d.edges.find((e) => e.target.node === q.id)!;
+      return {
+        modules: Object.fromEntries(instances.map((n) => [n.instanceName, moduleTitle(n.moduleName!)])),
+        wire: { from: wire.source.port, width: wire.width },
+        q: q.ports[0].width,
+      };
     };
-    expect((await exported()).warnings).toEqual([]);
+    expect(await drawn()).toEqual({ modules: { u_baud: 'baud_gen #(DIV=10)', u_cnt: 'counter #(W=8)' }, wire: { from: expect.stringMatching(/\.q$/), width: 8 }, q: 8 });
+    expect(st().issues.messages).toEqual([]);
     await st().setFiles({ 'uart.v': code('#(.DIV(12)) ', '#(.W(6)) ') }, false, { newVersion: true });
     await settle();
     expect(modules()).toEqual(['baud_gen #(DIV=12)', 'counter #(W=6)']);
-    // Its pins take the widths of the new parameters, as a block's do: the export says the 8-bit output gets 6 bits.
+    // Its pins take the widths of the new parameters, as a block's do: the 8-bit output gets 6 bits.
     expect(qWidth()).toBe(6);
     expect(st().notice).toBe(
       'The blocks of baud_gen #(DIV=10) on uart_top_drawing now use baud_gen #(DIV=12). The blocks of counter #(W=8) on uart_top_drawing now use counter #(W=6).',
     );
-    const out = await exported();
-    expect(out.code).toMatch(/^\s*paramod_baud_gen_DIV_s32_0+1100 u_baud \(/m);
-    expect(out.warnings).toEqual([expect.stringMatching(/^Width mismatch: output 'q' is 8 bits but its wire from instance u_cnt .* carries 6 bits/)]);
+    expect(await drawn()).toEqual({ modules: { u_baud: 'baud_gen #(DIV=12)', u_cnt: 'counter #(W=6)' }, wire: { from: expect.stringMatching(/\.q$/), width: 6 }, q: 8 });
     st().undo();
     await settle();
     expect(modules()).toEqual(['baud_gen #(DIV=10)', 'counter #(W=8)']);
@@ -1462,10 +1508,7 @@ endmodule
     await settle();
     expect(modules()).toEqual(['baud_gen', 'counter']);
     expect(qWidth()).toBe(4);
-    const plain = await exported();
-    expect(plain.code).toMatch(/^\s*baud_gen u_baud \(/m);
-    expect(plain.code).toMatch(/^\s*counter u_cnt \(/m);
-    expect(plain.warnings).toEqual([expect.stringMatching(/^Width mismatch: output 'q' is 8 bits but its wire from instance u_cnt \(counter\) carries 4 bits/)]);
+    expect(await drawn()).toEqual({ modules: { u_baud: 'baud_gen', u_cnt: 'counter' }, wire: { from: expect.stringMatching(/\.q$/), width: 4 }, q: 8 });
   }, 60_000);
 
   it("keeps a block placed by hand on its module when an instance elsewhere gets other parameters", async () => {
@@ -1481,8 +1524,8 @@ endmodule
     st().startPlacing({ sym: 'block', params: { module: 'baud_gen' } });
     st().placeAt({ x: 0, y: 0 });
     await settle();
-    const before = exportCurrent();
-    expect(before.code).toMatch(/^\s*baud_gen u1 \(/m);
+    const before = st().netlist!;
+    expect(before.nodes.filter((n) => n.kind === 'instance').map((n) => [n.moduleName, n.instanceName, n.ports.map((p) => p.name)])).toEqual([['baud_gen', 'u1', ['clk', 'en', 'tick']]]);
     const blocks = (sheet: string) => st().doc.sheets[`d:${sheet}`].nodes.filter((n) => n.sym === 'block').map((n) => moduleTitle(n.params.module!));
     await st().setFiles({ 'uart.v': baudUart(12) }, false, { newVersion: true });
     await settle();
@@ -1502,7 +1545,8 @@ endmodule
     expect(blocks('uart_top_drawing')).toEqual(['baud_gen', 'baud_gen', 'baud_gen']);
     await st().openPath([{ instance: 'mine', module: 'mine', drawn: true }]);
     await settle();
-    expect(exportCurrent()).toEqual(before);
+    expect(st().netlist).toEqual(before);
+    expect(st().issues.messages).not.toContain('Block u1 uses baud_gen, which no longer exists.');
   }, 60_000);
 
   it('keeps a copy to a new drawing following new parameters after the code renamed the copied instance', async () => {
@@ -1538,9 +1582,12 @@ endmodule
       expect(st().netlist!.nodes.filter((n) => n.attrs?.missingModule)).toEqual([]);
       expect(st().netlist!.edges.length).toBe(half ? 4 : 3);
       expect(st().issues.messages).toEqual([]);
-      const out = exportCurrent();
-      expect(out.code).toMatch(/^\s*paramod_baud_gen_DIV_s32_0+1100 u_baud \(/m);
-      expect(out.warnings).toEqual([]);
+      // The copied instance uses the module Yosys elaborated for DIV=12, and each of its pins is a port of that module.
+      const copy = st().netlist!.nodes.find((n) => n.id === 'cell:u_baud')!;
+      expect(moduleTitle(copy.moduleName!)).toBe('baud_gen #(DIV=12)');
+      const mod = new Map(st().blockDesign!.modules[copy.moduleName!].ports.map((p) => [p.name, p.bits.length]));
+      expect(copy.ports.map((p) => p.name)).toEqual(half ? ['clk', 'en', 'tick', 'half'] : ['clk', 'en', 'tick']);
+      for (const p of copy.ports) expect(mod.get(p.name)).toBe(p.width);
     }
   }, 60_000);
 
@@ -1587,8 +1634,10 @@ endmodule
     const wire = { id: 'w:3', source: { node: 'u:1', port: 'u:1.out' }, target: { node: 'u:2', port: 'u:2.in' }, slice: { lo: 4, width: 4 }, label: 'd[7:4]' };
     const e: SheetEdits = { ...drawing([d, hi], [wire]), pos: { 'u:1': { x: 0, y: 0 }, 'u:2': { x: 200, y: 0 } } };
     await open({}, { doc: { drawn: ['sl'], sheets: { 'd:sl': e } }, path: [{ instance: 'sl', module: 'sl', drawn: true }] });
-    expect(exportCurrent().code).toMatch(/assign hi = d\[7:4\];/);
-    expect(exportCurrent().warnings).toEqual([]);
+    // The wire carries bits 7:4 of d.
+    const wireOf = () => st().netlist!.edges.find((x) => x.id === 'w:3')!;
+    expect(wireOf()).toMatchObject({ source: { port: 'u:1.out' }, target: { port: 'u:2.in' }, width: 4, fullSource: false, bits: { lo: 4, width: 4 } });
+    expect(st().issues.messages).toEqual([]);
     st().setNotice(undefined);
     st().setNodeParams('u:1', { width: 4 });
     const said = 'The wire from d to hi takes bits 7:4, but d has 4 bits now: it carries all of d. Set its bits again, or widen d.';
@@ -1596,13 +1645,16 @@ endmodule
     // The sheet says so as long as it lasts, and draws the wire in the warning colour.
     expect(st().issues.messages).toContain(said);
     expect(st().issues.flagged.has('w:3')).toBe(true);
-    expect(exportCurrent().warnings).toContain(said);
-    // Inside a block of another drawing too.
+    // It carries all of d, as the notice says: no bits that d does not have.
+    expect(wireOf()).toMatchObject({ width: 4, fullSource: true });
+    expect(wireOf().bits).toBeUndefined();
     st().newDrawing('outer');
     await settle();
     st().startPlacing({ sym: 'block', params: { module: 'sl' } });
     st().placeAt({ x: 0, y: 0 });
-    expect(exportCurrent().warnings).toContain(`sl: ${said}`);
+    // A block of it has the pins as they are now.
+    const sl = st().netlist!.nodes.find((n) => n.moduleName === 'sl')!;
+    expect(sl.ports.map((p) => `${p.name}:${p.dir}:${p.width}`)).toEqual(['d:in:4', 'hi:out:4']);
     // Two clicks on one spot: the second symbol goes a little down and right, not over the first.
     st().startPlacing({ sym: 'and' });
     st().placeAt({ x: 300, y: 300 }, true);
@@ -1745,7 +1797,7 @@ endmodule
     expect(st().path).toEqual([{ instance: 'a', module: 'a', drawn: true }]);
   }, 60_000);
 
-  it('places components defined in JSON: a gate with more inputs, and a part exported as a black box', async () => {
+  it('places components defined in JSON: a gate with more inputs, and a part as a block with its pins', async () => {
     await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
     st().newDrawing('top');
     await settle();
@@ -1760,15 +1812,13 @@ endmodule
     const gate = st().netlist!.nodes.find((n) => n.cellType === '$and')!;
     expect(gate.ports.filter((p) => p.dir === 'in').length).toBe(5);
     const block = st().netlist!.nodes.find((n) => n.moduleName === 'alu')!;
-    expect(block.ports.map((p) => `${p.name}:${p.width}`)).toEqual(['a:8', 'b:8', 'y:8']);
+    // An instance of the part, under a name of its own, with the part's pins.
+    expect(block).toMatchObject({ kind: 'instance', label: 'alu', cellType: 'alu', instanceName: expect.stringMatching(/^u\d+$/) });
+    expect(block.attrs?.missingModule).toBeUndefined();
+    expect(block.ports.map((p) => `${p.name}:${p.dir}:${p.width}`)).toEqual(['a:in:8', 'b:in:8', 'y:out:8']);
     // A drawing cannot take a part's name.
     expect(st().renameDrawing('top', 'alu')).toMatch(/component/);
     expect(st().componentNameTaken('top')).toMatch(/drawing/);
-    // The export declares the part as an empty module, and Yosys reads it.
-    const out = exportCurrent();
-    expect(out.code).toContain('(* blackbox *)\nmodule alu (');
-    expect(out.code).toMatch(/alu u\d+ \(/);
-    await expect(elaborate(out.check.files, out.check.top)).resolves.toBeDefined();
     // Saved with the work, and one undo step.
     const saved = parseSavedFile(JSON.stringify(st().savedFile()));
     expect(saved.doc.components).toEqual(st().doc.components);
@@ -1913,6 +1963,10 @@ endmodule
     expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['in1', 'in2']);
     expect(st().renameItem(pins[1].id, 'b')).toBeUndefined();
     expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['in1', 'b']);
+    // Nor a name that only reads apart from another pin's: `a b` is the Verilog name a_b too.
+    expect(st().renameItem(pins[0].id, 'a_b')).toBeUndefined();
+    expect(st().renameItem(pins[1].id, 'a b')).toBe('Another pin, a_b, has the same Verilog name a_b. Pick another name.');
+    expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['a_b', 'b']);
   }, 60_000);
 
   it('shows imported Verilog that the open design does not use (C19)', async () => {

@@ -240,8 +240,8 @@ function srcRanges(v: unknown): SrcRange[] {
  * The frozen drawing node of a `raw` symbol, built only from fields of the
  * right type: the canvas, Inspector and code panel read them while rendering,
  * so one bad value in a hand-edited file would otherwise take the whole page down.
- * Every field the symbol and the Verilog export read must be copied here, or a
- * saved (or autosaved) drawing loses it.
+ * Every field the symbol reads must be copied here, or a saved (or autosaved)
+ * drawing loses it.
  */
 function rawNode(id: string, r: unknown): DNode | undefined {
   if (!isObj(r) || !isKind(r.kind) || !isStr(r.label) || !Array.isArray(r.ports)) return undefined;
@@ -258,7 +258,7 @@ function rawNode(id: string, r: unknown): DNode | undefined {
     node.attrs = attrs;
   }
   // The cell's Yosys parameters (negedge clock, reset value, signed operands): without them the
-  // export writes the library default instead. Yosys writes them in binary, MSB first.
+  // frozen copy would read as the library default instead. Yosys writes them in binary, MSB first.
   if (isObj(r.params)) {
     const params: Record<string, string> = {};
     for (const [k, p] of Object.entries(r.params)) if (isStr(p) && /^[01xz]+$/.test(p)) params[k] = p;

@@ -10,7 +10,6 @@ import {
   loadComponents,
   parseComponents,
   parseSymbolJson,
-  partVerilog,
   renamedPresets,
   settingsHint,
   symbolJson,
@@ -87,13 +86,6 @@ describe('components in JSON', () => {
     expect(loadComponents([{ name: 'and5', base: 'and', params: { name: 'x', base: 'or', inputs: 5 } }])).toEqual([
       { name: 'and5', base: 'and', params: { inputs: 5 } },
     ]);
-  });
-
-  it('exports a part as an empty module with its ports', () => {
-    const alu = parseComponents('{ "name": "alu", "inputs": ["a[7:0]", "c"], "outputs": ["y[7:0]"] }').defs![0];
-    expect(partVerilog(alu as Parameters<typeof partVerilog>[0])).toContain(
-      '(* blackbox *)\nmodule alu (\n  input wire [7:0] a,\n  input wire c,\n  output wire [7:0] y\n);\nendmodule',
-    );
   });
 
   it('reads the JSON of a placed symbol', () => {

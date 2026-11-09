@@ -10,15 +10,15 @@ import { GRID, type LayoutResult, type MeasureText, type Point, legacyCellSize, 
 import { scaleNote, wireShift } from './check';
 import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
-import { type InterfaceOf, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, symbolNode } from './symbols';
-import { verilogIdent } from './verilog-export';
+import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, symbolNode } from './symbols';
+import { verilogIdent } from './verilog-ident';
 import { type ComponentDef, componentSymbol, followsPreset, fullSettings, isPart, sameSettings } from './components';
 
 // ---------- effective netlist ----------
 
 /**
  * A symbol's drawn text after a rename. A constant is never renamed: its
- * label is its Verilog value (the export and Convert to drawing read it), so
+ * label is its Verilog value (Copy to new drawing reads it), so
  * a stale label saved for one has no effect.
  */
 export function applyLabel(n: DNode, text: string | undefined): DNode {
@@ -254,7 +254,7 @@ export function deleteItems(e: SheetEdits, d: Diagram, ids: Iterable<string>): S
 export function connect(e: SheetEdits, c: Connection, route?: Point[], label?: string): [string, SheetEdits] {
   const [id, e1] = newId(e, 'w');
   // A wire that appends zero bits (it taps or joins a `×4` wire) says so as the imported one does:
-  // without the note it would read as the plain bus, while the export writes it scaled.
+  // without the note it would read as the plain bus, while it carries the bits scaled.
   const text = label || (c.shift ? scaleNote(c.shift) : undefined);
   const edge: UserEdge = {
     id,
@@ -742,9 +742,50 @@ export function copyNodes(d: Diagram, e: SheetEdits, layout: LayoutResult, ids: 
   return { nodes, edges, routes };
 }
 
+export interface DrawingPort extends ModulePort {
+  /** The pin symbol (u:<n>) the port comes from. */
+  pin: string;
+}
+
 /**
- * The name the Verilog export gives a pin (its port) or a named block (its instance); undefined for
- * other symbols, and for a block nobody named (it gets an automatic name).
+ * The ports of a block that instantiates a drawing: one per pin, in drawing
+ * order. Each pin's Verilog name is verilogIdent(label), made unique with _2,
+ * _3… in the same order. A port is named like its pin when that is its Verilog
+ * name, and takes the unique name when the pin had to be made unique (`a b`
+ * and `a_b` are both a_b; input x and output x): two ports of one name would
+ * make wires to the block connect the wrong one, and a pin is lost. Pins keep
+ * their names in the common case, so block port IDs (`<block>.<name>`) in
+ * saved work stay valid.
+ */
+export function drawingPorts(e: SheetEdits | undefined): DrawingPort[] {
+  const ports: DrawingPort[] = [];
+  const used = new Set<string>();
+  const seen = new Set<string>();
+  for (const n of e?.nodes ?? []) {
+    // A pin wider than a library pin is a frozen copy (`raw`, see toUserNode); it is a port all the same.
+    const raw = n.sym === 'raw' ? n.raw : undefined;
+    const dir = raw ? raw.kind : n.sym;
+    if (dir !== 'input' && dir !== 'output' && dir !== 'inout') continue;
+    // effectiveDiagram draws a repeated ID once.
+    if (seen.has(n.id)) continue;
+    seen.add(n.id);
+    // The label symbolNode gives the pin.
+    const label = raw ? n.name || raw.label : n.name || (dir === 'input' ? 'in' : dir === 'output' ? 'out' : 'io');
+    const ident = verilogIdent(label);
+    let written = ident;
+    for (let i = 2; used.has(written); i++) written = `${ident}_${i}`;
+    used.add(written);
+    const own = label.trim();
+    // The width of the pin's own port (a frozen copy's), or its width setting.
+    const width = raw ? Math.max(1, (raw.ports.find((q) => q.dir === (dir === 'output' ? 'in' : 'out')) ?? raw.ports[0])?.width ?? 1) : clampParam('width', n.params.width, 1);
+    ports.push({ pin: n.id, name: own && verilogIdent(own) === written ? own : written, dir, width });
+  }
+  return ports;
+}
+
+/**
+ * The Verilog name of a pin (its port) or a named block (its instance); undefined for other
+ * symbols, and for a block nobody named (it gets an automatic name).
  */
 function verilogName(n: DNode): string | undefined {
   if (n.kind === 'input' || n.kind === 'output' || n.kind === 'inout') return n.label;
@@ -761,8 +802,8 @@ function freeName(name: string, taken: ReadonlySet<string>): string {
 /**
  * Paste a clip with its top-left corner at `at`. Returns the new edits and the IDs of what was pasted.
  * A pasted pin or block whose name is already used on the sheet gets a free one, as placement gives
- * (in1 → in2, a → a2): two pins drawn as `a` would read as one signal, but the Verilog writes two
- * ports (a and a_2). `sheet` is the sheet's netlist, for the names of its imported symbols; without
+ * (in1 → in2, a → a2): two pins drawn as `a` would read as one signal, but a block of the drawing has
+ * two ports (a and a_2, see drawingPorts). `sheet` is the sheet's netlist, for the names of its imported symbols; without
  * it only the symbols drawn by hand count.
  */
 export function pasteClip(e: SheetEdits, clip: Clip, at: Point, sheet?: Diagram): [SheetEdits, string[]] {

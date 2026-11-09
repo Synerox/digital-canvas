@@ -239,7 +239,7 @@ const OP_LABEL: Record<string, string> = {
 /** Names of a gate's inputs: up to X (Y is its output). */
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWX';
 
-/** The name of a gate's input `k`: A, B… X, then I24, I25… (the export goes by their order). */
+/** The name of a gate's input `k`: A, B… X, then I24, I25… */
 export function gateInputName(k: number): string {
   return k < LETTERS.length ? LETTERS[k] : `I${k}`;
 }

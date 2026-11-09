@@ -10,7 +10,7 @@ import type { SrcRange } from '../core/ir';
 import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
-import { verilogIdent } from '../editor/verilog-export';
+import { verilogIdent } from '../editor/verilog-ident';
 import { moduleTitle, sameFile, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
 import { ui } from './ui-events';
 import { openSettings, partOfBlock, settingsOf } from './settings';
@@ -163,7 +163,7 @@ function lineList(lines: number[]): string {
  * in belongs to the item it was opened on, so selecting another item (whose value may read the same) starts from that
  * item's own values.
  */
-export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
+export function Inspector() {
   const s = useStore();
   const nameRef = useRef<HTMLInputElement>(null);
 
@@ -203,7 +203,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
               check={(v) => {
                 const want = v.trim();
                 if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(want)) return 'Use letters, digits and _.';
-                // A keyword is no legal module name: the export would have to write the module under another one.
+                // A keyword is no legal Verilog module name (drawings and Verilog modules share one namespace).
                 return verilogIdent(want) === want ? undefined : `${want} is a Verilog keyword.`;
               }}
             />
@@ -211,7 +211,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
         ) : (
           <p
             className="small muted"
-            // Each view has sheets of its own: an edit here does not show in the other view, nor in its export.
+            // Each view has sheets of its own: an edit here does not show in the other view.
             title={`Your moves, added symbols and wires, renames and deletions are kept when the Verilog is imported again. ${
               viewModeOf(s.sheet) === 'flat'
                 ? 'They belong to the Full circuit: the Block diagram is edited apart.'
@@ -248,9 +248,6 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
         <div className="prop-actions">
           <button onClick={() => void s.autoLayout()} title="Lay out the whole sheet again with ELK (undoable)">
             Auto layout
-          </button>
-          <button onClick={onExportVerilog} title="Write this sheet as Verilog">
-            Export Verilog…
           </button>
           {!drawn && (
             <button onClick={() => s.convertToDrawing()} title="Copy this sheet into a new drawing you can edit freely. Automatic blocks become drawings of their own; instances of your Verilog modules still use those modules from your files.">
@@ -477,7 +474,7 @@ export function Inspector({ onExportVerilog }: { onExportVerilog(): void }) {
       )}
       <p className="small muted">
         {[
-          // A scaled wire says what it brings to its input, as the export writes it.
+          // A scaled wire says what it brings to its input.
           `${edge.width} bit${edge.width === 1 ? '' : 's'}${wireShift(edge) ? ` ${scaleNote(wireShift(edge))} (${edge.width + wireShift(edge)} bits)` : ''}`,
           ...(s.issues.flagged.has(id) ? wireTrouble(s.netlist, id) : []),
           ...(s.issues.flagged.has(id) && staleSlices(s.netlist, s.doc.sheets[s.sheet]).some((w) => w.edge === id) ? ['takes bits its source no longer has'] : []),

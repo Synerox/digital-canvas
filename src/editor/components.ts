@@ -9,14 +9,14 @@
  * - A part of its own has pins and no logic drawn: `{ "name": "alu", "inputs": ["a[7:0]",
  *   "b[7:0]"], "outputs": ["y[7:0]"] }`, or with numbers of pins, `{ "name": "lut",
  *   "inputs": 6, "outputs": 1 }`. It is placed as a block, an instance of the module of that
- *   name, and the Verilog export declares that module with these ports and no logic (a black
- *   box). A Verilog module or a drawing of the same name, made later, takes its place.
+ *   name with these ports and no logic (a black box). A Verilog module or a drawing of the
+ *   same name, made later, takes its place.
  *
  * The text the user writes is read by parseComponents, which explains what is wrong; the
  * file loader reads the saved definitions with loadComponents, which drops what is wrong.
  */
 import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, literalWidth } from './symbols';
-import { verilogIdent } from './verilog-export';
+import { verilogIdent } from './verilog-ident';
 
 export interface ComponentDef {
   /** The name in the library; for a part, also the name of the module its blocks instantiate. */
@@ -403,24 +403,6 @@ export function sameSettings(sym: SymKey, a: SymParams, b: SymParams): boolean {
   const y = fullSettings(sym, b);
   const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
   return [...keys].every((k) => x[k as keyof SymParams] === y[k as keyof SymParams]);
-}
-
-/**
- * The Verilog of a part: a module with its ports and no logic, marked as a black box so that tools
- * read it as a module defined elsewhere.
- */
-export function partVerilog(def: ComponentDef & { pins: ModulePort[] }): string {
-  const range = (w: number) => (w > 1 ? `[${w - 1}:0] ` : '');
-  const ports = def.pins.map((p) => `  ${p.dir} wire ${range(p.width)}${p.name}`);
-  return [
-    `// ${def.name}: a component of the library (Library › Components), with its pins only: its logic is not drawn`,
-    '(* blackbox *)',
-    `module ${def.name} (`,
-    ports.join(',\n'),
-    ');',
-    'endmodule',
-    '',
-  ].join('\n');
 }
 
 /**

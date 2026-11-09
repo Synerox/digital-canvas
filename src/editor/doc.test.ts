@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildDiagram } from '../core/diagram';
+import { type Diagram, buildDiagram } from '../core/diagram';
 import { design } from '../core/test-utils';
 import { layoutDiagram } from '../layout/elk-layout';
 import { type SavedFile, type SheetEdits, emptyEdits, parseEdits, parseSavedFile } from './doc';
 import { effectiveDiagram, toDrawing } from './sheet';
 import type { InterfaceOf } from './symbols';
-import { diagramToVerilog } from './verilog-export';
 
 const noModules: InterfaceOf = () => undefined;
 
@@ -23,10 +22,34 @@ function reopen(name: string, e: SheetEdits): SheetEdits {
   return parseSavedFile(JSON.stringify(f)).doc.sheets[`d:${name}`];
 }
 
-const exportOf = (name: string, e: SheetEdits) => diagramToVerilog(effectiveDiagram(name, undefined, e, noModules), name);
+const effective = (name: string, e: SheetEdits) => effectiveDiagram(name, undefined, e, noModules);
+
+/**
+ * What a diagram computes, in an order the drawing does not change: each symbol's kind, pin name,
+ * cell type, Yosys parameters, drawing hints and ports, and the ports each wire joins with the
+ * bits it carries. Wire IDs, cell and wire labels and source ranges are left out.
+ */
+function logicOf(d: Diagram) {
+  const nodes = d.nodes
+    .map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      pin: n.kind === 'input' || n.kind === 'output' ? n.label : undefined,
+      cellType: n.cellType,
+      moduleName: n.moduleName,
+      params: n.params,
+      attrs: n.attrs,
+      ports: n.ports.map((p) => ({ id: p.id, dir: p.dir, width: p.width, inout: p.inout })),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const edges = d.edges
+    .map((x) => ({ from: x.source.port, to: x.target.port, width: x.width, fullSource: x.fullSource, bits: x.bits, shift: x.shift }))
+    .sort((a, b) => `${a.from}>${a.to}`.localeCompare(`${b.from}>${b.to}`));
+  return { nodes, edges };
+}
 
 describe('frozen copies of imported cells in saved files', () => {
-  it('keep the Yosys parameters, so a negedge, reset-value or signed cell exports the same after reopening', async () => {
+  it('keep the Yosys parameters, so a negedge, reset-value or signed cell computes the same after reopening', async () => {
     const src = `module t(input clk, input rst, input [3:0] d, input signed [3:0] a, input signed [3:0] b, output reg [3:0] q, output lt);
   always @(negedge clk or posedge rst) if (rst) q <= 4'd5; else q <= d;
   assign lt = a < b;
@@ -35,16 +58,21 @@ endmodule
     const base = buildDiagram(await design({ 't.v': src }), 't');
     const drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
     expect(drawing.nodes.filter((u) => u.raw?.params).length).toBeGreaterThanOrEqual(2);
-    const before = exportOf('t_drawing', drawing);
-    expect(before.code).toContain('negedge clk');
-    expect(before.code).toContain("4'd5");
-    expect(before.code).toContain('$signed(a)');
+    const before = effective('t_drawing', drawing);
+    const cell = (type: string) => before.nodes.find((n) => n.cellType === type)?.params;
+    // The register clocks on the falling edge and resets to 5; the compare is signed.
+    expect(cell('$adff')).toMatchObject({ CLK_POLARITY: '0', ARST_VALUE: '0101' });
+    expect(cell('$lt')?.A_SIGNED).toMatch(/^0*1$/);
+    expect(cell('$lt')?.B_SIGNED).toMatch(/^0*1$/);
 
     const opened = reopen('t_drawing', drawing);
     for (const u of drawing.nodes) expect(opened.nodes.find((x) => x.id === u.id)?.raw?.params, u.id).toEqual(u.raw?.params);
-    expect(exportOf('t_drawing', opened)).toEqual(before);
+    expect(logicOf(effective('t_drawing', opened))).toEqual(logicOf(before));
     // The sheet's edits alone (as parseEdits reads them) keep them too.
-    expect(exportOf('t_drawing', parseEdits(JSON.parse(JSON.stringify(drawing))))).toEqual(before);
+    expect(logicOf(effective('t_drawing', parseEdits(JSON.parse(JSON.stringify(drawing)))))).toEqual(logicOf(before));
+    // Without them the copies would be the library's rising-edge, reset-to-0, unsigned cells.
+    const stripped: SheetEdits = { ...opened, nodes: opened.nodes.map((u) => (u.raw ? { ...u, raw: { ...u.raw, params: undefined } } : u)) };
+    expect(logicOf(effective('t_drawing', stripped))).not.toEqual(logicOf(before));
   });
 
   it('keep only parameters written as Yosys writes them (binary, MSB first)', () => {
