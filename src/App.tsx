@@ -6,7 +6,7 @@ import { Inspector } from './app/Inspector';
 import { Menu, type MenuItem } from './app/Menu';
 import { Palette } from './app/Palette';
 import { SettingsPopup } from './app/SettingsPopup';
-import { Breadcrumb, CodePanel, Drawings, FileList, HierarchyTree, LogPanel, RulePanel, TopSelector, ViewToggle } from './app/Panels';
+import { Breadcrumb, Drawings, FileList, HierarchyTree, LogPanel, TopSelector, ViewToggle } from './app/Panels';
 import { AUTOSAVE_KEY, EXAMPLES, type ExampleName, type ImportPlan, planDrop, planOpen, useStore } from './app/store';
 import { ui } from './app/ui-events';
 import { FILE_EXTENSION, FileFormatError, isDrawnKey } from './editor/doc';
@@ -62,8 +62,8 @@ function ownsKeys(t: EventTarget | null): boolean {
   return !(el.tagName === 'INPUT' && ['checkbox', 'radio', 'button', 'range', 'file'].includes((el as HTMLInputElement).type));
 }
 
-/** The panes that show text to read and copy (Source, Yosys log). */
-const TEXT_PANES = '.code, .log pre';
+/** The panes that show text to read and copy (the Yosys log). */
+const TEXT_PANES = '.log pre';
 
 /**
  * The text pane the user works in, when not the drawing: the pane that has
@@ -105,7 +105,6 @@ export default function App() {
   const path = useStore((x) => x.path);
   const hasLayout = useStore((x) => !!x.layout);
   const bigFlat = useStore((x) => x.bigFlat);
-  const codeFile = useStore((x) => x.codeFile);
   const canUndo = useStore((x) => x.past.length > 0);
   const canRedo = useStore((x) => x.future.length > 0);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -413,10 +412,6 @@ export default function App() {
             <h3>Drawings</h3>
             <Drawings />
           </section>
-          <section>
-            <h3>Drawing rules</h3>
-            <RulePanel />
-          </section>
         </aside>
 
         <section className="center">
@@ -508,17 +503,8 @@ export default function App() {
           {logVisible && <LogPanel onClose={() => setShowLog(false)} />}
         </section>
 
-        <aside className="code-pane">
+        <aside className="props-pane">
           <Inspector />
-          {/* A drawing has no Verilog of its own: the files open are about other sheets. */}
-          {!drawn && (
-            <>
-              <h3>
-                Source <span className="muted small">{codeFile}</span>
-              </h3>
-              <CodePanel />
-            </>
-          )}
         </aside>
       </div>
 

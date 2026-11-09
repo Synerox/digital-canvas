@@ -49,11 +49,9 @@ describe('auction demo pipeline', () => {
     expect(budgetEdges.every((e) => e.width === 4 && e.fullSource && !e.label)).toBe(true);
 
     // Stable IDs for anonymous cells come from the source expression.
-    const sb = buildDiagram(design, 'score_calc', new Set());
+    const sb = buildDiagram(design, 'score_calc');
     const add = sb.nodes.find((n) => n.cellType === '$add');
     expect(add?.id).toBe('cell:$add{{2\'b00, max_bid} + {bonus, 2\'b00}}');
-    // Constant padding shows up as constant nodes.
-    expect(sb.nodes.some((n) => n.kind === 'const' && n.label === "2'd0")).toBe(true);
 
     const layout = await layoutDiagram(top);
     expect(layout.width).toBeGreaterThan(100);
@@ -77,17 +75,19 @@ describe('semantic transforms', () => {
     const and = rd.nodes.find((n) => n.cellType === 'dc:and');
     expect(and?.attrs?.invertB).toBe(false);
     expect(rd.nodes.some((n) => n.cellType === '$mux')).toBe(false);
-    // The rewritten cell keeps the stable ID of the cell it replaced.
-    const plain = buildDiagram(design, 'result_decode', new Set());
-    expect(plain.nodes.map((n) => n.id)).toContain(dec!.id);
+    // The rewritten cells keep the stable IDs of the cells they replace.
+    const cells = design.modules.result_decode.cells;
+    expect(dec!.id).toBe(`cell:${cells.find((c) => c.type === '$shl' || c.type === '$sshl')!.id}`);
+    expect(and!.id).toBe(`cell:${cells.find((c) => c.type === '$mux')!.id}`);
 
     // {2'b00, max_bid} + {bonus, 2'b00}: no concatenation bars, a x4 label instead.
     const sc = buildDiagram(design, 'score_calc');
     expect(sc.nodes.some((n) => n.kind === 'join' || n.kind === 'const')).toBe(false);
     expect(sc.edges.find((e) => e.source.node === 'in:bonus')?.label).toBe('×4');
     expect(sc.edges.find((e) => e.source.node === 'in:max_bid')?.label).toBeUndefined();
-    const raw = buildDiagram(design, 'score_calc', new Set());
-    expect(raw.nodes.filter((n) => n.kind === 'join')).toHaveLength(2);
+    // The zero padding is there in the netlist; the diagram draws none of it.
+    const sum = design.modules.score_calc.cells.find((c) => c.type === '$add')!;
+    expect(sum.connections.A.includes('0') && sum.connections.B.includes('0')).toBe(true);
   }, 60_000);
 
   it('draws an inverted enable when the MUX passes data on select = 0', async () => {

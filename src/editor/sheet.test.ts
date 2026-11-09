@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { type DEdge, type DNode, type DPort, type Diagram, type Side, buildDiagram } from '../core/diagram';
-import { DEFAULT_RULES } from '../core/rules';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { type LayoutResult, type MeasureText, approxMeasure, layoutDiagram, sizeNode } from '../layout/elk-layout';
@@ -169,9 +168,9 @@ describe('symbol library', () => {
     const port = (name: string, dir: 'in' | 'out', side: Side): DPort => ({ id: `n.${name}`, name, dir, side, width: 1 });
     const nodes: DNode[] = [
       // A register with an enable and an asynchronous reset has three pins at the bottom.
-      { id: 'n', kind: 'cell', label: 'DFF', cellType: '$adffe', src: [], ports: [port('D', 'in', 'WEST'), port('CLK', 'in', 'SOUTH'), port('EN', 'in', 'SOUTH'), port('ARST', 'in', 'SOUTH'), port('Q', 'out', 'EAST')] },
-      { id: 'n', kind: 'cell', label: 'MUX', cellType: '$pmux', src: [], ports: [port('A', 'in', 'WEST'), port('B', 'in', 'WEST'), port('C', 'in', 'WEST'), port('S', 'in', 'SOUTH'), port('Y', 'out', 'EAST')] },
-      { id: 'n', kind: 'instance', label: 'odd', src: [], ports: [port('a', 'in', 'WEST'), port('t1', 'in', 'NORTH'), port('t2', 'in', 'NORTH'), port('b1', 'in', 'SOUTH'), port('y', 'out', 'EAST')] },
+      { id: 'n', kind: 'cell', label: 'DFF', cellType: '$adffe', ports: [port('D', 'in', 'WEST'), port('CLK', 'in', 'SOUTH'), port('EN', 'in', 'SOUTH'), port('ARST', 'in', 'SOUTH'), port('Q', 'out', 'EAST')] },
+      { id: 'n', kind: 'cell', label: 'MUX', cellType: '$pmux', ports: [port('A', 'in', 'WEST'), port('B', 'in', 'WEST'), port('C', 'in', 'WEST'), port('S', 'in', 'SOUTH'), port('Y', 'out', 'EAST')] },
+      { id: 'n', kind: 'instance', label: 'odd', ports: [port('a', 'in', 'WEST'), port('t1', 'in', 'NORTH'), port('t2', 'in', 'NORTH'), port('b1', 'in', 'SOUTH'), port('y', 'out', 'EAST')] },
     ];
     for (const n of nodes) {
       for (const measure of [approxMeasure, fractional]) {
@@ -408,7 +407,7 @@ describe('wires joined to a sliced wire', () => {
 
   it('keep the zero bits of a scaled (×4) wire they tap or join', async () => {
     const src = "module t(input [3:0] a, input [1:0] b, output [3:0] y);\n  assign y = a + {b, 2'b00};\nendmodule\n";
-    const base = buildDiagram(await design({ 't.v': src }), 't', DEFAULT_RULES);
+    const base = buildDiagram(await design({ 't.v': src }), 't');
     const scaled = base.edges.find((x) => x.shift)!;
     expect(scaled).toMatchObject({ width: 2, shift: 2, label: '×4' });
     const s = new Drawing(noModules, base);
@@ -766,7 +765,7 @@ describe('imported symbols', () => {
 
   it('keep what an imported wire carries when it is renamed or its name cleared', async () => {
     const src = "module sc(input [3:0] a, input [3:0] b, output [5:0] y, output [1:0] z);\n  assign y = a + {b, 2'b00};\n  assign z = a[3:2];\nendmodule\n";
-    const base = buildDiagram(await design({ 'sc.v': src }), 'sc', DEFAULT_RULES);
+    const base = buildDiagram(await design({ 'sc.v': src }), 'sc');
     const scaled = base.edges.find((x) => x.shift)!;
     const sliced = base.edges.find((x) => x.target.port === 'out:z.in')!;
     expect(scaled).toMatchObject({ shift: 2, label: '×4' });
@@ -829,7 +828,7 @@ describe('Copy to new drawing', () => {
   });
 
   it('raises no width warnings for zero-extended or scaled operands', async () => {
-    const base = buildDiagram(await design({ [AUCTION_FILE]: AUCTION_SOURCE }), 'score_calc', DEFAULT_RULES);
+    const base = buildDiagram(await design({ [AUCTION_FILE]: AUCTION_SOURCE }), 'score_calc');
     expect(checkSheet(base).messages).toEqual([]);
     const drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
     expect(checkSheet(effectiveDiagram('x', undefined, drawing, noModules)).messages).toEqual([]);
@@ -864,7 +863,7 @@ endmodule
   });
 
   it('keeps the zero bits of scaled wires when they are copied and renamed', async () => {
-    const base = buildDiagram(await design({ [AUCTION_FILE]: AUCTION_SOURCE }), 'score_calc', DEFAULT_RULES);
+    const base = buildDiagram(await design({ [AUCTION_FILE]: AUCTION_SOURCE }), 'score_calc');
     const scaled = base.edges.filter((x) => x.shift);
     expect(scaled.length).toBeGreaterThan(0);
     let drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
@@ -906,7 +905,6 @@ describe('saved files', () => {
       format: 'digital-canvas',
       version: 1,
       files: { 'a.v': 'module a; endmodule' },
-      rules: ['decoder'],
       viewMode: 'blocks',
       doc: { drawn: ['d1'], sheets: { 'd:d1': e } },
       path: [{ instance: 'd1', module: 'd1', drawn: true }],
@@ -925,7 +923,6 @@ describe('saved files', () => {
       format: 'digital-canvas',
       version: 1,
       files: { 'a.v': 'module a; endmodule' },
-      rules: [],
       viewMode: 'flat',
       doc: { drawn: [], sheets: {} },
       path: [{ instance: 'a', module: 'a' }],
@@ -937,7 +934,24 @@ describe('saved files', () => {
     }
   });
 
+  it('of the time of the drawing rules open the same, without them (they always apply now)', () => {
+    const f = {
+      format: 'digital-canvas',
+      version: 1,
+      files: { 'a.v': 'module a; endmodule' },
+      viewMode: 'blocks',
+      doc: { drawn: [], sheets: {} },
+      path: [{ instance: 'a', module: 'a' }],
+    };
+    for (const rules of [[], ['decoder'], ['decoder', 'mux-to-and', 'zero-extend', 'scale'], 'all', null]) {
+      const back = parseSavedFile(JSON.stringify({ ...f, rules }));
+      expect(back).not.toHaveProperty('rules');
+      expect(back).toMatchObject({ files: f.files, viewMode: 'blocks', path: f.path });
+    }
+  });
+
   it('keeps only well-formed fields of a frozen symbol copy', () => {
+    // Older files kept the Verilog lines of a copy (`src`): nothing maps symbols to lines any more, so they go.
     const src = { file: 'a.v', startLine: 1, startCol: 2, endLine: 1, endCol: 9 };
     const raw = {
       kind: 'cell',
@@ -971,7 +985,6 @@ describe('saved files', () => {
         { id: 'u:1.A', name: 'A', dir: 'in', side: 'WEST', width: 1, inout: true },
         { id: 'u:1.Y', name: 'Y', dir: 'out', side: 'EAST', width: 1 },
       ],
-      src: [src],
     });
   });
 });
@@ -979,7 +992,7 @@ describe('saved files', () => {
 describe('a wire that taps or joins a scaled (×4) wire', () => {
   it('shows its zero bits as the imported one does, and is checked with them', async () => {
     const src = "module t(input [3:0] a, input [1:0] b, output [3:0] y);\n  assign y = a + {b, 2'b00};\nendmodule\n";
-    const base = buildDiagram(await design({ 't.v': src }), 't', DEFAULT_RULES);
+    const base = buildDiagram(await design({ 't.v': src }), 't');
     const scaled = base.edges.find((x) => x.shift)!;
     const s = new Drawing(noModules, base);
     const tap = s.add('output', 'tap', { width: 4 });

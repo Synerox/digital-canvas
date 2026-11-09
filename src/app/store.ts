@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { type DNode, type DPort, type Diagram, buildDiagram } from '../core/diagram';
-import { DEFAULT_RULES, RULES, type RuleId } from '../core/rules';
-import { type HierarchyNode, type IRDesign, type SrcRange, buildDesign, buildHierarchy, displayModuleName } from '../core/ir';
+import { type HierarchyNode, type IRDesign, buildDesign, buildHierarchy, displayModuleName } from '../core/ir';
 import { moduleTitle } from '../core/names';
 import { parseYosysJson } from '../core/yosys-json';
 import { flatCellCount, withFlattened } from '../core/flatten';
@@ -138,7 +137,7 @@ function stableJson(v: unknown): string {
 
 /**
  * What a copy of the work in the browser holds, read as Open reads it: `work` is what a tab can
- * lose (the files, the rules, the edits and the edits put aside), `view` where it looks (sheet,
+ * lose (the files, the edits and the edits put aside), `view` where it looks (sheet,
  * view, Top) and whether it is saved to a file. Undefined for text that is not a copy.
  */
 export function copyKeys(text: string): { work: string; view: string } | undefined {
@@ -146,7 +145,7 @@ export function copyKeys(text: string): { work: string; view: string } | undefin
     const f = parseSavedFile(text);
     const saved = (JSON.parse(text) as { saved?: unknown }).saved === true;
     return {
-      work: stableJson({ files: f.files, rules: [...f.rules].sort(), doc: compactDoc(f.doc), putAside: parsePutAside(text) }),
+      work: stableJson({ files: f.files, doc: compactDoc(f.doc), putAside: parsePutAside(text) }),
       view: stableJson({ top: f.top, viewMode: f.viewMode, path: f.path, saved }),
     };
   } catch {
@@ -166,8 +165,6 @@ export interface HistoryEntry {
   files?: Record<string, string>;
   top?: string;
   putAside?: PutAside;
-  /** For a change of the drawing rules: the rules to go back to (they redraw every Verilog sheet). */
-  rules?: RuleId[];
   /**
    * A step that only went to another sheet (opened a block, went up the breadcrumb, picked a module in the
    * hierarchy or a drawing, switched Block diagram and Full circuit): Undo goes back to `path` (in the view
@@ -199,7 +196,7 @@ interface State {
   sheet: string;
   /**
    * The sheet that `base`, `baseLayout`, `netlist` and `layout` belong to. While a Verilog
-   * sheet is being opened (or opened again with other rules) they are still the previous
+   * sheet is being opened (or opened again in a new design) they are still the previous
    * ones and this differs from `sheet`: edits wait, or they would land on the new sheet's
    * key computed from the old netlist and positions.
    */
@@ -231,12 +228,6 @@ interface State {
   log: string;
   /** Selected symbols and wires. */
   selection: ReadonlySet<string>;
-  /** Node ids highlighted from the code panel. */
-  highlighted: Set<string>;
-  /** Source ranges highlighted in the code panel. */
-  codeRanges: SrcRange[];
-  codeFile?: string;
-  rules: ReadonlySet<RuleId>;
   elapsedMs?: number;
   /** The full circuit held back while status is 'too-large'. */
   bigFlat?: { module: string; cells: number };
@@ -275,9 +266,6 @@ interface State {
   openNode(id: string): void;
   select(ids: Iterable<string>, mode?: 'replace' | 'toggle' | 'add'): void;
   selectAll(): void;
-  selectLine(file: string, line: number): void;
-  setCodeFile(file: string): void;
-  toggleRule(id: RuleId): Promise<void>;
   setTop(top: string | undefined): Promise<void>;
   setNotice(text: string | undefined): void;
 
@@ -367,7 +355,7 @@ let copied: { work: string; view: string } | undefined;
  * the sheet was last edited, routes found; see refresh). While the work is still this, the tab has
  * changed nothing.
  */
-let copiedWork: { doc: EditDoc; derived: EditDoc; files: Record<string, string>; rules: ReadonlySet<RuleId>; putAside: PutAside } | undefined;
+let copiedWork: { doc: EditDoc; derived: EditDoc; files: Record<string, string>; putAside: PutAside } | undefined;
 
 let measurer: MeasureText | undefined;
 /** Text measurement in the drawings' font (one canvas, made when first needed). */
@@ -395,22 +383,6 @@ export function pasteSpot(box: Box, nodes: readonly Box[]): Point {
   }
   return { x: box.x, y };
 }
-
-/** True when a Yosys src file name refers to the uploaded file (Yosys may add directories). */
-export function sameFile(srcFile: string, file: string): boolean {
-  return srcFile === file || srcFile.endsWith('/' + file) || file.endsWith('/' + srcFile);
-}
-
-function rangeHasLine(r: SrcRange, file: string, line: number): boolean {
-  return sameFile(r.file, file) && line >= r.startLine && line <= r.endLine;
-}
-
-function findFile(files: Record<string, string>, srcFile: string | undefined): string | undefined {
-  if (!srcFile) return undefined;
-  return Object.keys(files).find((f) => sameFile(srcFile, f));
-}
-
-const rulesKey = (rules: ReadonlySet<RuleId>) => RULES.map((r) => (rules.has(r.id) ? '1' : '0')).join('');
 
 /** A legal, unused module name for a new drawing. */
 function uniqueModuleName(want: string, taken: Set<string>): string {
@@ -988,13 +960,13 @@ export const useStore = create<State>((set, get) => {
    * circuit only up to FLAT_CELL_LIMIT cells, as building a bigger one takes a while.
    */
   const baseOf = (mode: ViewMode, module: string): Diagram | undefined => {
-    const { rules, design, blockDesign } = get();
-    const cacheKey = `${mode}:${module}:${rulesKey(rules)}`;
+    const { design, blockDesign } = get();
+    const cacheKey = `${mode}:${module}`;
     let base = baseCache.get(cacheKey);
     if (base) return base;
     const view = mode === 'blocks' ? (blockDesign ?? design) : design;
     if (!view?.modules[module] || (mode === 'flat' && flatCellCount(view, module) > FLAT_CELL_LIMIT)) return undefined;
-    base = buildDiagram(mode === 'flat' ? withFlattened(view, module) : view, module, rules);
+    base = buildDiagram(mode === 'flat' ? withFlattened(view, module) : view, module);
     baseCache.set(cacheKey, base);
     return base;
   };
@@ -1144,7 +1116,7 @@ export const useStore = create<State>((set, get) => {
     // A tab that has changed nothing of the work since it read or wrote the copy (it only looked) writes the work as
     // it was then: what drawing its sheets added (see copiedWork) would be other work to the tab working on it, which
     // would stop keeping the copy.
-    const looked = !force && copiedWork && s.doc === copiedWork.derived && s.files === copiedWork.files && s.rules === copiedWork.rules && s.putAside === copiedWork.putAside;
+    const looked = !force && copiedWork && s.doc === copiedWork.derived && s.files === copiedWork.files && s.putAside === copiedWork.putAside;
     // Whether the work is saved to a file goes along (only here, not in saved files): see restoreAutosave.
     const text = JSON.stringify({ ...s.savedFile(), ...(looked ? { doc: compactDoc(copiedWork!.doc) } : {}), ...(s.dirty ? {} : { saved: true }) });
     const keys = copyKeys(text);
@@ -1154,7 +1126,7 @@ export const useStore = create<State>((set, get) => {
     try {
       localStorage.setItem(AUTOSAVE_KEY, text);
       copied = keys;
-      if (!looked) copiedWork = { doc: s.doc, derived: s.doc, files: s.files, rules: s.rules, putAside: s.putAside };
+      if (!looked) copiedWork = { doc: s.doc, derived: s.doc, files: s.files, putAside: s.putAside };
     } catch {
       set({ notice: 'Could not keep a copy in this browser (storage is full or blocked). Use File › Save drawing.' });
     }
@@ -1221,12 +1193,12 @@ export const useStore = create<State>((set, get) => {
    * Undefined when the layout was cancelled.
    */
   const autoBlockSheet = async (module: string): Promise<{ netlist: Diagram; layout: LayoutResult; edits: SheetEdits } | undefined> => {
-    const { blockDesign, rules, doc } = get();
+    const { blockDesign, doc } = get();
     if (!blockDesign?.modules[module]) return undefined;
-    const cacheKey = `blocks:${module}:${rulesKey(rules)}`;
+    const cacheKey = `blocks:${module}`;
     let base = baseCache.get(cacheKey);
     if (!base) {
-      base = buildDiagram(blockDesign, module, rules);
+      base = buildDiagram(blockDesign, module);
       baseCache.set(cacheKey, base);
     }
     const saved = doc.sheets[sheetKey({ instance: module, module }, 'blocks')] ?? emptyEdits();
@@ -1334,7 +1306,6 @@ export const useStore = create<State>((set, get) => {
     set({
       files: f.files,
       topOverride: f.top,
-      rules: new Set(f.rules.filter((r) => RULES.some((x) => x.id === r))),
       viewMode: f.viewMode,
       doc: f.doc,
       putAside,
@@ -1355,7 +1326,7 @@ export const useStore = create<State>((set, get) => {
     });
     if (fromCopy) {
       const s = get();
-      copiedWork = { doc: s.doc, derived: s.doc, files: s.files, rules: s.rules, putAside: s.putAside };
+      copiedWork = { doc: s.doc, derived: s.doc, files: s.files, putAside: s.putAside };
     }
     // The browser's copy is this file now, or a reload brings back the work from before it.
     scheduleAutosave();
@@ -1494,9 +1465,6 @@ export const useStore = create<State>((set, get) => {
     status: 'idle',
     log: '',
     selection: new Set(),
-    highlighted: new Set(),
-    codeRanges: [],
-    rules: DEFAULT_RULES,
     viewMode: 'blocks',
     issues: { flagged: new Set(), messages: [] },
     doc: emptyDoc(),
@@ -1593,9 +1561,6 @@ export const useStore = create<State>((set, get) => {
           status: 'idle',
           error: undefined,
           errorKind: undefined,
-          codeFile: undefined,
-          highlighted: new Set(),
-          codeRanges: [],
         });
         const path = get().path;
         if (path[0]?.drawn && get().doc.drawn.includes(path[0].module)) await get().openPath(path);
@@ -1639,15 +1604,13 @@ export const useStore = create<State>((set, get) => {
             path.push({ instance: cell.name, module: cell.type });
           }
         }
-        const codeFile = get().codeFile && files[get().codeFile!] !== undefined ? get().codeFile : Object.keys(files)[0];
-        set({ design, blockDesign, hierarchy, codeFile, base: undefined, baseLayout: undefined, sheet: '' });
+        set({ design, blockDesign, hierarchy, base: undefined, baseLayout: undefined, sheet: '' });
         await get().openPath(path);
         if (gen === rebuildGen) set({ elapsedMs: performance.now() - t0 });
       } catch (e) {
         if (gen !== rebuildGen) return;
         const err = e as YosysError;
-        const codeFile = get().codeFile && files[get().codeFile!] !== undefined ? get().codeFile : Object.keys(files)[0];
-        set({ status: 'error', error: err.message, errorKind: err.kind ?? 'design', log: err.log ?? get().log, codeFile });
+        set({ status: 'error', error: err.message, errorKind: err.kind ?? 'design', log: err.log ?? get().log });
         // Drawings do not need Yosys.
         if (get().path[0]?.drawn) await get().openPath(get().path);
       }
@@ -1659,17 +1622,17 @@ export const useStore = create<State>((set, get) => {
       // This navigation replaces any layout still running (for example a large full circuit).
       cancelLayouts();
       const last = path[path.length - 1];
-      const { viewMode, rules } = get();
+      const { viewMode } = get();
       const key = sheetKey(last, viewMode);
       const keepSelection = key === get().sheet;
       set({
         path,
         sheet: key,
         placing: keepSelection ? get().placing : undefined,
-        ...(keepSelection ? {} : { selection: new Set<string>(), highlighted: new Set<string>(), codeRanges: [] }),
+        ...(keepSelection ? {} : { selection: new Set<string>() }),
         bigFlat: undefined,
         // Until the end, base, layout and netlist are the previous ones (even for the same key:
-        // other rules give another netlist).
+        // a new design gives another netlist).
         loadedSheet: undefined,
       });
       if (last.drawn) {
@@ -1692,8 +1655,8 @@ export const useStore = create<State>((set, get) => {
       }
       const module = last.module;
       set({ status: 'layout' });
-      const cacheKey = `${viewMode}:${module}:${rulesKey(rules)}`;
-      const stale = () => seq !== navSeq || get().design !== design || get().rules !== rules || get().viewMode !== viewMode;
+      const cacheKey = `${viewMode}:${module}`;
+      const stale = () => seq !== navSeq || get().design !== design || get().viewMode !== viewMode;
       let base = baseCache.get(cacheKey);
       if (!base) {
         if (viewMode === 'flat' && !flatAllowed.has(module) && !isPinned(get().doc.sheets[key])) {
@@ -1710,7 +1673,7 @@ export const useStore = create<State>((set, get) => {
           if (stale()) return;
         }
         const source = viewMode === 'flat' ? withFlattened(view, module) : view;
-        base = buildDiagram(source, module, rules);
+        base = buildDiagram(source, module);
         baseCache.set(cacheKey, base);
         if (viewMode === 'flat') {
           await nextTask();
@@ -1726,15 +1689,12 @@ export const useStore = create<State>((set, get) => {
         baseLayout = await elkOf(cacheKey, base);
         if (!baseLayout || stale()) return;
       }
-      const m = view.modules[module];
-      const file = findFile(get().files, m?.src[0]?.file);
       set({
         base,
         baseLayout,
         loadedSheet: key,
         layout: keepSelection ? get().layout : undefined,
         status: get().error ? 'error' : 'ready',
-        codeFile: file ?? get().codeFile,
       });
       refresh();
     },
@@ -1771,7 +1731,6 @@ export const useStore = create<State>((set, get) => {
     },
 
     select(ids, mode = 'replace') {
-      const { layout, files } = get();
       const list = [...ids];
       let selection: Set<string>;
       if (mode === 'replace') selection = new Set(list);
@@ -1782,9 +1741,7 @@ export const useStore = create<State>((set, get) => {
           else selection.add(id);
         }
       }
-      const ranges = (layout?.nodes ?? []).filter((n) => selection.has(n.id)).flatMap((n) => n.src);
-      const file = findFile(files, ranges[0]?.file) ?? get().codeFile;
-      set({ selection, highlighted: new Set(), codeRanges: ranges, codeFile: file });
+      set({ selection });
     },
 
     selectAll() {
@@ -1793,34 +1750,8 @@ export const useStore = create<State>((set, get) => {
       get().select([...layout.nodes.map((n) => n.id), ...layout.edges.map((x) => x.id)]);
     },
 
-    selectLine(file, line) {
-      const { layout } = get();
-      const hits = new Set<string>();
-      for (const n of layout?.nodes ?? []) if (n.src.some((r) => rangeHasLine(r, file, line))) hits.add(n.id);
-      set({
-        highlighted: hits,
-        selection: new Set(),
-        codeRanges: [{ file, startLine: line, startCol: 1, endLine: line, endCol: 1 }],
-      });
-    },
-
-    setCodeFile(file) {
-      set({ codeFile: file });
-    },
-
     setNotice(text) {
       set({ notice: text });
-    },
-
-    async toggleRule(id) {
-      const s = get();
-      const rules = new Set(s.rules);
-      if (rules.has(id)) rules.delete(id);
-      else rules.add(id);
-      // An undo step: Ctrl+Z right after it must undo it, not an older edit out of sight.
-      set({ rules, past: [...s.past.slice(-(HISTORY - 1)), { ...here(), rules: [...s.rules] }], future: [] });
-      scheduleAutosave();
-      await get().openPath(get().path);
     },
 
     // ---------- editing ----------
@@ -2004,7 +1935,7 @@ export const useStore = create<State>((set, get) => {
         throw e;
       }
       set({ status: get().error ? 'error' : 'ready' });
-      // Skip if the user moved on or edited meanwhile, or the netlist changed (other rules, re-import).
+      // Skip if the user moved on or edited meanwhile, or the netlist changed (re-import).
       if (get().sheet !== sheet || get().doc !== doc || get().base !== s.base) return;
       editSheet((e) => layoutToEdits({ ...e, pos: {}, routes: {} }, l, 'none'));
     },
@@ -2070,7 +2001,7 @@ export const useStore = create<State>((set, get) => {
       }
       // The redo entry keeps where the change was made (not where Undo was pressed), so Redo shows it too.
       // A step that changed the files swaps the whole state: Redo comes back here.
-      const redo = prev.files ? hereWithFiles() : { ...prev, doc: s.doc, ...(prev.rules ? { rules: [...s.rules] } : {}) };
+      const redo = prev.files ? hereWithFiles() : { ...prev, doc: s.doc };
       set({
         past: s.past.slice(0, -1),
         future: [redo, ...s.future],
@@ -2078,11 +2009,9 @@ export const useStore = create<State>((set, get) => {
         dirty: true,
         // A preset being placed is placed as the library has it now.
         placing: placingNow(s.placing, prev.doc.components),
-        ...(prev.rules ? { rules: new Set(prev.rules) } : {}),
       });
       scheduleAutosave();
-      // Other rules redraw the sheet on screen (they apply to all).
-      void (prev.files ? reopenFiles(prev) : prev.rules ? get().openPath(get().path) : showAfterHistory(prev));
+      void (prev.files ? reopenFiles(prev) : showAfterHistory(prev));
     },
 
     redo() {
@@ -2096,17 +2025,16 @@ export const useStore = create<State>((set, get) => {
         void goTo(next);
         return;
       }
-      const undo = next.files ? hereWithFiles() : { ...next, doc: s.doc, ...(next.rules ? { rules: [...s.rules] } : {}) };
+      const undo = next.files ? hereWithFiles() : { ...next, doc: s.doc };
       set({
         future: s.future.slice(1),
         past: [...s.past, undo],
         doc: next.doc,
         dirty: true,
         placing: placingNow(s.placing, next.doc.components),
-        ...(next.rules ? { rules: new Set(next.rules) } : {}),
       });
       scheduleAutosave();
-      void (next.files ? reopenFiles(next) : next.rules ? get().openPath(get().path) : showAfterHistory(next));
+      void (next.files ? reopenFiles(next) : showAfterHistory(next));
     },
 
     newDrawing(name = 'drawing') {
@@ -2297,7 +2225,6 @@ export const useStore = create<State>((set, get) => {
         outlines: OUTLINES,
         files: s.files,
         ...(s.topOverride ? { top: s.topOverride } : {}),
-        rules: [...s.rules],
         viewMode: s.viewMode,
         doc: compactDoc(s.doc),
         path: s.path,

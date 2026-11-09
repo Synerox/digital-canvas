@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { buildDiagram } from '../core/diagram';
 import { withAutoBlocks } from '../core/partition';
 import { design } from '../core/test-utils';
-import { DEFAULT_RULES } from '../core/rules';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 import { GRID, type LayoutResult, type Point, layoutDiagram } from './elk-layout';
@@ -56,7 +55,7 @@ describe('layouts on the grid', () => {
       const blocks = withAutoBlocks(flat, { [file]: source });
       for (const d of [flat, blocks]) {
         for (const m of Object.keys(d.modules)) {
-          const l = await layoutDiagram(buildDiagram(d, m, DEFAULT_RULES));
+          const l = await layoutDiagram(buildDiagram(d, m));
           expect(problems(l), `${file} ${m}`).toEqual([]);
           wires += l.edges.length;
         }

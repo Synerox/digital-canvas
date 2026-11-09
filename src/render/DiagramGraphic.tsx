@@ -14,7 +14,6 @@ export interface GraphicProps {
   theme: Theme;
   /** Selected node and edge IDs. */
   selection?: ReadonlySet<string>;
-  highlighted?: ReadonlySet<string>;
   /** Attach data-node-id / data-edge-id attributes for hit testing (off for export). */
   interactive?: boolean;
   /** Edges drawn in the warning colour in the editor (for example a width mismatch). */
@@ -210,10 +209,9 @@ function sliceNameBoxes(nodes: readonly LNode[], names: ReadonlyMap<string, Text
 
 function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; width: number } {
   const sel = !!p.selection?.has(n.id);
-  const hi = p.highlighted?.has(n.id);
   return {
     stroke: sel ? p.theme.accent : p.theme.ink,
-    fill: hi || sel ? p.theme.accentFill : n.kind === 'input' || n.kind === 'output' ? p.theme.pinFill : p.theme.fill,
+    fill: sel ? p.theme.accentFill : n.kind === 'input' || n.kind === 'output' ? p.theme.pinFill : p.theme.fill,
     width: sel ? 2.2 : STROKE,
   };
 }
