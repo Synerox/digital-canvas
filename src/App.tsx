@@ -206,7 +206,9 @@ export default function App() {
         }
         if (k === 'a') return take(), st.selectAll();
         if (k === 'c') return st.copy() ? take() : undefined;
-        if (k === 'x') return take(), st.cut();
+        // A held key cuts once. (After a cut of the last drawing in the Drawings list the focus leaves the list, and
+        // the repeats would cut the canvas's selection, putting it on the clipboard in place of the drawing.)
+        if (k === 'x') return take(), e.repeat ? undefined : st.cut();
         // A held key pastes a drawing once (as in the Drawings list), not one new drawing per repeat.
         if (k === 'v') return take(), e.repeat && pasteTarget() === 'drawing' ? undefined : paste();
         if (k === 'd') return take(), st.duplicate();
@@ -222,7 +224,8 @@ export default function App() {
       if (k === 'i') return take(), ui.dispatchEvent(new Event('focus-library'));
       // The keys below change the drawing: not while the user reads or selects text in a pane.
       if (text) return;
-      if (e.key === 'Delete' || e.key === 'Backspace') return st.selection.size ? (take(), st.deleteSelection()) : undefined;
+      // A held key deletes once, as in the Drawings list (whose last entry gone, the repeats land here).
+      if (e.key === 'Delete' || e.key === 'Backspace') return st.selection.size ? (take(), e.repeat ? undefined : st.deleteSelection()) : undefined;
       if (k === 'l') return take(), void st.autoLayout();
       if ((e.key === 'Enter' || e.key === 'F2') && st.selection.size === 1) {
         take();
