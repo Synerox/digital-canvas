@@ -82,7 +82,6 @@ export function effectiveDiagram(module: string, base: Diagram | undefined, e: S
       width: sl ? sl.width : src.width,
       fullSource: full,
       label: u.label || undefined,
-      netName: u.label || undefined,
       ...(full ? {} : { bits: sl }),
       ...(u.shift ? { shift: u.shift } : {}),
     });

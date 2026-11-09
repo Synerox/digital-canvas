@@ -7,7 +7,7 @@
  * as the bus width or the number of inputs re-derives the ports.
  *
  * Cell types reuse the Yosys names where one exists ($and, $add, $mux, $dff…)
- * so that drawn and imported symbols look the same and export the same way.
+ * so that drawn and imported symbols look and behave the same.
  * Symbols Yosys has no cell for use `dc:` types (dc:nand, dc:mux, dc:decoder…).
  */
 import type { DNode, DPort, Side } from '../core/diagram';

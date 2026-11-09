@@ -88,8 +88,6 @@ export interface DEdge {
    * rename it to anything, so what the edge carries is in `fullSource`, `bits` and `shift`.
    */
   label?: string;
-  /** Name of the driving signal, for highlighting. */
-  netName?: string;
   /** Which bits of the source port the edge carries, when not all of them. */
   bits?: { lo: number; width: number };
   /**
@@ -339,8 +337,7 @@ export function buildDiagram(
       sinks.push({ node: id, port: inp.id, bits: p.bits, range: { offset: p.offset, upto: p.upto } });
     }
     const net = m.nets.find((x) => x.name === p.name && !x.hidden);
-    // The ports of an automatic block are named by the app (`mix[1:0]`, `in0`), not by the user.
-    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [], ...(m.auto ? { attrs: { autoName: p.name } } : {}) });
+    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [] });
   }
   nodes.push(...pinNodes);
 
@@ -480,7 +477,6 @@ export function buildDiagram(
       width: len,
       fullSource,
       label: note ? [fullSource ? undefined : name, note].filter(Boolean).join(' ') : fullSource && fullSink ? undefined : name,
-      netName: name,
       ...(fullSource ? {} : { bits: { lo: d.index, width: len } }),
       ...(shift ? { shift } : {}),
     });

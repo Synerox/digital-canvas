@@ -763,6 +763,38 @@ describe('imported symbols', () => {
       { name: 'y', dir: 'output', width: 300 },
     ]);
   });
+
+  it('keep what an imported wire carries when it is renamed or its name cleared', async () => {
+    const src = "module sc(input [3:0] a, input [3:0] b, output [5:0] y, output [1:0] z);\n  assign y = a + {b, 2'b00};\n  assign z = a[3:2];\nendmodule\n";
+    const base = buildDiagram(await design({ 'sc.v': src }), 'sc', DEFAULT_RULES);
+    const scaled = base.edges.find((x) => x.shift)!;
+    const sliced = base.edges.find((x) => x.target.port === 'out:z.in')!;
+    expect(scaled).toMatchObject({ shift: 2, label: '×4' });
+    expect(carried(sliced)).toBe('in:a.out[3:2]');
+    // A label is only text: one that names other bits or another scale changes nothing it carries.
+    for (const text of ['b_shifted', 'a[1:0] ×8', '']) {
+      for (const x of [scaled, sliced]) {
+        const d = effectiveDiagram('sc', base, rename(emptyEdits(), x.id, text), noModules);
+        const e = d.edges.find((w) => w.id === x.id)!;
+        expect(e.label, text).toBe(text || undefined);
+        expect(carried(e), text).toBe(carried(x));
+        expect(logic(d), text).toEqual(logic(base));
+      }
+    }
+  });
+
+  it('name a renamed instance by its new name, and by its Verilog name again when the name is cleared', async () => {
+    const src = 'module leaf(input a, output y);\n  assign y = ~a;\nendmodule\nmodule top(input a, output y);\n  leaf u_leaf(.a(a), .y(y));\nendmodule\n';
+    const base = buildDiagram(await design({ 'top.v': src }), 'top');
+    const inst = base.nodes.find((n) => n.kind === 'instance')!;
+    expect(inst).toMatchObject({ moduleName: 'leaf', instanceName: 'u_leaf' });
+    const renamed = effectiveDiagram('top', base, rename(emptyEdits(), inst.id, 'first'), noModules).nodes.find((n) => n.id === inst.id)!;
+    expect(renamed).toMatchObject({ subLabel: 'first', instanceName: 'u_leaf', moduleName: 'leaf' });
+    const cleared = effectiveDiagram('top', base, rename(emptyEdits(), inst.id, ''), noModules).nodes.find((n) => n.id === inst.id)!;
+    expect(cleared.subLabel).toBeUndefined();
+    expect(cleared.instanceName).toBe('u_leaf');
+    expect(logic(effectiveDiagram('top', base, rename(emptyEdits(), inst.id, 'first'), noModules))).toEqual(logic(base));
+  });
 });
 
 describe('Copy to new drawing', () => {
@@ -998,6 +1030,8 @@ describe('repeated pin names', () => {
       'Two pins are named a; blocks of this drawing call the second a_2.',
       'Two pins are named y; blocks of this drawing call the second y_2.',
     ]);
+    // On a Verilog sheet the blocks take their ports from the Verilog: pin names are only labels there.
+    expect(checkSheet(s.d, { verilog: true }).messages).toEqual([]);
     // Names that only become the same in Verilog, three of a name, and a name another pin's port has taken.
     const t = new Drawing();
     for (const n of ['a b', 'a_b', 'q', 'q', 'q', 'q_2']) t.add('input', n);

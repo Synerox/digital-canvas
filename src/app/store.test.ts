@@ -1969,6 +1969,21 @@ endmodule
     expect(st().netlist!.nodes.filter((n) => n.kind === 'input').map((n) => n.label)).toEqual(['a_b', 'b']);
   }, 60_000);
 
+  it('reports repeated pin names on a drawing, never on a Verilog sheet, whose blocks take their ports from the Verilog', async () => {
+    const twice = drawing([pin('u:1', 'input', 'a'), pin('u:2', 'input', 'a')]);
+    await open({}, { doc: { drawn: ['twice'], sheets: { 'd:twice': twice } }, path: [{ instance: 'twice', module: 'twice', drawn: true }] });
+    await settle();
+    expect(st().issues.messages).toContain('Two pins are named a; blocks of this drawing call the second a_2.');
+    // A pin of a Verilog sheet whose saved label reads like another pin's name: only a label there.
+    const src = 'module t(input a, input b, output y);\n  assign y = a & b;\nendmodule\n';
+    const labels = { ...emptyEdits(), labels: { 'in:b': 'a' } };
+    await open({ 't.v': src }, { doc: { drawn: [], sheets: { 'v:blocks:t': labels } }, path: [{ instance: 't', module: 't' }] });
+    await settle();
+    expect(st().sheet).toBe('v:blocks:t');
+    expect(st().netlist!.nodes.filter(isPin).map((n) => n.label).sort()).toEqual(['a', 'a', 'y']);
+    expect(st().issues.messages.join(' ')).not.toMatch(/pins are named|blocks of this drawing/);
+  }, 60_000);
+
   it('shows imported Verilog that the open design does not use (C19)', async () => {
     await open({ [AUCTION_FILE]: AUCTION_SOURCE });
     await st().setFiles({ 'pasted.v': HALF }, false);
