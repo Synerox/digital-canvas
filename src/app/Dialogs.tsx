@@ -314,6 +314,7 @@ const HINTS: [string[], string][] = [
   [[MOD, 'S'], 'Save the drawing (.dcanvas.json)'],
   [[MOD, 'O'], 'Open a drawing'],
   [[MOD, 'I'], 'Import Verilog'],
+  [['Click', 'drawing'], `Open it from the Drawings list and select it there: Delete deletes it, ${MOD}+C / ${MOD}+V copy and paste it, ${MOD}+D duplicates it (× deletes it too)`],
   [['L'], 'Auto layout the sheet'],
   [['Wheel'], 'Scroll; Shift+wheel scrolls sideways'],
   [[MOD, 'Wheel'], 'Zoom'],

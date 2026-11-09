@@ -314,7 +314,18 @@ interface State {
   /** Why a part of the library may not be named `name` (a drawing or a Verilog module has the name), or nothing. */
   componentNameTaken(name: string): string | undefined;
   renameDrawing(from: string, to: string): string | undefined;
+  /**
+   * Delete a drawing (one undo step). Its blocks on other sheets stay, without pins. When it is open, the
+   * sheet it was opened from opens, or else the drawing next to it in the list (else the Verilog top).
+   */
   deleteDrawing(name: string): void;
+  /** Copy a drawing as it is now (Ctrl+C in the Drawings list): Paste then makes a new drawing of it. */
+  copyDrawing(name: string): boolean;
+  /**
+   * A new drawing from the drawing Copy took (one undo step), opened: under its name when no module has
+   * it (after a Cut, or in other work), else under `<name>_copy`. Returns its name.
+   */
+  pasteDrawing(): string | undefined;
   /** Copy the sheet on screen into a new drawing (with drawings of the automatic blocks it uses). */
   convertToDrawing(): Promise<void>;
 
@@ -344,8 +355,16 @@ let rebuildGen = 0;
 /** Withdraws the Yosys run of the previous rebuild: its result would be dropped anyway. */
 let rebuildAbort: AbortController | undefined;
 let navSeq = 0;
-/** What Copy took, the box of the copied symbols, and the sheet they were copied from (see paste). */
-let clipboard: { clip: Clip; box: Box; sheet: string } | undefined;
+/**
+ * What Copy took last (Paste pastes that): symbols, with their box and the sheet they were copied from (see
+ * paste), or a whole drawing from the Drawings list (see pasteDrawing).
+ */
+let clipboard: { kind: 'symbols'; clip: Clip; box: Box; sheet: string } | { kind: 'drawing'; name: string; edits: SheetEdits } | undefined;
+
+/** What Paste would paste: the symbols or the drawing Copy took last. */
+export function clipboardHolds(): 'symbols' | 'drawing' | undefined {
+  return clipboard?.kind;
+}
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
 /** What this tab last wrote to the browser's copy, or read from it (see copyKeys). */
 let copied: { work: string; view: string } | undefined;
@@ -384,8 +403,17 @@ export function pasteSpot(box: Box, nodes: readonly Box[]): Point {
   return { x: box.x, y };
 }
 
+/**
+ * The name of a pasted drawing: the copied drawing's own when no module has it (it was cut, or comes from
+ * other work), else `<name>_copy`, `<name>_copy_2`… (a copy of a copy is named after the same drawing).
+ */
+export function pastedDrawingName(from: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(from)) return uniqueModuleName(from, taken);
+  return uniqueModuleName(`${from.replace(/_copy(_\d+)?$/, '') || from}_copy`, taken);
+}
+
 /** A legal, unused module name for a new drawing. */
-function uniqueModuleName(want: string, taken: Set<string>): string {
+function uniqueModuleName(want: string, taken: ReadonlySet<string>): string {
   let base = want.replace(/[^A-Za-z0-9_$]/g, '_');
   if (!/^[A-Za-z_]/.test(base)) base = `m_${base}`;
   // Never a Verilog keyword: no Verilog module can have that name.
@@ -1231,8 +1259,52 @@ export const useStore = create<State>((set, get) => {
     scheduleAutosave();
   };
 
-  /** After undo/redo: show the sheet the change was made on, or redraw this one. */
-  const showAfterHistory = async (entry: HistoryEntry) => {
+  /**
+   * When a drawing on the open path is gone (`before`: the list of drawings before), after a delete or an
+   * Undo/Redo: a renamed one (Redo of a rename) opens under its new name; for a deleted one, the sheet it was
+   * opened from opens, else the drawing that takes its place in the list (the next one, or the one before the
+   * last), else the Verilog top. False when the open path has no such drawing.
+   */
+  const leaveGoneDrawing = (before: readonly string[]): boolean => {
+    const { doc } = get();
+    const gone = (d: string) => !doc.drawn.includes(d);
+    let { path } = get();
+    if (!path.some((p) => p.drawn && gone(p.module))) return false;
+    // A rename keeps the drawing's place in the list (renameDrawingIn).
+    if (before.length === doc.drawn.length) {
+      for (const [i, from] of before.entries()) {
+        const to = doc.drawn[i];
+        if (to !== from && gone(from) && !before.includes(to)) path = renamePathDrawing(path, from, to);
+      }
+    }
+    const cut = path.findIndex((p) => p.drawn && gone(p.module));
+    if (cut < 0) {
+      void get().openPath(path);
+      return true;
+    }
+    if (cut > 0) {
+      void get().openPath(path.slice(0, cut));
+      return true;
+    }
+    const at = before.indexOf(path[0].module);
+    const next = at < 0 ? undefined : (before.slice(at + 1).find((d) => !gone(d)) ?? before.slice(0, at).reverse().find((d) => !gone(d)));
+    void (next !== undefined ? get().openPath([{ instance: next, module: next, drawn: true }]) : openFallback());
+    return true;
+  };
+
+  /**
+   * Nothing to place when it is a block of a drawing that is gone (it would place a block of no module, with
+   * no pins): the drawing was deleted, or an Undo took it away.
+   */
+  const placingWith = (placing: Placing | undefined, doc: EditDoc): Placing | undefined => {
+    const m = placing?.sym === 'block' ? placing.params?.module : undefined;
+    if (!m || doc.drawn.includes(m)) return placing;
+    const { design, blockDesign } = get();
+    return design?.modules[m] || blockDesign?.modules[m] || partNamed(doc.components, m) ? placing : undefined;
+  };
+
+  /** After undo/redo: show the sheet the change was made on, or redraw this one. `before`: the drawings before. */
+  const showAfterHistory = async (entry: HistoryEntry, before: readonly string[]) => {
     const { doc, sheet } = get();
     const drawnGone = (p: PathEntry[]) => p.some((x) => x.drawn && !doc.drawn.includes(x.module));
     if (entry.sheet && entry.sheet !== sheet && !drawnGone(entry.path)) {
@@ -1242,7 +1314,8 @@ export const useStore = create<State>((set, get) => {
       if (mode && mode !== get().viewMode) applyViewMode(mode);
       return get().openPath(entry.path);
     }
-    if (drawnGone(get().path)) return openFallback();
+    // As the delete itself did (a Redo of it lands where the delete did).
+    if (leaveGoneDrawing(before)) return;
     // A Verilog sheet that is no longer pinned is drawn from its ELK layout, which openPath
     // skips while every symbol has a stored position (and a rebuild or re-import drops
     // the cached one): open the sheet again, which lays it out.
@@ -1949,7 +2022,7 @@ export const useStore = create<State>((set, get) => {
       const x = Math.min(...copied.map((n) => n.x));
       const y = Math.min(...copied.map((n) => n.y));
       const box = { x, y, width: Math.max(...copied.map((n) => n.x + n.width)) - x, height: Math.max(...copied.map((n) => n.y + n.height)) - y };
-      clipboard = { clip, box, sheet: s.sheet };
+      clipboard = { kind: 'symbols', clip, box, sheet: s.sheet };
       return true;
     },
 
@@ -1959,7 +2032,7 @@ export const useStore = create<State>((set, get) => {
 
     paste(near, view) {
       const s = get();
-      if (!clipboard || !s.layout || !settled(s)) return;
+      if (clipboard?.kind !== 'symbols' || !s.layout || !settled(s)) return;
       const { clip, box, sheet } = clipboard;
       // On its own sheet: where it was copied from if that is free, otherwise below it, never on top of
       // it. Those coordinates can be far out of view, on another sheet or after the view moved (after a
@@ -2008,10 +2081,10 @@ export const useStore = create<State>((set, get) => {
         doc: prev.doc,
         dirty: true,
         // A preset being placed is placed as the library has it now.
-        placing: placingNow(s.placing, prev.doc.components),
+        placing: placingWith(placingNow(s.placing, prev.doc.components), prev.doc),
       });
       scheduleAutosave();
-      void (prev.files ? reopenFiles(prev) : showAfterHistory(prev));
+      void (prev.files ? reopenFiles(prev) : showAfterHistory(prev, s.doc.drawn));
     },
 
     redo() {
@@ -2031,10 +2104,10 @@ export const useStore = create<State>((set, get) => {
         past: [...s.past, undo],
         doc: next.doc,
         dirty: true,
-        placing: placingNow(s.placing, next.doc.components),
+        placing: placingWith(placingNow(s.placing, next.doc.components), next.doc),
       });
       scheduleAutosave();
-      void (next.files ? reopenFiles(next) : showAfterHistory(next));
+      void (next.files ? reopenFiles(next) : showAfterHistory(next, s.doc.drawn));
     },
 
     newDrawing(name = 'drawing') {
@@ -2088,9 +2161,52 @@ export const useStore = create<State>((set, get) => {
       const doc: EditDoc = { ...s.doc, drawn: s.doc.drawn.filter((d) => d !== name), sheets };
       // Its blocks stay, as instances of a module that no longer exists (no ports, no wires): say where.
       const users = sheetsUsing(doc, name);
-      pushDoc(doc, users.length ? { notice: `Deleted ${name}, which is still used as a block on ${users.join(', ')}. Undo brings it back.` } : {});
-      if (s.path.some((p) => p.drawn && p.module === name)) void openFallback();
-      else refresh();
+      pushDoc(doc, {
+        notice: users.length ? `Deleted ${name}, which is still used as a block on ${users.join(', ')}. Undo brings it back.` : `Deleted ${name}. Undo brings it back.`,
+        // A block of it being placed from the library goes too.
+        placing: placingWith(s.placing, doc),
+      });
+      // It is open (or a block of it is): back to the sheet it was opened from, else the drawing that takes its
+      // place in the list, else the Verilog top.
+      if (!leaveGoneDrawing(s.doc.drawn)) refresh();
+    },
+
+    copyDrawing(name) {
+      const s = get();
+      if (!s.doc.drawn.includes(name)) return false;
+      // As it is now: later edits of the drawing do not change what Paste makes.
+      clipboard = { kind: 'drawing', name, edits: structuredClone(s.doc.sheets[`d:${name}`] ?? emptyEdits()) };
+      return true;
+    },
+
+    pasteDrawing() {
+      if (clipboard?.kind !== 'drawing') return undefined;
+      const s = get();
+      const { name: from, edits: copied } = clipboard;
+      const taken = new Set([...s.doc.drawn, ...Object.keys(s.design?.modules ?? {}), ...s.moduleNames, ...partNames()]);
+      const name = pastedDrawingName(from, taken);
+      // The drawing may come from other work (Copy, then File › Open): a symbol follows a preset of this
+      // library only while it has its settings.
+      const sheet = keepLinks(structuredClone(copied), s.doc.components);
+      const doc: EditDoc = { ...s.doc, drawn: [...s.doc.drawn, name], sheets: { ...s.doc.sheets, [`d:${name}`]: sheet } };
+      // Its blocks name modules by name: say which ones this work does not have (those blocks have no pins).
+      const missing = [
+        ...new Set(
+          sheet.nodes.flatMap((u) => {
+            const m = u.sym === 'block' ? u.params.module : undefined;
+            // A module of the Verilog files counts while Yosys is still at work, or outside the chosen top.
+            const known = !m || doc.drawn.includes(m) || s.moduleNames.includes(m) || s.design?.modules[m] || s.blockDesign?.modules[m] || partNamed(doc.components, m);
+            return known ? [] : [m];
+          }),
+        ),
+      ];
+      const said = [
+        name === from ? `Pasted ${name}.` : `Pasted a copy of ${from} as ${name}.`,
+        missing.length ? `Its blocks of ${missing.join(', ')} have no pins: this work has no such ${missing.length === 1 ? 'module' : 'modules'}.` : '',
+      ];
+      pushDoc(doc, { notice: said.filter(Boolean).join(' ') });
+      void get().openPath([{ instance: name, module: name, drawn: true }]);
+      return name;
     },
 
     async convertToDrawing() {

@@ -7,6 +7,7 @@ import { Menu, type MenuItem } from './app/Menu';
 import { Palette } from './app/Palette';
 import { SettingsPopup } from './app/SettingsPopup';
 import { Breadcrumb, Drawings, FileList, HierarchyTree, LogPanel, TopSelector, ViewToggle } from './app/Panels';
+import { pasteTarget } from './app/drawing-list';
 import { AUTOSAVE_KEY, EXAMPLES, type ExampleName, type ImportPlan, planDrop, planOpen, useStore } from './app/store';
 import { ui } from './app/ui-events';
 import { FILE_EXTENSION, FileFormatError, isDrawnKey } from './editor/doc';
@@ -82,6 +83,15 @@ function textInUse(t: EventTarget | null): Element | undefined {
   if (!sel || sel.isCollapsed) return undefined;
   const at = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
   return at?.closest(TEXT_PANES) ?? document.body;
+}
+
+/**
+ * Paste what Copy took last: a drawing (copied in the Drawings list) as a new drawing; symbols on the canvas,
+ * which pastes them (on another sheet the copy goes where the user looks, which only the canvas knows).
+ */
+function paste() {
+  if (pasteTarget() === 'drawing') useStore.getState().pasteDrawing();
+  else ui.dispatchEvent(new Event('paste'));
 }
 
 function saveDrawing() {
@@ -196,9 +206,11 @@ export default function App() {
         }
         if (k === 'a') return take(), st.selectAll();
         if (k === 'c') return st.copy() ? take() : undefined;
-        if (k === 'x') return take(), st.cut();
-        // The canvas pastes: on another sheet the copy goes where the user looks, which only the canvas knows.
-        if (k === 'v') return take(), ui.dispatchEvent(new Event('paste'));
+        // A held key cuts once. (After a cut of the last drawing in the Drawings list the focus leaves the list, and
+        // the repeats would cut the canvas's selection, putting it on the clipboard in place of the drawing.)
+        if (k === 'x') return take(), e.repeat ? undefined : st.cut();
+        // A held key pastes a drawing once (as in the Drawings list), not one new drawing per repeat.
+        if (k === 'v') return take(), e.repeat && pasteTarget() === 'drawing' ? undefined : paste();
         if (k === 'd') return take(), st.duplicate();
         return;
       }
@@ -212,7 +224,8 @@ export default function App() {
       if (k === 'i') return take(), ui.dispatchEvent(new Event('focus-library'));
       // The keys below change the drawing: not while the user reads or selects text in a pane.
       if (text) return;
-      if (e.key === 'Delete' || e.key === 'Backspace') return st.selection.size ? (take(), st.deleteSelection()) : undefined;
+      // A held key deletes once, as in the Drawings list (whose last entry gone, the repeats land here).
+      if (e.key === 'Delete' || e.key === 'Backspace') return st.selection.size ? (take(), e.repeat ? undefined : st.deleteSelection()) : undefined;
       if (k === 'l') return take(), void st.autoLayout();
       if ((e.key === 'Enter' || e.key === 'F2') && st.selection.size === 1) {
         take();
@@ -300,7 +313,7 @@ export default function App() {
     { label: 'Redo', shortcut: `${MOD}+Shift+Z`, onSelect: () => s.redo() },
     { label: 'Cut', shortcut: `${MOD}+X`, onSelect: () => s.cut() },
     { label: 'Copy', shortcut: `${MOD}+C`, onSelect: () => void s.copy() },
-    { label: 'Paste', shortcut: `${MOD}+V`, onSelect: () => ui.dispatchEvent(new Event('paste')) },
+    { label: 'Paste', shortcut: `${MOD}+V`, onSelect: paste },
     { label: 'Duplicate', shortcut: `${MOD}+D`, onSelect: () => s.duplicate() },
     { label: 'Delete', shortcut: 'Del', onSelect: () => s.deleteSelection() },
     { label: 'Select all', shortcut: `${MOD}+A`, onSelect: () => s.selectAll() },

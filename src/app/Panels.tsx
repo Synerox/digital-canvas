@@ -1,5 +1,7 @@
 import type { HierarchyNode, IRDesign } from '../core/ir';
 import { type EditDoc, type ViewMode, sheetKey } from '../editor/doc';
+import { MOD } from './Dialogs';
+import { deleteDrawingAsking, drawingKey, entryAfterDelete, pasteTarget } from './drawing-list';
 import { type PathEntry, moduleTitle, useStore } from './store';
 
 /**
@@ -123,23 +125,122 @@ export function Breadcrumb() {
   );
 }
 
-/** Modules drawn by hand. */
+/** Gives a drawing's entry in the Drawings list the focus, once the list shows it (or takes the focus out of the list). */
+function focusEntry(name: string | undefined) {
+  setTimeout(() => {
+    const entry = name === undefined ? undefined : document.querySelector<HTMLElement>(`.drawings li[data-drawing="${name}"] .tree-item`);
+    if (entry) entry.focus();
+    else if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.drawings')) document.activeElement.blur();
+  }, 0);
+}
+
+/** Gives the canvas the focus (out of the Drawings list), so that it takes the next keys. */
+function focusCanvas() {
+  const canvas = document.querySelector<HTMLElement>('.canvas');
+  if (canvas) canvas.focus({ preventScroll: true });
+  else if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+}
+
+/**
+ * Modules drawn by hand. A click opens a drawing and selects its entry (the entry has the focus): Delete,
+ * Ctrl+C / X / V / D then act on the drawing (see drawing-list). × deletes one too.
+ */
 export function Drawings() {
   const drawn = useStore((s) => s.doc.drawn);
   const path = useStore((s) => s.path);
   const navigate = useStore((s) => s.navigate);
   const newDrawing = useStore((s) => s.newDrawing);
   const current = path.length === 1 && path[0].drawn ? path[0].module : undefined;
+  const open = (d: string) => {
+    // The entry is selected now, not the symbols: Delete and the rest act on the drawing.
+    useStore.getState().select([]);
+    void navigate([{ instance: d, module: d, drawn: true }]);
+  };
+  const onKeyDown = (e: React.KeyboardEvent, d: string) => {
+    const action = drawingKey(e);
+    if (!action) return;
+    const st = useStore.getState();
+    if (action === 'canvas' || (action === 'paste' && pasteTarget() === 'canvas')) {
+      // The canvas's key (select all, paste symbols): the canvas takes the focus, and then the key (see App).
+      focusCanvas();
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const list = st.doc.drawn;
+    const i = list.indexOf(d);
+    switch (action) {
+      case 'delete':
+      case 'cut': {
+        const after = entryAfterDelete(list, d);
+        if (deleteDrawingAsking(d, { cut: action === 'cut' })) focusEntry(after);
+        return;
+      }
+      case 'copy':
+        if (st.copyDrawing(d)) st.setNotice(`Copied ${d}: ${MOD}+V pastes a copy of it.`);
+        return;
+      case 'paste': {
+        // Nothing copied: nothing happens.
+        const name = st.pasteDrawing();
+        if (name !== undefined) focusEntry(name);
+        return;
+      }
+      case 'duplicate': {
+        const name = st.copyDrawing(d) ? st.pasteDrawing() : undefined;
+        if (name !== undefined) focusEntry(name);
+        return;
+      }
+      case 'prev':
+      case 'next':
+      case 'first':
+      case 'last': {
+        const to = { prev: i - 1, next: i + 1, first: 0, last: list.length - 1 }[action];
+        if (list[to] !== undefined) focusEntry(list[to]);
+        return;
+      }
+      case 'open':
+        return open(d);
+      case 'none':
+        return;
+    }
+  };
   return (
     <>
       {drawn.length === 0 ? (
         <p className="muted small">None yet.</p>
       ) : (
-        <ul className="tree">
+        <ul className="tree drawings">
           {drawn.map((d) => (
-            <li key={d}>
-              <button className={`tree-item ${d === current ? 'active' : ''}`} onClick={() => navigate([{ instance: d, module: d, drawn: true }])}>
+            <li key={d} data-drawing={d} className={d === current ? 'active' : undefined}>
+              <button
+                className={`tree-item ${d === current ? 'active' : ''}`}
+                title={d}
+                onClick={(e) => {
+                  // Safari does not give a clicked button the focus: the entry must have it to take the keys.
+                  e.currentTarget.focus();
+                  open(d);
+                }}
+                onKeyDown={(e) => onKeyDown(e, d)}
+              >
                 {d}
+              </button>
+              <button
+                className="icon"
+                title={`Delete ${d}`}
+                aria-label={`Delete ${d}`}
+                // Reached with Delete on the entry, not with Tab.
+                tabIndex={-1}
+                // The focus stays where it is (on the canvas, its keys stay the canvas's).
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  // The next entry moves up under the pointer: the second click of a double-click must not delete it too.
+                  if (e.detail > 1) return;
+                  const had = document.activeElement?.closest('.drawings li')?.getAttribute('data-drawing') === d;
+                  const after = entryAfterDelete(useStore.getState().doc.drawn, d);
+                  if (deleteDrawingAsking(d) && had) focusEntry(after);
+                }}
+              >
+                ×
               </button>
             </li>
           ))}
