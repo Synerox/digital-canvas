@@ -11,7 +11,7 @@
  * - A drawing (a module drawn by hand) has no Verilog: its symbols and wires
  *   are all in its edits.
  */
-import type { DNode, DPort, NodeKind, Side } from '../core/diagram';
+import { type DNode, type DPort, type NodeKind, type PinStyle, type Side, isPinKind } from '../core/diagram';
 import { GRID, type Point } from '../layout/elk-layout';
 import { type ComponentDef, followsPreset, loadComponents } from './components';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam, drawnWithout } from './symbols';
@@ -45,6 +45,11 @@ export interface SheetEdits {
   hidden: string[];
   /** Text the user gave imported symbols (pin names, instance names) and wires (labels). */
   labels: Record<string, string>;
+  /**
+   * Imported pins drawn as text only (see PinStyle), by ID; left out when there are none. A pin drawn by hand has
+   * its style in its settings (SymParams.style) instead.
+   */
+  pinStyles?: Record<string, PinStyle>;
   /** Symbols drawn by hand. */
   nodes: UserNode[];
   /** Wires drawn by hand. */
@@ -151,6 +156,7 @@ export function isEmptyEdits(e: SheetEdits | undefined): boolean {
       Object.keys(e.routes).length === 0 &&
       e.hidden.length === 0 &&
       Object.keys(e.labels).length === 0 &&
+      Object.keys(e.pinStyles ?? {}).length === 0 &&
       e.nodes.length === 0 &&
       e.edges.length === 0)
   );
@@ -190,6 +196,9 @@ function userNode(v: unknown): UserNode | undefined {
   const takes = SYMBOL_BY_KEY[sym]?.params ?? [];
   for (const k of ['width', 'inputs', 'parts', 'shift'] as const) if (takes.includes(k) && params[k] === undefined) params[k] = drawnWithout(sym, k);
   for (const k of ['value', 'module'] as const) if (isStr(p[k])) params[k] = p[k];
+  // Only a pin has a style (a frozen copy of a pin too: see symbolNode).
+  const pin = sym === 'raw' ? isObj(v.raw) && isKind(v.raw.kind) && isPinKind(v.raw.kind) : !!SYMBOL_BY_KEY[sym]?.params.includes('style');
+  if (pin && (p.style === 'label' || p.style === 'text')) params.style = p.style;
   const out: UserNode = { id: v.id, sym, params };
   if (isStr(v.name)) out.name = v.name;
   if (isStr(v.component) && sym !== 'raw' && sym !== 'block') out.component = v.component;
@@ -273,6 +282,12 @@ export function parseEdits(v: unknown): SheetEdits {
   }
   if (Array.isArray(v.hidden)) e.hidden = v.hidden.filter(isStr);
   if (isObj(v.labels)) for (const [k, t] of Object.entries(v.labels)) if (isStr(t)) e.labels[k] = t;
+  // Only what differs from the default look is kept.
+  if (isObj(v.pinStyles)) {
+    const styles: Record<string, PinStyle> = {};
+    for (const [k, t] of Object.entries(v.pinStyles)) if (t === 'text') styles[k] = t;
+    if (Object.keys(styles).length) e.pinStyles = styles;
+  }
   if (Array.isArray(v.nodes)) e.nodes = v.nodes.map(userNode).filter((n): n is UserNode => !!n);
   if (Array.isArray(v.edges)) e.edges = v.edges.map(userEdge).filter((x): x is UserEdge => !!x);
   e.next = isNum(v.next) && v.next >= 1 ? Math.floor(v.next) : 1;

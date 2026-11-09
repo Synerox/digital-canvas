@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { type DNode, type DPort, type Diagram, buildDiagram } from '../core/diagram';
+import { type DNode, type DPort, type Diagram, type PinStyle, buildDiagram } from '../core/diagram';
 import { type HierarchyNode, type IRDesign, buildDesign, buildHierarchy, displayModuleName } from '../core/ir';
 import { moduleTitle } from '../core/names';
 import { parseYosysJson } from '../core/yosys-json';
@@ -56,6 +56,7 @@ import {
   resolveConnection,
   restoreHidden,
   setParams,
+  stylePins,
   followComponents,
   keepLinks,
   unlinkChanged,
@@ -287,6 +288,8 @@ interface State {
   renameItem(id: string, text: string): string | undefined;
   resetItemLabel(id: string): void;
   setNodeParams(id: string, params: SymParams): void;
+  /** Draw the pins among `ids` with their name in a label outline, or as text only (one undo step for all). */
+  setPinStyle(ids: Iterable<string>, style: PinStyle): void;
   setEdgeSlice(id: string, slice: { lo: number; width: number } | undefined): void;
   setEdgeRoute(id: string, points: Point[] | undefined): void;
   /** Reshape several wires in one undo step (a stretch that wires of a net share moves for all of them). */
@@ -1973,6 +1976,15 @@ export const useStore = create<State>((set, get) => {
       if (s.doc === before || !s.netlist) return;
       const stale = staleSlices(s.netlist, s.doc.sheets[s.sheet]).filter((w) => w.source === id);
       if (stale.length) set({ notice: stale.map((w) => w.text).join(' ') });
+    },
+
+    setPinStyle(ids, style) {
+      const list = [...ids];
+      editSheet((e, netlist) => {
+        // Changed on its own, a pin placed from a preset no longer follows the preset (as setNodeParams has it).
+        const defs = get().doc.components;
+        return list.reduce((acc, id) => unlinkChanged(acc, id, defs), stylePins(e, netlist, list, style));
+      });
     },
 
     setEdgeSlice(id, slice) {

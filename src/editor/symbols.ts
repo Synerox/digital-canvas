@@ -10,7 +10,7 @@
  * so that drawn and imported symbols look and behave the same.
  * Symbols Yosys has no cell for use `dc:` types (dc:nand, dc:mux, dc:decoder…).
  */
-import type { DNode, DPort, Side } from '../core/diagram';
+import { type DNode, type DPort, type PinStyle, type Side, isPinKind, withPinStyle } from '../core/diagram';
 import { moduleTitle } from '../core/names';
 
 export type SymKey =
@@ -49,7 +49,7 @@ export type SymKey =
   /** A copy of an imported symbol, kept exactly as it was drawn (its ports cannot be changed). */
   | 'raw';
 
-export type ParamName = 'width' | 'inputs' | 'value' | 'module' | 'shift' | 'parts';
+export type ParamName = 'width' | 'inputs' | 'value' | 'module' | 'shift' | 'parts' | 'style';
 
 export interface SymParams {
   /** Bus width in bits (data width for operators and registers). */
@@ -64,6 +64,8 @@ export interface SymParams {
   module?: string;
   /** Width of a shifter's shift amount. */
   shift?: number;
+  /** How a pin is drawn: its name in a label outline (the default) or as text only (see PinStyle). */
+  style?: PinStyle;
 }
 
 export interface UserNode {
@@ -125,9 +127,9 @@ export interface SymbolDef {
 }
 
 export const SYMBOLS: SymbolDef[] = [
-  { key: 'input', title: 'Input', group: 'Ports & labels', hint: 'Module input pin', defaults: { width: 1 }, params: ['width'], named: true },
-  { key: 'output', title: 'Output', group: 'Ports & labels', hint: 'Module output pin', defaults: { width: 1 }, params: ['width'], named: true },
-  { key: 'inout', title: 'Inout', group: 'Ports & labels', hint: 'Bidirectional module pin', defaults: { width: 1 }, params: ['width'], named: true },
+  { key: 'input', title: 'Input', group: 'Ports & labels', hint: 'Module input pin', defaults: { width: 1, style: 'label' }, params: ['width', 'style'], named: true },
+  { key: 'output', title: 'Output', group: 'Ports & labels', hint: 'Module output pin', defaults: { width: 1, style: 'label' }, params: ['width', 'style'], named: true },
+  { key: 'inout', title: 'Inout', group: 'Ports & labels', hint: 'Bidirectional module pin', defaults: { width: 1, style: 'label' }, params: ['width', 'style'], named: true },
   { key: 'const', title: 'Constant', group: 'Ports & labels', hint: "Constant value such as 4'd2", defaults: { value: "1'b0" }, params: ['value'] },
   { key: 'text', title: 'Note', group: 'Ports & labels', hint: 'Free text (not connected)', defaults: {}, params: [], named: true },
   { key: 'and', title: 'AND', group: 'Logic gates', hint: 'AND gate', defaults: { inputs: 2, width: 1 }, params: ['inputs', 'width'] },
@@ -278,6 +280,12 @@ function sliceNames(parts: number, width: number): string[] {
 
 /** The drawing node of a placed symbol. */
 export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
+  const n = symbolShape(u, iface);
+  // A pin's look is its `style` setting; a frozen copy of a pin (`raw`) has the setting too, never a look of its own.
+  return isPinKind(n.kind) ? withPinStyle(n, u.params.style) : n;
+}
+
+function symbolShape(u: UserNode, iface: InterfaceOf): DNode {
   const id = u.id;
   const p = u.params;
   const w = clampParam('width', p.width, drawnWithout(u.sym, 'width'));

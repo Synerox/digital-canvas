@@ -5,7 +5,7 @@
  * edited in a window of their own (see SettingsPopup).
  */
 import { useEffect, useRef, useState } from 'react';
-import type { Diagram } from '../core/diagram';
+import { type Diagram, type PinStyle, isPinKind, pinStyleOf } from '../core/diagram';
 import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
@@ -99,7 +99,46 @@ const PARAM_TITLE: Record<ParamName, string> = {
   value: 'Value',
   module: 'Module',
   shift: 'Shift amount (bits)',
+  style: 'Show as',
 };
+
+const PIN_STYLES: { style: PinStyle; text: string; title: string }[] = [
+  { style: 'label', text: 'Label', title: 'The name in a label outline' },
+  { style: 'text', text: 'Text', title: 'The name only, written at the end of the wire' },
+];
+
+/**
+ * How the pins `pins` (of the selection) are drawn: Label (the name in an outline) or Text (the name only). One
+ * click restyles them all, in one undo step; the style they all have is marked.
+ */
+function PinStyleField({ pins, many }: { pins: { id: string; style: PinStyle }[]; many: boolean }) {
+  const setPinStyle = useStore((s) => s.setPinStyle);
+  const all = pins.every((p) => p.style === pins[0]?.style) ? pins[0]?.style : undefined;
+  const title = many ? `Show ${pins.length} pin${pins.length === 1 ? '' : 's'} as` : PARAM_TITLE.style;
+  return (
+    <div className="prop">
+      <span>{title}</span>
+      <div className="view-toggle pin-style" role="group" aria-label={title}>
+        {PIN_STYLES.map((o) => (
+          <button
+            key={o.style}
+            className={all === o.style ? 'on' : ''}
+            aria-pressed={all === o.style}
+            title={o.title}
+            onClick={() =>
+              setPinStyle(
+                pins.map((p) => p.id),
+                o.style,
+              )
+            }
+          >
+            {o.text}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function parseSlice(text: string, srcWidth: number): { lo: number; width: number } | undefined | 'bad' {
   const t = text.trim().replace(/^\[|\]$/g, '');
@@ -243,12 +282,14 @@ export function Inspector() {
 
   if (sel.length > 1) {
     const nodes = sel.filter((id) => s.layout!.nodes.some((n) => n.id === id)).length;
+    const pins = s.layout.nodes.filter((n) => s.selection.has(n.id) && isPinKind(n.kind)).map((n) => ({ id: n.id, style: pinStyleOf(n) }));
     return (
       <div className="inspector">
         <h3>Selection</h3>
         <p className="small">
           {nodes} symbols, {sel.length - nodes} wires
         </p>
+        {pins.length > 0 && <PinStyleField pins={pins} many />}
         <div className="prop-actions">
           <button onClick={() => s.duplicate()}>Duplicate</button>
           <button className="danger" onClick={() => s.deleteSelection()}>
@@ -308,6 +349,8 @@ export function Inspector() {
         )}
         {user &&
           def?.params.map((p) => {
+            // Below, for every pin (an imported one too).
+            if (p === 'style') return null;
             if (p === 'module') {
               const options = s.blockModules();
               return (
@@ -354,6 +397,7 @@ export function Inspector() {
               </label>
             );
           })}
+        {isPinKind(node.kind) && <PinStyleField pins={[{ id, style: pinStyleOf(node) }]} many={false} />}
         {node.kind === 'instance' && node.moduleName && !part && (
           <div className="prop-actions">
             <button onClick={() => s.openNode(id)}>Open {node.label}</button>
