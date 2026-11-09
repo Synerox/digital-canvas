@@ -274,7 +274,12 @@ interface State {
   interfaceOf: InterfaceOf;
   /** Modules a block can instantiate here (not the sheet itself). */
   blockModules(): string[];
+  /** Pick a symbol of the library to place (undefined: put it down). */
   startPlacing(p: Placing | undefined): void;
+  /**
+   * Place a copy of the picked symbol centred at `at`, as one undo step, and select it. `keepPlacing`: the symbol
+   * stays picked for the next click (clicks on the canvas); without it, it is put down (a drop from the library).
+   */
   placeAt(at: Point, keepPlacing?: boolean): void;
   previewMove(ids: ReadonlySet<string>, dx: number, dy: number): void;
   moveSelection(ids: ReadonlySet<string>, dx: number, dy: number): void;
@@ -2153,7 +2158,8 @@ export const useStore = create<State>((set, get) => {
       // The symbols placed from a preset follow it: one undo step with the change of the library.
       doc.sheets = roomForWider(s.doc.sheets, followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf));
       if (doc.sheets === s.doc.sheets && JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
-      const placing = placingNow(s.placing, defs, renamed);
+      // A preset being placed follows the change; a part removed (or renamed) is not placed any more, as after Undo.
+      const placing = placingWith(placingNow(s.placing, defs, renamed), doc);
       pushDoc(doc, placing !== s.placing ? { placing } : {});
       refresh();
     },

@@ -7,7 +7,7 @@ import { type EditDoc, emptyDoc } from '../editor/doc';
 import { declaredModules } from '../yosys/script';
 import { type PutAside, changeFiles, importedTop, planImport as planFiles, useStore } from './store';
 
-/** Close a dialog on Escape, before the canvas and the shortcuts see the key. */
+/** Close a dialog on Escape, before the shortcuts see the key (the canvas leaves keys alone while a dialog is open). */
 // oxlint-disable-next-line react/only-export-components
 export function useEscape(onClose: () => void) {
   useEffect(() => {
@@ -290,8 +290,7 @@ export function ImportDialog({ onClose, initial }: { onClose(): void; initial?: 
 const MOD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 
 const HINTS: [string[], string][] = [
-  [['Click', 'library'], 'Pick a symbol, then click the canvas to place it'],
-  [['Shift', 'Click'], 'Place another copy (while placing)'],
+  [['Click', 'library'], 'Pick a symbol: each click on the canvas places a copy, until Esc'],
   [['I'], 'Search the symbol library'],
   [['Drag', 'pin'], 'Draw a wire: it bends where the pointer turns; let go on a pin or a wire'],
   [['Click', 'pin'], 'Start a wire: click to add bends, click a pin or wire to finish'],
