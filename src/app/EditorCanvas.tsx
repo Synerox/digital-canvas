@@ -408,6 +408,8 @@ export function EditorCanvas() {
       if (t?.closest?.('input, textarea, select, [role=menu]')) return;
       // A dialog or the JSON window is open: its Esc closes it (see useEscape), not what the canvas is doing behind it.
       if (document.querySelector('.modal-backdrop')) return;
+      // An open File or Edit menu closes first (see Menu); the next Esc puts down what is picked.
+      if (ev.key === 'Escape' && document.querySelector('.menu-list')) return;
       if (ev.key === ' ' && !ev.repeat) setSpaceDown(true);
       const m = mode.current;
       if (m.kind === 'wire') {
