@@ -34,7 +34,7 @@ export function wireShift(e: Pick<DEdge, 'shift'>): number {
   return e.shift !== undefined && Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
 }
 
-/** The note the import's "scale" rule writes on a wire that appends `shift` zero bits (`×4` for 2). */
+/** The note the import writes on a wire into arithmetic that appends `shift` low-order zero bits (`×4` for 2; see core/rules). */
 export const scaleNote = (shift: number) => `×${2 ** shift}`;
 
 const list = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
