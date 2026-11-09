@@ -1997,6 +1997,43 @@ endmodule
     expect(st().doc.sheets[key].pinStyles).toBeUndefined();
   }, 60_000);
 
+  it('keeps a picked symbol for click after click, each copy its own undo step, until it is put down (P1)', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('many');
+    await settle();
+    const picked = { sym: 'input' as const };
+    st().startPlacing(picked);
+    const steps = st().past.length;
+    const spots = [
+      { x: 0, y: 0 },
+      { x: 0, y: 100 },
+      { x: 0, y: 200 },
+    ];
+    for (const at of spots) st().placeAt(at, true);
+    // Still picked, as it was: the next click places one more.
+    expect(st().placing).toBe(picked);
+    const pins = () => st().netlist!.nodes.filter((n) => n.kind === 'input');
+    expect(pins().map((n) => n.label)).toEqual(['in1', 'in2', 'in3']);
+    // Each copy is selected as it is placed (the Properties show the last one), and is a step of its own.
+    expect([...st().selection]).toEqual([pins()[2].id]);
+    expect(st().past.length).toBe(steps + 3);
+    st().undo();
+    expect(pins().map((n) => n.label)).toEqual(['in1', 'in2']);
+    // Undo takes back a copy, not the pick.
+    expect(st().placing).toBe(picked);
+    st().placeAt({ x: 0, y: 300 }, true);
+    expect(pins().map((n) => n.label)).toEqual(['in1', 'in2', 'in3']);
+    // Put down (Esc, or a click on it in the library): clicks place nothing.
+    st().startPlacing(undefined);
+    st().placeAt({ x: 0, y: 400 }, true);
+    expect(pins()).toHaveLength(3);
+    // A drop from the library places one and puts it down.
+    st().startPlacing(picked);
+    st().placeAt({ x: 200, y: 0 });
+    expect(pins()).toHaveLength(4);
+    expect(st().placing).toBeUndefined();
+  }, 60_000);
+
   it('refuses to give a pin the name another pin has (F13)', async () => {
     await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
     st().newDrawing('pins');

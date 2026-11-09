@@ -1,7 +1,8 @@
 /**
- * The symbol library: click a symbol, then click the canvas to place it
- * (Shift-click places more), or drag it onto the canvas. The components
- * defined in JSON (Components…) come first; double-clicking one edits it.
+ * The symbol library: click a symbol, then each click on the canvas places a
+ * copy until Esc (or a click on the symbol again) puts it down; or drag one
+ * onto the canvas. The components defined in JSON (Components…) come first;
+ * double-clicking one edits it.
  */
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type LayoutResult, approxMeasure, sizeNode } from '../layout/elk-layout';
@@ -97,7 +98,7 @@ export function Palette() {
       <button
         key={key}
         className={`palette-item ${active ? 'on' : ''}`}
-        title={`${hint}. Click, then click the canvas (Shift-click to place several), or drag it there.${component ? ' Double-click to edit it as JSON.' : ''}`}
+        title={`${hint}. Click, then click the canvas once for each copy (Esc stops), or drag it there.${component ? ' Double-click to edit it as JSON.' : ''}`}
         draggable
         onDragStart={(ev) => {
           ev.dataTransfer.setData('application/x-dc-symbol', sym);
@@ -174,7 +175,7 @@ export function Palette() {
       {editing && <ComponentsDialog onClose={() => setEditing(false)} />}
       {placing && (
         <p className="small muted palette-tip">
-          Click the canvas to place. Shift-click places more. Esc stops.
+          Click the canvas to place a copy, as many times as you like. Esc stops.
         </p>
       )}
     </div>

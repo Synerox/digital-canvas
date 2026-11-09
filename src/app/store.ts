@@ -274,7 +274,12 @@ interface State {
   interfaceOf: InterfaceOf;
   /** Modules a block can instantiate here (not the sheet itself). */
   blockModules(): string[];
+  /** Pick a symbol of the library to place (undefined: put it down). */
   startPlacing(p: Placing | undefined): void;
+  /**
+   * Place a copy of the picked symbol centred at `at`, as one undo step, and select it. `keepPlacing`: the symbol
+   * stays picked for the next click (clicks on the canvas); without it, it is put down (a drop from the library).
+   */
   placeAt(at: Point, keepPlacing?: boolean): void;
   previewMove(ids: ReadonlySet<string>, dx: number, dy: number): void;
   moveSelection(ids: ReadonlySet<string>, dx: number, dy: number): void;

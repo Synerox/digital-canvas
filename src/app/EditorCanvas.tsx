@@ -3,7 +3,7 @@
  * move symbols, draw wires by hand (see editor/draw-wire: drag from a pin and
  * the wire follows the pointer, corner by corner; or click a pin, click the
  * corners, click the end), reshape wires (drag any leg or corner), and place
- * symbols chosen in the library.
+ * symbols chosen in the library: each click places one copy, until Esc.
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Side } from '../core/diagram';
@@ -211,7 +211,10 @@ export function EditorCanvas() {
   const mode = useRef<Mode>({ kind: 'none' });
   /** The canvas's own count of clicks, for the double-clicks the browser sends no dblclick for. */
   const [clicks] = useState(() => new ClickRun());
+  /** Where the symbol being placed shows (see Ghost): the pointer, while it is over the canvas. */
   const [pointer, setPointer] = useState<Point>();
+  /** The same point again renders nothing (a drag over the canvas reports the pointer many times a second). */
+  const showGhostAt = (w: Point) => setPointer((p) => (p && p.x === w.x && p.y === w.y ? p : w));
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number }>();
   /** Wires being drawn or reshaped, drawn dashed over the sheet. */
   const [wireDrafts, setWireDrafts] = useState<Point[][]>();
@@ -368,6 +371,10 @@ export function EditorCanvas() {
   useEffect(() => {
     if (mode.current.kind === 'wire' || mode.current.kind === 'press-port') cancelWire();
   }, [sheet, cancelWire]);
+  // Picking a symbol in the library puts down a wire being drawn: the clicks place symbols now.
+  useEffect(() => {
+    if (placing && mode.current.kind === 'wire') cancelWire();
+  }, [placing, cancelWire]);
   useEffect(() => {
     const m = mode.current;
     if (m.kind !== 'wire' || !layout) return;
@@ -530,8 +537,6 @@ export function EditorCanvas() {
 
   if (!layout) return null;
   const pointed = hovered?.on === layout && hovered.at === view ? hovered : undefined;
-  const lx = layout.x ?? 0;
-  const ly = layout.y ?? 0;
 
   // Visible world rectangle, for the grid.
   const vw = size.w / view.k;
@@ -550,6 +555,8 @@ export function EditorCanvas() {
       cancelWire();
       return;
     }
+    // Quick clicks while placing each placed a copy: they open or rename nothing.
+    if (store().placing) return;
     const hit = hitFrom(document.elementFromPoint(ev.clientX, ev.clientY));
     const s = store();
     if (hit.node) {
@@ -575,7 +582,13 @@ export function EditorCanvas() {
       style={{ background: THEME.background, cursor }}
       onContextMenu={(ev) => ev.preventDefault()}
       onDragOver={(ev) => {
-        if (Array.from(ev.dataTransfer.types).includes('application/x-dc-symbol')) ev.preventDefault();
+        if (!Array.from(ev.dataTransfer.types).includes('application/x-dc-symbol')) return;
+        ev.preventDefault();
+        // The symbol dragged from the library shows where it will land, as when it is placed by clicks.
+        if (store().placing) showGhostAt(toWorld(ev.clientX, ev.clientY));
+      }}
+      onDragLeave={(ev) => {
+        if (!ev.currentTarget.contains(ev.relatedTarget as Node | null)) setPointer(undefined);
       }}
       onDrop={(ev) => {
         const sym = ev.dataTransfer.getData('application/x-dc-symbol');
@@ -604,7 +617,8 @@ export function EditorCanvas() {
         const s = store();
         const hit = hitFrom(ev.target);
         if (s.placing) {
-          s.placeAt(w, ev.shiftKey);
+          // One copy per click; the symbol stays picked (Esc, or a click on it in the library, puts it down).
+          s.placeAt(w, true);
           return;
         }
         const m = mode.current;
@@ -673,13 +687,15 @@ export function EditorCanvas() {
       onPointerLeave={() => {
         hover.current = undefined;
         setHovered(undefined);
+        // The symbol being placed shows only over the canvas (not where the pointer last left it).
+        setPointer(undefined);
       }}
       onPointerMove={(ev) => {
         hover.current = { x: ev.clientX, y: ev.clientY };
         const w = toWorld(ev.clientX, ev.clientY);
         const m = mode.current;
         const s = store();
-        if (s.placing || m.kind === 'wire') setPointer(w);
+        if (s.placing) showGhostAt(w);
         if (m.kind === 'none' || m.kind === 'wire') {
           const hit = hitFrom(m.kind === 'wire' ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target);
           if (layout) {
@@ -808,6 +824,8 @@ export function EditorCanvas() {
       onDoubleClick={doubleClick}
       onClick={(ev) => {
         if ((ev.target as Element).closest('.zoom-controls')) return;
+        // A click that placed a symbol is no part of a double-click: the two clicks after Esc are one.
+        if (store().placing) return clicks.reset();
         if (clicks.click('canvas', ev.detail)) doubleClick(ev);
       }}
     >
@@ -919,11 +937,6 @@ export function EditorCanvas() {
             />
           )}
           {placing && pointer && <Ghost at={pointer} />}
-          {layout.nodes.length === 0 && !placing && (
-            <text x={lx + 4} y={ly + 30} fontSize={13} fill={THEME.muted} fontFamily={THEME.font} pointerEvents="none">
-              Empty sheet: pick a symbol in the library on the left, then click here to place it.
-            </text>
-          )}
         </g>
       </svg>
       <div className="zoom-controls" onPointerDown={(ev) => ev.stopPropagation()} onDoubleClick={(ev) => ev.stopPropagation()}>
