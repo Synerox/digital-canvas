@@ -10,7 +10,8 @@ import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/c
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-ident';
-import { moduleTitle, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
+import { deleteDrawingAsking } from './drawing-list';
+import { moduleTitle, staleSlices, useStore, viewModeOf } from './store';
 import { ui } from './ui-events';
 import { openSettings, partOfBlock, settingsOf } from './settings';
 
@@ -226,11 +227,8 @@ export function Inspector() {
           {drawn && (
             <button
               className="danger"
-              onClick={() => {
-                const users = sheetsUsing(s.doc, module);
-                const used = users.length ? ` It is used as a block on ${users.join(', ')}; those blocks will lose their pins.` : '';
-                if (confirm(`Delete the drawing ${module}?${used} (You can undo this.)`)) s.deleteDrawing(module);
-              }}
+              // As × in the Drawings list: asks only when other sheets use it (Undo brings it back, which the notice says).
+              onClick={() => deleteDrawingAsking(module)}
             >
               Delete drawing
             </button>

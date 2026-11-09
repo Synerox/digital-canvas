@@ -32,10 +32,12 @@ import { type Point, sizeNode } from '../layout/elk-layout';
 import {
   AUTOSAVE_KEY,
   changeFiles,
+  clipboardHolds,
   copyKeys,
   followPinRenames,
   importedTop,
   moduleTitle,
+  pastedDrawingName,
   pasteSpot,
   planDrop,
   planImport,
@@ -2062,6 +2064,124 @@ endmodule
     expect(st().doc.sheets['d:outer'].edges[0].target.port).toBe('u:3.data');
     st().deleteDrawing('inner');
     expect(st().notice).toMatch(/still used as a block on outer/);
+  }, 60_000);
+});
+
+describe('the Drawings list: delete, copy and paste a drawing', () => {
+  const at = (name: string) => [{ instance: name, module: name, drawn: true }];
+  /** inner (two pins), outer (a block of inner), and spare. */
+  const three = () => {
+    const inner = drawing([pin('u:1', 'input', 'a'), pin('u:2', 'output', 'y')]);
+    const block: UserNode = { ...newUserNode('u:3', 'block'), params: { module: 'inner' } };
+    const outer = drawing([pin('u:1', 'input', 'x'), block], [{ id: 'w:4', source: { node: 'u:1', port: 'u:1.out' }, target: { node: 'u:3', port: 'u:3.a' } }]);
+    return { drawn: ['inner', 'outer', 'spare'], sheets: { 'd:inner': inner, 'd:outer': outer, 'd:spare': drawing([pin('u:1', 'input', 's')]) } };
+  };
+
+  it('names a pasted drawing <name>_copy, a copy of a copy after the same drawing, and keeps the name when it is free', () => {
+    expect(pastedDrawingName('alu', new Set(['alu']))).toBe('alu_copy');
+    expect(pastedDrawingName('alu', new Set(['alu', 'alu_copy']))).toBe('alu_copy_2');
+    expect(pastedDrawingName('alu_copy', new Set(['alu', 'alu_copy']))).toBe('alu_copy_2');
+    expect(pastedDrawingName('alu_copy_2', new Set(['alu', 'alu_copy', 'alu_copy_2']))).toBe('alu_copy_3');
+    // Cut (or copied from other work): the name is free.
+    expect(pastedDrawingName('alu', new Set(['top']))).toBe('alu');
+    expect(pastedDrawingName('_copy', new Set(['_copy']))).toBe('_copy_copy');
+  });
+
+  it('pastes a copy of a drawing as it was copied, opens it, and Undo takes it away (one step)', async () => {
+    await open({}, { doc: three(), path: at('spare') });
+    expect(st().copyDrawing('outer')).toBe(true);
+    expect(clipboardHolds()).toBe('drawing');
+    // Later edits of the drawing are not in the copy.
+    await st().openPath(at('outer'));
+    st().renameItem('u:1', 'renamed');
+    const copied = st().doc.sheets['d:outer'];
+    const name = st().pasteDrawing();
+    await settle();
+    expect(name).toBe('outer_copy');
+    expect(st().doc.drawn).toEqual(['inner', 'outer', 'spare', 'outer_copy']);
+    expect(st().path).toEqual(at('outer_copy'));
+    expect(st().notice).toBe('Pasted a copy of outer as outer_copy.');
+    const sheet = st().doc.sheets['d:outer_copy'];
+    expect(sheet.nodes.find((n) => n.id === 'u:1')!.name).toBe('x');
+    expect(sheet.nodes).not.toBe(copied.nodes);
+    // The copy's block of inner is one more user of inner, with its pins and wire.
+    expect(sheetsUsing(st().doc, 'inner').sort()).toEqual(['outer', 'outer_copy']);
+    expect(st().netlist!.edges.map((e) => e.id)).toEqual(['w:4']);
+    // Pasting again makes another copy; the clipboard still holds the drawing.
+    expect(st().pasteDrawing()).toBe('outer_copy_2');
+    await settle();
+    st().undo();
+    await settle();
+    expect(st().doc.drawn).toEqual(['inner', 'outer', 'spare', 'outer_copy']);
+    expect(st().path).toEqual(at('outer_copy'));
+    st().undo();
+    await settle();
+    expect(st().doc.drawn).toEqual(['inner', 'outer', 'spare']);
+    expect(st().path).toEqual(at('outer'));
+    // Copying symbols takes the clipboard's place: Paste then pastes the symbols, not the drawing.
+    st().select(['u:1']);
+    expect(st().copy()).toBe(true);
+    expect(clipboardHolds()).toBe('symbols');
+    expect(st().pasteDrawing()).toBeUndefined();
+    expect(st().doc.drawn).toEqual(['inner', 'outer', 'spare']);
+  }, 60_000);
+
+  it('deletes the open drawing and opens the one next to it in the list; Undo brings it back and opens it', async () => {
+    await open({}, { doc: three(), path: at('outer') });
+    st().deleteDrawing('outer');
+    await settle();
+    expect(st().doc.drawn).toEqual(['inner', 'spare']);
+    expect(st().doc.sheets['d:outer']).toBeUndefined();
+    expect(st().path).toEqual(at('spare'));
+    expect(st().notice).toBe('Deleted outer. Undo brings it back.');
+    st().undo();
+    await settle();
+    expect(st().doc.drawn).toEqual(['inner', 'outer', 'spare']);
+    expect(st().path).toEqual(at('outer'));
+    // The last one: the one before it opens.
+    await st().openPath(at('spare'));
+    st().deleteDrawing('spare');
+    await settle();
+    expect(st().path).toEqual(at('outer'));
+  }, 60_000);
+
+  it('deletes a drawing opened as a block: back to the sheet it was opened from; one not open leaves the sheet open', async () => {
+    await open({}, { doc: three(), path: at('outer') });
+    await st().enterInstance('u:3', 'inner', true);
+    await settle();
+    expect(st().sheet).toBe('d:inner');
+    st().deleteDrawing('inner');
+    await settle();
+    expect(st().path).toEqual(at('outer'));
+    // Its block stays on outer, without pins.
+    expect(st().notice).toBe('Deleted inner, which is still used as a block on outer. Undo brings it back.');
+    st().deleteDrawing('spare');
+    await settle();
+    expect(st().path).toEqual(at('outer'));
+    expect(st().doc.drawn).toEqual(['outer']);
+  }, 60_000);
+
+  it('opens the Verilog top when the only drawing goes, and pastes a cut drawing back under its name', async () => {
+    await open({ [AUCTION_FILE]: AUCTION_SOURCE }, { doc: { drawn: ['solo'], sheets: { 'd:solo': drawing([pin('u:1', 'input', 'a')]) } }, path: at('solo') });
+    await settle();
+    expect(st().sheet).toBe('d:solo');
+    st().copyDrawing('solo');
+    st().deleteDrawing('solo');
+    await settle();
+    expect(st().path).toEqual([{ instance: st().design!.top, module: st().design!.top }]);
+    expect(st().pasteDrawing()).toBe('solo');
+    await settle();
+    expect(st().notice).toBe('Pasted solo.');
+    expect(st().doc.sheets['d:solo'].nodes.map((n) => n.name)).toEqual(['a']);
+  }, 60_000);
+
+  it('says which blocks of a drawing pasted into other work have no module there', async () => {
+    await open({}, { doc: three(), path: at('outer') });
+    st().copyDrawing('outer');
+    await open({}, { doc: { drawn: ['other'], sheets: { 'd:other': drawing([]) } }, path: at('other') });
+    expect(st().pasteDrawing()).toBe('outer');
+    await settle();
+    expect(st().notice).toBe('Pasted outer. Its blocks of inner have no pins: this work has no such module.');
   }, 60_000);
 });
 
