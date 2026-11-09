@@ -47,6 +47,11 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .tree-item.active { background: #fbe9e1; color: var(--accent); }
 .files li { display: flex; align-items: center; border-radius: 4px; }
 .file-name { flex: 1; min-width: 0; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* × shows under the pointer, as in the Drawings list, and when Tab gives it the focus; always on touch screens (nothing to point with). */
+@media (hover: hover) {
+  .files li button.icon { opacity: 0; }
+  .files li:hover button.icon, .files li button.icon:focus-visible { opacity: 1; }
+}
 
 .center { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .center-head { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); min-height: 34px; }
