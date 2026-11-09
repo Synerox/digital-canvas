@@ -4,7 +4,7 @@ import { buildGeometry } from '../editor/geometry';
 import { type SymKey, type SymParams, type UserNode, newUserNode, symbolNode } from '../editor/symbols';
 import { type LEdge, type LNode, type LayoutResult, type Point, approxMeasure } from '../layout/elk-layout';
 import { exportSvg } from './export';
-import { THEMES } from './theme';
+import { THEME } from './theme';
 
 interface Text {
   text: string;
@@ -97,7 +97,7 @@ describe('width marks and slice names', () => {
       edge('s.[7:4]>hi.in', 's.[7:4]', 'hi.in', 4, [{ x: 256, y: 110 }, { x: 266, y: 110 }, { x: 266, y: 70 }, { x: 450, y: 70 }]),
       edge('s.[3:0]>lo.in', 's.[3:0]', 'lo.in', 4, [{ x: 256, y: 130 }, { x: 266, y: 130 }, { x: 266, y: 170 }, { x: 450, y: 170 }]),
     ];
-    const list = texts(exportSvg(layout(nodes, edges), THEMES.report));
+    const list = texts(exportSvg(layout(nodes, edges), THEME));
     expect(list.map((t) => t.text).sort()).toEqual(['4', '4', '8', '[3:0]', '[7:4]', 'a', 'hi', 'lo']);
     expect(clashes(list)).toEqual([]);
     // No wire runs through a slice name or a width; the upper name moved past its wire's bend.
@@ -120,7 +120,7 @@ describe('width marks and slice names', () => {
         labelBox: { x: 396 - w, y: 106, width: w, height: 13 },
       }),
     ];
-    const list = texts(exportSvg(layout(nodes, edges), THEMES.report));
+    const list = texts(exportSvg(layout(nodes, edges), THEME));
     expect(list.map((t) => t.text).sort()).toEqual(['3', 'a', label, 'y']);
     expect(clashes(list)).toEqual([]);
     expect(crossed(list, edges)).toEqual([]);
@@ -145,7 +145,7 @@ describe('width marks and slice names', () => {
     };
     const pos = { 'u:1': { x: 80, y: 100 }, 'u:2': { x: 250, y: 100 }, 'u:3': { x: 450, y: 60 }, 'u:4': { x: 450, y: 160 } };
     const { layout: l } = buildGeometry({ netlist, pos, routes: {}, measure: approxMeasure });
-    const list = texts(exportSvg(l, THEMES.report));
+    const list = texts(exportSvg(l, THEME));
     expect(clashes(list)).toEqual([]);
     expect(crossed(list, l.edges)).toEqual([]);
   });
@@ -157,7 +157,7 @@ describe('registers', () => {
     const draw = (sym: 'dffe' | 'adff') => {
       const n = symbolNode({ id: 'u:1', sym, params: { width: 4 } }, iface);
       const { layout: l } = buildGeometry({ netlist: { module: 't', nodes: [n], edges: [] }, pos: { 'u:1': { x: 100, y: 100 } }, routes: {}, measure: approxMeasure });
-      return texts(exportSvg(l, THEMES.report)).map((t) => t.text);
+      return texts(exportSvg(l, THEME)).map((t) => t.text);
     };
     expect(draw('dffe')).toContain('EN');
     expect(draw('dffe')).not.toContain('ARST');
@@ -175,7 +175,7 @@ describe('textbook symbols', () => {
     const { layout: l } = buildGeometry({ netlist: { module: 't', nodes: [n], edges: [] }, pos: { 'u:1': { x: 100, y: 100 } }, routes: {}, measure: approxMeasure });
     const node = l.nodes[0];
     const pin = (name: string) => node.ports.find((q) => q.name === name)!;
-    return { node, pin, svg: exportSvg(l, THEMES.report) };
+    return { node, pin, svg: exportSvg(l, THEME) };
   };
   const polygon = (svg: string): Point[] =>
     /<polygon points="([^"]+)"/

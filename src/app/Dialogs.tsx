@@ -1,6 +1,6 @@
 /**
  * Dialogs: Import Verilog (paste or open code), Export Verilog (with a Yosys
- * check), and the shortcut sheet.
+ * check), and the Hints sheet (keys and mouse actions).
  */
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { type DNode, type Diagram, buildDiagram } from '../core/diagram';
@@ -720,10 +720,10 @@ const HINTS: [string[], string][] = [
 
 export function Hints({ onClose }: { onClose(): void }) {
   return (
-    <section className="hints" aria-label="Shortcuts">
+    <section className="hints" aria-label="Hints">
       <header>
-        <b>Shortcuts</b>
-        <button className="icon" onClick={onClose} aria-label="Close shortcuts">
+        <b>Hints</b>
+        <button className="icon" onClick={onClose} aria-label="Close hints">
           ×
         </button>
       </header>

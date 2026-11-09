@@ -12,7 +12,6 @@ import { ui } from './app/ui-events';
 import { FILE_EXTENSION, FileFormatError, isDrawnKey } from './editor/doc';
 import { GRID } from './layout/elk-layout';
 import { downloadBlob } from './render/export';
-import { THEMES, type ThemeName } from './render/theme';
 import { type YosysErrorKind, describeStatus, preloadYosys } from './yosys/client';
 
 let started = false;
@@ -102,7 +101,6 @@ export default function App() {
   const notice = useStore((x) => x.notice);
   const otherTab = useStore((x) => x.autosavePaused);
   const dirty = useStore((x) => x.dirty);
-  const theme = useStore((x) => x.theme);
   const sheet = useStore((x) => x.sheet);
   const path = useStore((x) => x.path);
   const hasLayout = useStore((x) => !!x.layout);
@@ -394,22 +392,12 @@ export default function App() {
         <span className="spacer" />
         <StatusText />
         {dirty && <span className="small muted" title="Kept in this browser. Use File › Save drawing to keep a file.">Unsaved</span>}
-        <label className="theme-select">
-          Theme:
-          <select value={theme} onChange={(e) => s.setTheme(e.target.value as ThemeName)}>
-            {(Object.keys(THEMES) as ThemeName[]).map((t) => (
-              <option key={t} value={t}>
-                {THEMES[t].label}
-              </option>
-            ))}
-          </select>
-        </label>
         <button disabled={!hasLayout} onClick={() => setShowExport(true)}>
           Export…
         </button>
         <button onClick={() => setShowLog(!logVisible)}>Log</button>
-        <button onClick={() => setShowHints(!showHints)} title="Keyboard and mouse shortcuts">
-          Shortcuts
+        <button onClick={() => setShowHints(!showHints)} title="Keys and mouse actions of the editor">
+          Hints
         </button>
       </header>
 
@@ -538,7 +526,7 @@ export default function App() {
 
       {dragging && <div className="drop-overlay">Drop Verilog files to add them, or a .dcanvas.json drawing to open it</div>}
       {showExport && exportLayout && (
-        <ExportDialog layout={exportLayout} initialTheme={theme} name={currentModule.replace(/[^A-Za-z0-9_.-]/g, '_')} onClose={() => setShowExport(false)} />
+        <ExportDialog layout={exportLayout} name={currentModule.replace(/[^A-Za-z0-9_.-]/g, '_')} onClose={() => setShowExport(false)} />
       )}
       {showImport && <ImportDialog initial={showImport === true ? undefined : showImport} onClose={() => setShowImport(false)} />}
       {showVerilog && <VerilogExportDialog onClose={() => setShowVerilog(false)} />}

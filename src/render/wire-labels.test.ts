@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { type LEdge, type LNode, type LayoutResult, approxMeasure } from '../layout/elk-layout';
 import { sliceNameBox } from '../editor/geometry';
 import { exportSvg } from './export';
-import { THEMES } from './theme';
+import { THEME } from './theme';
 
 const box = (x: number, y: number, width: number, height: number) => ({ x, y, width, height });
 
@@ -48,7 +48,7 @@ describe('wire labels', () => {
     // Where no clear spot was left, the text stays readable rather than hidden under the symbol.
     const nodes = [pin('a', 'input', 100, 110, 1), pin('y', 'output', 300, 110, 1)];
     const edges = [wire('a.out>y.in', 'a.out', 'y.in', [{ x: 140, y: 120 }, { x: 300, y: 120 }], { label: 'busy', labelBox: box(280, 104, 30, 13) })];
-    const svg = exportSvg(layout(nodes, edges), THEMES.report);
+    const svg = exportSvg(layout(nodes, edges), THEME);
     expect(svg.indexOf('>busy</text>')).toBeGreaterThan(svg.lastIndexOf('<polygon'));
     expect(svg).toMatch(/<g pointer-events="none"><text[^>]*stroke="#ffffff"[^>]*paint-order="stroke"[^>]*>busy</);
   });
@@ -78,7 +78,7 @@ describe('wire labels', () => {
       wire('s.[7:4]>hi.in', 's.[7:4]', 'hi.in', [{ x: 260, y: 110 }, { x: 450, y: 110 }], { width: 4, label, labelBox: box(262, 94, w, 13) }),
       wire('s.[3:0]>lo.in', 's.[3:0]', 'lo.in', [{ x: 260, y: 130 }, { x: 450, y: 130 }], { width: 4 }),
     ];
-    const svg = exportSvg(layout(nodes, edges), THEMES.report);
+    const svg = exportSvg(layout(nodes, edges), THEME);
     // Below its wire instead of above it, under the label.
     expect(textAt(svg, '[7:4]').y).toBeGreaterThan(110);
   });
@@ -109,7 +109,7 @@ describe('wire labels', () => {
       height: 40,
       ports: [port('j.[15:12]', '[15:12]', 'WEST', 450, 110), port('j.[11:8]', '[11:8]', 'WEST', 450, 130), port('j.out', 'out', 'EAST', 460, 120)],
     };
-    const svg = exportSvg(layout([split, join], []), THEMES.report);
+    const svg = exportSvg(layout([split, join], []), THEME);
     for (const n of [split, join])
       for (const q of n.ports) {
         const b = sliceNameBox(n, q);

@@ -1,8 +1,8 @@
-export type ThemeName = 'report' | 'slides';
-
+/**
+ * The colours and font of the drawings. There is one look: black on white, the same on screen and in exports
+ * (since 2026-11 the beige "Slides" theme is gone). Files saved with a `theme` still open; the field is ignored.
+ */
 export interface Theme {
-  name: ThemeName;
-  label: string;
   background: string;
   ink: string;
   wire: string;
@@ -16,35 +16,15 @@ export interface Theme {
   font: string;
 }
 
-const FONT = "'Helvetica Neue', Helvetica, Arial, 'Noto Sans TC', sans-serif";
-
-export const THEMES: Record<ThemeName, Theme> = {
-  report: {
-    name: 'report',
-    label: 'Report (white)',
-    background: '#ffffff',
-    ink: '#111111',
-    wire: '#111111',
-    fill: '#ffffff',
-    pinFill: '#ffffff',
-    muted: '#555555',
-    accent: '#d9480f',
-    accentFill: 'rgba(217, 72, 15, 0.12)',
-    port: '#2f9e44',
-    font: FONT,
-  },
-  slides: {
-    name: 'slides',
-    label: 'Slides (beige)',
-    background: '#f5efe0',
-    ink: '#2f261c',
-    wire: '#2f261c',
-    fill: '#fbf7ec',
-    pinFill: '#fbf7ec',
-    muted: '#6b5d4c',
-    accent: '#b4441b',
-    accentFill: 'rgba(180, 68, 27, 0.14)',
-    port: '#2b8a3e',
-    font: FONT,
-  },
+export const THEME: Theme = {
+  background: '#ffffff',
+  ink: '#111111',
+  wire: '#111111',
+  fill: '#ffffff',
+  pinFill: '#ffffff',
+  muted: '#555555',
+  accent: '#d9480f',
+  accentFill: 'rgba(217, 72, 15, 0.12)',
+  port: '#2f9e44',
+  font: "'Helvetica Neue', Helvetica, Arial, 'Noto Sans TC', sans-serif",
 };

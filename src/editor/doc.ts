@@ -15,7 +15,6 @@ import type { DNode, DPort, NodeKind, Side } from '../core/diagram';
 import type { SrcRange } from '../core/ir';
 import { GRID, type Point } from '../layout/elk-layout';
 import type { RuleId } from '../core/rules';
-import type { ThemeName } from '../render/theme';
 import { type ComponentDef, followsPreset, loadComponents } from './components';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam, drawnWithout } from './symbols';
 
@@ -92,7 +91,10 @@ export interface PathEntry {
   drawn?: boolean;
 }
 
-/** What Save writes: everything needed to reopen the work, including the Verilog sources. */
+/**
+ * What Save writes: everything needed to reopen the work, including the Verilog sources. Files saved before
+ * 2026-11 also have `theme` ('report' or 'slides'), which is ignored: there is one look now (see render/theme).
+ */
 export interface SavedFile {
   format: 'digital-canvas';
   version: 1;
@@ -102,7 +104,6 @@ export interface SavedFile {
   top?: string;
   rules: RuleId[];
   viewMode: ViewMode;
-  theme: ThemeName;
   doc: EditDoc;
   path: PathEntry[];
 }
@@ -349,7 +350,6 @@ export function parseSavedFile(text: string): SavedFile {
     top: isStr(v.top) ? v.top : undefined,
     rules,
     viewMode: v.viewMode === 'flat' ? 'flat' : 'blocks',
-    theme: v.theme === 'slides' ? 'slides' : 'report',
     doc,
     path,
   };

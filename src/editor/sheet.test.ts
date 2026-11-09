@@ -823,18 +823,33 @@ describe('saved files', () => {
       files: { 'a.v': 'module a; endmodule' },
       rules: ['decoder'],
       viewMode: 'blocks',
-      theme: 'slides',
       doc: { drawn: ['d1'], sheets: { 'd:d1': e } },
       path: [{ instance: 'd1', module: 'd1', drawn: true }],
     };
     const back = parseSavedFile(JSON.stringify(f));
     expect(back.doc.sheets['d:d1'].nodes[0]).toMatchObject({ id: 'u:7', sym: 'and', params: { inputs: 3 } });
     expect(back.doc.sheets['d:d1'].next).toBe(8);
-    expect(back.theme).toBe('slides');
     expect(back.path[0].drawn).toBe(true);
     expect(() => parseSavedFile('{"hello":1}')).toThrow(/not a Digital Canvas/);
     expect(() => parseSavedFile('not json')).toThrow(/not valid JSON/);
     expect(() => parseSavedFile(JSON.stringify({ ...f, version: 9 }))).toThrow(/newer version/);
+  });
+
+  it('of the time of the beige theme open the same, without it (there is one white look now)', () => {
+    const f: SavedFile = {
+      format: 'digital-canvas',
+      version: 1,
+      files: { 'a.v': 'module a; endmodule' },
+      rules: [],
+      viewMode: 'flat',
+      doc: { drawn: [], sheets: {} },
+      path: [{ instance: 'a', module: 'a' }],
+    };
+    for (const theme of ['slides', 'report', 42]) {
+      const back = parseSavedFile(JSON.stringify({ ...f, theme }));
+      expect(back).not.toHaveProperty('theme');
+      expect(back).toMatchObject({ files: f.files, viewMode: 'flat', path: f.path });
+    }
   });
 
   it('keeps only well-formed fields of a frozen symbol copy', () => {

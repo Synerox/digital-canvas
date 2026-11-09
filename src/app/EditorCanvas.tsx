@@ -9,12 +9,12 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { Side } from '../core/diagram';
 import { GRID, type LEdge, type LayoutResult, type Point, sizeNode } from '../layout/elk-layout';
 import { DiagramGraphic } from '../render/DiagramGraphic';
-import { THEMES } from '../render/theme';
+import { THEME } from '../render/theme';
 import type { WireEnd } from '../editor/sheet';
 import { type Axis, type WireDraft, clickAt, draftPath, followMoves, legAt, legContaining, legMoves, moveCorner, moveLeg, startDraft, trace, undoCorner } from '../editor/draw-wire';
 import { polylineHitsRect, wiresMeet } from '../editor/router';
 import { symbolNode, newUserNode } from '../editor/symbols';
-import { measureFor, useStore } from './store';
+import { textMeasure, useStore } from './store';
 import { ui } from './ui-events';
 import { doubleClickSettings, openSettings } from './settings';
 import { ClickRun } from './click-run';
@@ -166,14 +166,12 @@ function acrossAt(points: readonly Point[], p: Point): Axis {
 
 function Ghost({ at }: { at: Point }) {
   const placing = useStore((s) => s.placing);
-  const themeName = useStore((s) => s.theme);
-  const theme = THEMES[themeName];
   const iface = useStore((s) => s.interfaceOf);
   if (!placing) return null;
   const node = newUserNode('ghost', placing.sym, placing.params ? { params: { ...newUserNode('g', placing.sym).params, ...placing.params } } : {});
   if (placing.sym === 'text') node.name = 'Note';
   const d = symbolNode(node, iface);
-  const s = sizeNode(d, measureFor(themeName));
+  const s = sizeNode(d, textMeasure());
   const x = snap(at.x - s.width / 2);
   const y = snap(at.y - s.height / 2);
   const layout: LayoutResult = {
@@ -194,19 +192,17 @@ function Ghost({ at }: { at: Point }) {
   };
   return (
     <g opacity={0.5} pointerEvents="none">
-      <DiagramGraphic layout={layout} theme={theme} />
+      <DiagramGraphic layout={layout} theme={THEME} />
     </g>
   );
 }
 
 export function EditorCanvas() {
   const layout = useStore((s) => s.layout);
-  const themeName = useStore((s) => s.theme);
   const selection = useStore((s) => s.selection);
   const highlighted = useStore((s) => s.highlighted);
   const issues = useStore((s) => s.issues);
   const placing = useStore((s) => s.placing);
-  const theme = THEMES[themeName];
   const wrap = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>({ x: 40, y: 40, k: 1 });
   const viewRef = useRef(view);
@@ -577,7 +573,7 @@ export function EditorCanvas() {
       ref={wrap}
       className="canvas"
       tabIndex={-1}
-      style={{ background: theme.background, cursor }}
+      style={{ background: THEME.background, cursor }}
       onContextMenu={(ev) => ev.preventDefault()}
       onDragOver={(ev) => {
         if (Array.from(ev.dataTransfer.types).includes('application/x-dc-symbol')) ev.preventDefault();
@@ -819,12 +815,12 @@ export function EditorCanvas() {
       <svg width="100%" height="100%">
         <defs>
           <pattern id="dc-grid" width={gridStep} height={gridStep} patternUnits="userSpaceOnUse">
-            <circle cx={0} cy={0} r={0.9 / view.k} fill={theme.muted} opacity={0.35} />
+            <circle cx={0} cy={0} r={0.9 / view.k} fill={THEME.muted} opacity={0.35} />
           </pattern>
         </defs>
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
           <rect x={vx - gridStep} y={vy - gridStep} width={vw + 2 * gridStep} height={vh + 2 * gridStep} fill="url(#dc-grid)" pointerEvents="none" />
-          <Graphic layout={layout} theme={theme} selection={selection} highlighted={highlighted} flagged={issues.flagged} interactive />
+          <Graphic layout={layout} theme={THEME} selection={selection} highlighted={highlighted} flagged={issues.flagged} interactive />
           {selectedNodes.map((n) => (
             <rect
               key={n.id}
@@ -833,7 +829,7 @@ export function EditorCanvas() {
               width={n.width + 8}
               height={n.height + 8}
               fill="none"
-              stroke={theme.accent}
+              stroke={THEME.accent}
               strokeDasharray="4 3"
               strokeWidth={1 / view.k}
               pointerEvents="none"
@@ -843,9 +839,9 @@ export function EditorCanvas() {
           <g pointerEvents="none" data-open-bus-hints="">
             {openBus.map((h) => (
               <g key={h.port} data-open-bus={h.port}>
-                <line x1={h.from.x} y1={h.from.y} x2={h.to.x} y2={h.to.y} stroke={theme.muted} strokeWidth={1.4} />
-                <line x1={h.slash.x - 4} y1={h.slash.y + 5} x2={h.slash.x + 4} y2={h.slash.y - 5} stroke={theme.muted} strokeWidth={1.4} />
-                <text x={h.text.x} y={h.text.y} fontSize={10} textAnchor={h.text.anchor} fill={theme.muted} fontFamily={theme.font}>
+                <line x1={h.from.x} y1={h.from.y} x2={h.to.x} y2={h.to.y} stroke={THEME.muted} strokeWidth={1.4} />
+                <line x1={h.slash.x - 4} y1={h.slash.y + 5} x2={h.slash.x + 4} y2={h.slash.y - 5} stroke={THEME.muted} strokeWidth={1.4} />
+                <text x={h.text.x} y={h.text.y} fontSize={10} textAnchor={h.text.anchor} fill={THEME.muted} fontFamily={THEME.font}>
                   {h.width}
                 </text>
               </g>
@@ -864,8 +860,8 @@ export function EditorCanvas() {
                         cx={p.x}
                         cy={p.y}
                         r={hover ? 4 : 3}
-                        fill={theme.port}
-                        stroke={theme.background}
+                        fill={THEME.port}
+                        stroke={THEME.background}
                         strokeWidth={1}
                         pointerEvents="none"
                         data-pin-dot={p.id}
@@ -890,8 +886,8 @@ export function EditorCanvas() {
                     y={p.y - 3 / view.k}
                     width={6 / view.k}
                     height={6 / view.k}
-                    fill={theme.background}
-                    stroke={theme.accent}
+                    fill={THEME.background}
+                    stroke={THEME.accent}
                     strokeWidth={1 / view.k}
                     pointerEvents="none"
                   />
@@ -903,7 +899,7 @@ export function EditorCanvas() {
               key={i}
               points={d.map((p) => `${p.x},${p.y}`).join(' ')}
               fill="none"
-              stroke={theme.accent}
+              stroke={THEME.accent}
               strokeWidth={1.6}
               strokeDasharray="5 3"
               strokeLinejoin="round"
@@ -916,8 +912,8 @@ export function EditorCanvas() {
               y={marquee.y}
               width={marquee.w}
               height={marquee.h}
-              fill={theme.accentFill}
-              stroke={theme.accent}
+              fill={THEME.accentFill}
+              stroke={THEME.accent}
               strokeDasharray="4 3"
               strokeWidth={1 / view.k}
               pointerEvents="none"
@@ -925,7 +921,7 @@ export function EditorCanvas() {
           )}
           {placing && pointer && <Ghost at={pointer} />}
           {layout.nodes.length === 0 && !placing && (
-            <text x={lx + 4} y={ly + 30} fontSize={13} fill={theme.muted} fontFamily={theme.font} pointerEvents="none">
+            <text x={lx + 4} y={ly + 30} fontSize={13} fill={THEME.muted} fontFamily={THEME.font} pointerEvents="none">
               Empty sheet: pick a symbol in the library on the left, then click here to place it.
             </text>
           )}

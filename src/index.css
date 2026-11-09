@@ -37,7 +37,7 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .brand { font-weight: 700; font-size: 15px; margin-right: 8px; }
 .spacer { flex: 1; }
 .status { font-size: 12px; }
-.top-select, .theme-select { font-size: 12px; color: var(--muted); }
+.top-select { font-size: 12px; color: var(--muted); }
 
 .main { flex: 1; display: grid; grid-template-columns: 210px 1fr 320px; min-height: 0; }
 .sidebar { border-right: 1px solid var(--line); background: var(--panel); padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
