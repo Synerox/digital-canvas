@@ -2138,11 +2138,34 @@ describe('the Drawings list: delete, copy and paste a drawing', () => {
     await settle();
     expect(st().doc.drawn).toEqual(['inner', 'outer', 'spare']);
     expect(st().path).toEqual(at('outer'));
+    // Redo lands where the delete did.
+    st().redo();
+    await settle();
+    expect(st().doc.drawn).toEqual(['inner', 'spare']);
+    expect(st().path).toEqual(at('spare'));
+    st().undo();
+    await settle();
     // The last one: the one before it opens.
     await st().openPath(at('spare'));
     st().deleteDrawing('spare');
     await settle();
     expect(st().path).toEqual(at('outer'));
+  }, 60_000);
+
+  it('stops placing a block of a drawing that is deleted, or that an Undo takes away', async () => {
+    await open({}, { doc: three(), path: at('outer') });
+    st().startPlacing({ sym: 'block', params: { module: 'spare' } });
+    st().deleteDrawing('inner');
+    expect(st().placing).toEqual({ sym: 'block', params: { module: 'spare' } });
+    st().deleteDrawing('spare');
+    expect(st().placing).toBeUndefined();
+    st().copyDrawing('outer');
+    const name = st().pasteDrawing()!;
+    await settle();
+    st().startPlacing({ sym: 'block', params: { module: name } });
+    st().undo();
+    await settle();
+    expect(st().placing).toBeUndefined();
   }, 60_000);
 
   it('deletes a drawing opened as a block: back to the sheet it was opened from; one not open leaves the sheet open', async () => {
@@ -2151,6 +2174,13 @@ describe('the Drawings list: delete, copy and paste a drawing', () => {
     await settle();
     expect(st().sheet).toBe('d:inner');
     st().deleteDrawing('inner');
+    await settle();
+    expect(st().path).toEqual(at('outer'));
+    // Redo too.
+    st().undo();
+    await settle();
+    expect(st().sheet).toBe('d:inner');
+    st().redo();
     await settle();
     expect(st().path).toEqual(at('outer'));
     // Its block stays on outer, without pins.
@@ -2182,6 +2212,10 @@ describe('the Drawings list: delete, copy and paste a drawing', () => {
     expect(st().pasteDrawing()).toBe('outer');
     await settle();
     expect(st().notice).toBe('Pasted outer. Its blocks of inner have no pins: this work has no such module.');
+    // A module the Verilog files declare is not missing, even while Yosys is still at work (no design yet).
+    useStore.setState({ moduleNames: ['inner'] });
+    expect(st().pasteDrawing()).toBe('outer_copy');
+    expect(st().notice).toBe('Pasted a copy of outer as outer_copy.');
   }, 60_000);
 });
 

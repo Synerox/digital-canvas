@@ -1259,8 +1259,39 @@ export const useStore = create<State>((set, get) => {
     scheduleAutosave();
   };
 
-  /** After undo/redo: show the sheet the change was made on, or redraw this one. */
-  const showAfterHistory = async (entry: HistoryEntry) => {
+  /**
+   * When a drawing on the open path is gone (deleted, or a Redo of that): open the sheet it was opened from,
+   * else the drawing that takes its place in the list (`before`: the list before it went; the next one, or the
+   * one before the last), else the Verilog top. False when the open path has no such drawing.
+   */
+  const leaveGoneDrawing = (before: readonly string[]): boolean => {
+    const { doc, path } = get();
+    const gone = (d: string) => !doc.drawn.includes(d);
+    const cut = path.findIndex((p) => p.drawn && gone(p.module));
+    if (cut < 0) return false;
+    if (cut > 0) {
+      void get().openPath(path.slice(0, cut));
+      return true;
+    }
+    const at = before.indexOf(path[0].module);
+    const next = at < 0 ? undefined : (before.slice(at + 1).find((d) => !gone(d)) ?? before.slice(0, at).reverse().find((d) => !gone(d)));
+    void (next !== undefined ? get().openPath([{ instance: next, module: next, drawn: true }]) : openFallback());
+    return true;
+  };
+
+  /**
+   * Nothing to place when it is a block of a drawing that is gone (it would place a block of no module, with
+   * no pins): the drawing was deleted, or an Undo took it away.
+   */
+  const placingWith = (placing: Placing | undefined, doc: EditDoc): Placing | undefined => {
+    const m = placing?.sym === 'block' ? placing.params?.module : undefined;
+    if (!m || doc.drawn.includes(m)) return placing;
+    const { design, blockDesign } = get();
+    return design?.modules[m] || blockDesign?.modules[m] || partNamed(doc.components, m) ? placing : undefined;
+  };
+
+  /** After undo/redo: show the sheet the change was made on, or redraw this one. `before`: the drawings before. */
+  const showAfterHistory = async (entry: HistoryEntry, before: readonly string[]) => {
     const { doc, sheet } = get();
     const drawnGone = (p: PathEntry[]) => p.some((x) => x.drawn && !doc.drawn.includes(x.module));
     if (entry.sheet && entry.sheet !== sheet && !drawnGone(entry.path)) {
@@ -1270,7 +1301,8 @@ export const useStore = create<State>((set, get) => {
       if (mode && mode !== get().viewMode) applyViewMode(mode);
       return get().openPath(entry.path);
     }
-    if (drawnGone(get().path)) return openFallback();
+    // As the delete itself did (a Redo of it lands where the delete did).
+    if (leaveGoneDrawing(before)) return;
     // A Verilog sheet that is no longer pinned is drawn from its ELK layout, which openPath
     // skips while every symbol has a stored position (and a rebuild or re-import drops
     // the cached one): open the sheet again, which lays it out.
@@ -2036,10 +2068,10 @@ export const useStore = create<State>((set, get) => {
         doc: prev.doc,
         dirty: true,
         // A preset being placed is placed as the library has it now.
-        placing: placingNow(s.placing, prev.doc.components),
+        placing: placingWith(placingNow(s.placing, prev.doc.components), prev.doc),
       });
       scheduleAutosave();
-      void (prev.files ? reopenFiles(prev) : showAfterHistory(prev));
+      void (prev.files ? reopenFiles(prev) : showAfterHistory(prev, s.doc.drawn));
     },
 
     redo() {
@@ -2059,10 +2091,10 @@ export const useStore = create<State>((set, get) => {
         past: [...s.past, undo],
         doc: next.doc,
         dirty: true,
-        placing: placingNow(s.placing, next.doc.components),
+        placing: placingWith(placingNow(s.placing, next.doc.components), next.doc),
       });
       scheduleAutosave();
-      void (next.files ? reopenFiles(next) : showAfterHistory(next));
+      void (next.files ? reopenFiles(next) : showAfterHistory(next, s.doc.drawn));
     },
 
     newDrawing(name = 'drawing') {
@@ -2110,25 +2142,20 @@ export const useStore = create<State>((set, get) => {
 
     deleteDrawing(name) {
       const s = get();
-      const at = s.doc.drawn.indexOf(name);
-      if (at < 0) return;
+      if (!s.doc.drawn.includes(name)) return;
       const sheets = { ...s.doc.sheets };
       delete sheets[`d:${name}`];
-      const drawn = s.doc.drawn.filter((d) => d !== name);
-      const doc: EditDoc = { ...s.doc, drawn, sheets };
+      const doc: EditDoc = { ...s.doc, drawn: s.doc.drawn.filter((d) => d !== name), sheets };
       // Its blocks stay, as instances of a module that no longer exists (no ports, no wires): say where.
       const users = sheetsUsing(doc, name);
       pushDoc(doc, {
         notice: users.length ? `Deleted ${name}, which is still used as a block on ${users.join(', ')}. Undo brings it back.` : `Deleted ${name}. Undo brings it back.`,
+        // A block of it being placed from the library goes too.
+        placing: placingWith(s.placing, doc),
       });
-      const cut = s.path.findIndex((p) => p.drawn && p.module === name);
-      if (cut < 0) return refresh();
       // It is open (or a block of it is): back to the sheet it was opened from, else the drawing that takes its
-      // place in the list (the next one, or the one before the last), else the Verilog top.
-      if (cut > 0) return void get().openPath(s.path.slice(0, cut));
-      const next = drawn[Math.min(at, drawn.length - 1)];
-      if (next !== undefined) return void get().openPath([{ instance: next, module: next, drawn: true }]);
-      void openFallback();
+      // place in the list, else the Verilog top.
+      if (!leaveGoneDrawing(s.doc.drawn)) refresh();
     },
 
     copyDrawing(name) {
@@ -2154,7 +2181,8 @@ export const useStore = create<State>((set, get) => {
         ...new Set(
           sheet.nodes.flatMap((u) => {
             const m = u.sym === 'block' ? u.params.module : undefined;
-            const known = !m || doc.drawn.includes(m) || s.design?.modules[m] || s.blockDesign?.modules[m] || partNamed(doc.components, m);
+            // A module of the Verilog files counts while Yosys is still at work, or outside the chosen top.
+            const known = !m || doc.drawn.includes(m) || s.moduleNames.includes(m) || s.design?.modules[m] || s.blockDesign?.modules[m] || partNamed(doc.components, m);
             return known ? [] : [m];
           }),
         ),

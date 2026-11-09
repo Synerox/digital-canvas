@@ -10,7 +10,7 @@ import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/c
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-ident';
-import { deleteDrawingAsking } from './drawing-list';
+import { deleteQuestion } from './drawing-list';
 import { moduleTitle, staleSlices, useStore, viewModeOf } from './store';
 import { ui } from './ui-events';
 import { openSettings, partOfBlock, settingsOf } from './settings';
@@ -227,8 +227,11 @@ export function Inspector() {
           {drawn && (
             <button
               className="danger"
-              // As × in the Drawings list: asks only when other sheets use it (Undo brings it back, which the notice says).
-              onClick={() => deleteDrawingAsking(module)}
+              // Always asks (unlike × in the Drawings list): the next drawing opens in its place, and this button with it,
+              // under the pointer and with the focus, so a double-click or a held Enter would delete that one too.
+              onClick={() => {
+                if (confirm(deleteQuestion(module) ?? `Delete the drawing ${module}? (You can undo this.)`)) s.deleteDrawing(module);
+              }}
             >
               Delete drawing
             </button>

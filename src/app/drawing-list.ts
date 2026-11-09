@@ -34,13 +34,23 @@ interface Keys {
   ctrlKey: boolean;
   metaKey: boolean;
   altKey: boolean;
+  /** A repeat of a key held down. */
+  repeat?: boolean;
 }
+
+/** What a held key does once only: after a delete the next entry takes the focus, and the repeats would delete it too, and the next… */
+const ONCE: readonly DrawingKey[] = ['delete', 'cut', 'paste', 'duplicate'];
 
 /**
  * What a key pressed on a drawing's entry does. Undefined: the key is the app's as anywhere else (undo, save,
  * open, import, the letter keys of the canvas).
  */
 export function drawingKey(e: Keys): DrawingKey | undefined {
+  const action = keyAction(e);
+  return e.repeat && action && ONCE.includes(action) ? 'none' : action;
+}
+
+function keyAction(e: Keys): DrawingKey | undefined {
   if (e.altKey) return undefined;
   if (e.ctrlKey || e.metaKey) {
     const keys: Record<string, DrawingKey> = { c: 'copy', x: 'cut', v: 'paste', d: 'duplicate', a: 'canvas' };

@@ -4,8 +4,8 @@ import { emptyEdits } from '../editor/doc';
 import { newUserNode } from '../editor/symbols';
 import { useStore } from './store';
 
-const key = (k: string, mods: { ctrl?: boolean; meta?: boolean; alt?: boolean } = {}) =>
-  drawingKey({ key: k, ctrlKey: !!mods.ctrl, metaKey: !!mods.meta, altKey: !!mods.alt });
+const key = (k: string, mods: { ctrl?: boolean; meta?: boolean; alt?: boolean; repeat?: boolean } = {}) =>
+  drawingKey({ key: k, ctrlKey: !!mods.ctrl, metaKey: !!mods.meta, altKey: !!mods.alt, repeat: !!mods.repeat });
 
 describe('keys of the Drawings list', () => {
   it('takes Delete, Backspace and Ctrl/⌘ + C, X, V, D for the drawing; leaves the app its other keys', () => {
@@ -22,6 +22,13 @@ describe('keys of the Drawings list', () => {
     for (const k of ['f', 'l', 'i', 'Escape', 'F2', ' ']) expect(key(k)).toBeUndefined();
     expect(key('c', { ctrl: true, alt: true })).toBeUndefined();
     expect(key('Delete', { alt: true })).toBeUndefined();
+  });
+
+  it('acts once for a held Delete, Ctrl+X, Ctrl+V or Ctrl+D (the next entry takes the focus after a delete); held arrows repeat', () => {
+    expect([key('Delete', { repeat: true }), key('Backspace', { repeat: true })]).toEqual(['none', 'none']);
+    expect(['x', 'v', 'd'].map((k) => key(k, { ctrl: true, repeat: true }))).toEqual(['none', 'none', 'none']);
+    expect([key('ArrowDown', { repeat: true }), key('c', { ctrl: true, repeat: true })]).toEqual(['next', 'copy']);
+    expect(key('z', { ctrl: true, repeat: true })).toBeUndefined();
   });
 
   it('moves the focus to the next entry after a delete, or to the one before the last', () => {

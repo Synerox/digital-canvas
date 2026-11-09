@@ -214,6 +214,7 @@ export function Drawings() {
             <li key={d} data-drawing={d} className={d === current ? 'active' : undefined}>
               <button
                 className={`tree-item ${d === current ? 'active' : ''}`}
+                title={d}
                 onClick={(e) => {
                   // Safari does not give a clicked button the focus: the entry must have it to take the keys.
                   e.currentTarget.focus();
@@ -231,7 +232,9 @@ export function Drawings() {
                 tabIndex={-1}
                 // The focus stays where it is (on the canvas, its keys stay the canvas's).
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
+                onClick={(e) => {
+                  // The next entry moves up under the pointer: the second click of a double-click must not delete it too.
+                  if (e.detail > 1) return;
                   const had = document.activeElement?.closest('.drawings li')?.getAttribute('data-drawing') === d;
                   const after = entryAfterDelete(useStore.getState().doc.drawn, d);
                   if (deleteDrawingAsking(d) && had) focusEntry(after);
