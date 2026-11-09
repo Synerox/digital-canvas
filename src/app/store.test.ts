@@ -862,28 +862,6 @@ describe('store', () => {
     expect(box('u:1').y).toBe(100);
   });
 
-  it('opens a drawing saved with the beige theme in the one white look, and saves it without a theme', async () => {
-    const d: SheetEdits = { ...drawing([pin('u:1', 'input', 'a'), pin('u:2', 'output', 'y')]), pos: { 'u:1': { x: 0, y: 0 }, 'u:2': { x: 200, y: 0 } } };
-    const old = {
-      format: 'digital-canvas',
-      version: 1,
-      outlines: OUTLINES,
-      files: {},
-      rules: [],
-      viewMode: 'blocks',
-      theme: 'slides',
-      doc: { drawn: ['old'], sheets: { 'd:old': d } },
-      path: [{ instance: 'old', module: 'old', drawn: true }],
-    };
-    await st().loadSaved(JSON.stringify(old));
-    expect(st().layout!.nodes.map((n) => n.id).sort()).toEqual(['u:1', 'u:2']);
-    expect(st()).not.toHaveProperty('theme');
-    const saved = st().savedFile();
-    expect(saved).not.toHaveProperty('theme');
-    // The browser's copy of before (with its theme) is the same work, looked at the same way, as the one made now.
-    expect(copyKeys(JSON.stringify(old))).toEqual(copyKeys(JSON.stringify(saved)));
-  });
-
   it('makes that room for symbols deleted from a Verilog sheet too, and keeps clear of them, as Restore brings them back', async () => {
     const src = 'module top(input [3:0] a, input [3:0] b, output [3:0] y, output [3:0] z);\n  assign y = a + b;\n  assign z = a;\nendmodule\n';
     await open({ 't.v': src });
@@ -931,6 +909,28 @@ describe('store', () => {
     expect(box(add).y).toBe(20);
     st().restoreHidden();
     expect(apart(add, io('output', 'z'))).toBe(true);
+  });
+
+  it('opens a drawing saved with the beige theme in the one white look, and saves it without a theme', async () => {
+    const d: SheetEdits = { ...drawing([pin('u:1', 'input', 'a'), pin('u:2', 'output', 'y')]), pos: { 'u:1': { x: 0, y: 0 }, 'u:2': { x: 200, y: 0 } } };
+    const old = {
+      format: 'digital-canvas',
+      version: 1,
+      outlines: OUTLINES,
+      files: {},
+      rules: [],
+      viewMode: 'blocks',
+      theme: 'slides',
+      doc: { drawn: ['old'], sheets: { 'd:old': d } },
+      path: [{ instance: 'old', module: 'old', drawn: true }],
+    };
+    await st().loadSaved(JSON.stringify(old));
+    expect(st().layout!.nodes.map((n) => n.id).sort()).toEqual(['u:1', 'u:2']);
+    expect(st()).not.toHaveProperty('theme');
+    const saved = st().savedFile();
+    expect(saved).not.toHaveProperty('theme');
+    // The browser's copy of before (with its theme) is the same work, looked at the same way, as the one made now.
+    expect(copyKeys(JSON.stringify(old))).toEqual(copyKeys(JSON.stringify(saved)));
   });
 
   it('moves what is right of a gate that got wider with more inputs, rather than covering it', async () => {
