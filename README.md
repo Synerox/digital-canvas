@@ -26,12 +26,12 @@
 - **Ctrl+Z 回上一層**：切換到別張圖也是一個復原步驟。雙擊 block 進入子模組後按 Ctrl+Z 回到主模組（畫面停在離開時的位置），Ctrl+Shift+Z 再進去；breadcrumb、階層樹、手繪圖清單和（在 Verilog 圖上）Block diagram / Full circuit 切換都一樣。在子模組裡改過東西時，Ctrl+Z 先復原那些修改，再回上一層。切換圖不會清掉重做紀錄。
 - **JSON 元件**：符號庫最上面的「Components › Add…/Edit…」用 JSON 定義自己的元件，跟作品一起存檔。兩種：
   - 預設組合（preset）：內建符號加上設定，例如 `{ "name": "and5", "base": "and", "inputs": 5 }`、`{ "name": "mux4x8", "base": "mux", "inputs": 4, "width": 8 }`。可設定的欄位就是 Properties 裡的 `inputs`、`width`、`parts`、`shift`、`value`。改了預設組合（例如把 mux4x8 的 `width` 改成 16），從它放下的符號會一起改（同一個復原步驟）；單獨改過設定的符號就變成獨立的符號，不再跟著改；設定已經和預設組合不同的符號（例如從別的檔案貼上的）也不會被改。在 Components 視窗裡改名（同一個位置、同一種符號），放下的符號會跟著新名字。
-  - 自訂零件（part）：只有腳位、沒有內部邏輯，例如 `{ "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }`；腳位也可以只給數量 `"inputs": 6`（名稱 in0、in1…）。`width` 是沒寫位元的腳位（例如 `"a"`）的寬度；所有腳位一樣寬時，JSON 會寫成名稱加一個 `"width"`，改它就改到全部腳位。每個腳位都寫了自己的位元、`width` 卻跟每一個都不同時會提示錯誤，不會默默忽略。放置後是一個模組方塊，匯出 Verilog 時寫成空的 `(* blackbox *)` 模組。之後若匯入或畫了同名的模組，方塊就改用那個模組。
+  - 自訂零件（part）：只有腳位、沒有內部邏輯，例如 `{ "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] }`；腳位也可以只給數量 `"inputs": 6`（名稱 in0、in1…）。`width` 是沒寫位元的腳位（例如 `"a"`）的寬度；所有腳位一樣寬時，JSON 會寫成名稱加一個 `"width"`，改它就改到全部腳位。每個腳位都寫了自己的位元、`width` 卻跟每一個都不同時會提示錯誤，不會默默忽略。放置後是一個模組方塊（只有腳位的黑盒子）。之後若匯入或畫了同名的模組，方塊就改用那個模組。
   - 符號的 JSON 小視窗裡「Save as a component」把輸入的設定加進元件庫；在符號庫雙擊元件可以只改那一個。
 - **匯入 Verilog**：File › Import Verilog…（Ctrl+I）貼上或開檔，流程和 FSM Designer 相同。匯入後的圖可以直接編輯：移動、改名、刪除、加畫符號和導線。Verilog 決定電路結構，編輯另外以穩定 ID 存放，重新匯入修改過的 Verilog 時會保留手動位置、改名、刪除和手畫的部分；新出現的符號放在 ELK 建議的相對位置且不重疊。
 - **Auto layout**（L）隨時用 ELK 重新排版整張圖（可復原）。「Copy to new drawing」把匯入的圖複製成完全獨立的手繪圖。
 - **存檔**：Ctrl+S 下載 `.dcanvas.json`（含 Verilog 原始碼、手繪圖和所有編輯），Ctrl+O 開啟；另外會自動保留一份在瀏覽器中，重新整理不會遺失。
-- **匯出**：SVG / PNG（白底）；File › Export Verilog… 把目前這張圖轉成結構化 Verilog，並可用 Yosys 檢查。
+- **匯出**：SVG / PNG（白底）。（「匯出 Verilog」功能已移除。）
 - 介面操作參考 Analog Canvas（AGPL-3.0）的使用說明文件，程式碼完全自行撰寫，沒有使用其原始碼。
 
 ## 開發
@@ -50,7 +50,7 @@ npm run build    # 輸出到 dist/
 | 目錄 | 內容 |
 | --- | --- |
 | `src/core` | Yosys JSON 型別、Netlist IR、Diagram 模型（不依賴 DOM） |
-| `src/editor` | 編輯器核心：符號庫、文件格式（netlist 與 layout 分開）、編輯操作、走線器、幾何、Verilog 匯出 |
+| `src/editor` | 編輯器核心：符號庫、文件格式（netlist 與 layout 分開）、編輯操作、走線器、幾何 |
 | `src/yosys` | Yosys 指令、Web Worker 與載入器 |
 | `src/layout` | ELK.js 排版 |
 | `src/render` | 教科書風格 SVG 繪製、配色、匯出 |

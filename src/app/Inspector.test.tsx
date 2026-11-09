@@ -17,7 +17,7 @@ const files = { 'a.v': Array.from({ length: 60 }, (_, i) => `// line ${i + 1}`).
 /** Render the Inspector for a state (on the server it reads the store's initial state, the server snapshot of useSyncExternalStore). */
 function render(state: object): string {
   Object.assign(useStore.getInitialState(), state);
-  return renderToStaticMarkup(<Inspector onExportVerilog={() => {}} />);
+  return renderToStaticMarkup(<Inspector />);
 }
 
 /** The Inspector's text for one selected imported symbol. */

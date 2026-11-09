@@ -64,7 +64,7 @@ export interface DNode {
    * Only values that differ from what a drawn symbol assumes (rising clock, active-high
    * enable and reset, reset to 0, unsigned operands) are kept, so a cell without `params`
    * behaves like the library symbol of the same type. A memory ($mem_v2) keeps all of its
-   * parameters (size, initial values, port clocks), which the export needs to write it.
+   * parameters (size, initial values, port clocks).
    */
   params?: Record<string, string>;
 }
@@ -88,8 +88,6 @@ export interface DEdge {
    * rename it to anything, so what the edge carries is in `fullSource`, `bits` and `shift`.
    */
   label?: string;
-  /** Name of the driving signal, for highlighting. */
-  netName?: string;
   /** Which bits of the source port the edge carries, when not all of them. */
   bits?: { lo: number; width: number };
   /**
@@ -202,9 +200,9 @@ const SEMANTIC_PARAMS = [
 
 /** The semantic parameters of a primitive cell that differ from the defaults, or undefined when none do. */
 function semanticParams(c: IRCell): Record<string, string> | undefined {
-  // Instances, blackboxes and the rules' dc: cells carry no parameters the export reads.
+  // Instances, blackboxes and the rules' dc: cells carry no parameters that change what they compute.
   if (c.isInstance || !c.type.startsWith('$')) return undefined;
-  // A memory has no library symbol: its size, initial values and port kinds are all needed to write it.
+  // A memory has no library symbol: its size, initial values and port kinds are all part of what it is.
   if (c.type === '$mem_v2') return Object.fromEntries(Object.entries(c.parameters).map(([k, v]) => [k, v.trim()]));
   const out: Record<string, string> = {};
   for (const k of SEMANTIC_PARAMS) {
@@ -339,8 +337,7 @@ export function buildDiagram(
       sinks.push({ node: id, port: inp.id, bits: p.bits, range: { offset: p.offset, upto: p.upto } });
     }
     const net = m.nets.find((x) => x.name === p.name && !x.hidden);
-    // The ports of an automatic block are named by the app (`mix[1:0]`, `in0`), not by the user.
-    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [], ...(m.auto ? { attrs: { autoName: p.name } } : {}) });
+    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [] });
   }
   nodes.push(...pinNodes);
 
@@ -480,7 +477,6 @@ export function buildDiagram(
       width: len,
       fullSource,
       label: note ? [fullSource ? undefined : name, note].filter(Boolean).join(' ') : fullSource && fullSink ? undefined : name,
-      netName: name,
       ...(fullSource ? {} : { bits: { lo: d.index, width: len } }),
       ...(shift ? { shift } : {}),
     });
@@ -583,7 +579,7 @@ export function buildDiagram(
         width: count,
         fullSource: full,
         label: full ? undefined : runLabel(d, count, d.bits),
-        // The same bits the label names: the export reads them here, never from the label.
+        // The same bits the label names: the editor reads them here, never from the label.
         ...(full || d.index + count > d.width ? {} : { bits: { lo: d.index, width: count } }),
       });
     }

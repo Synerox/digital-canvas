@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { type DNode, type DPort, type Diagram, type Side, buildDiagram } from '../core/diagram';
+import { type DEdge, type DNode, type DPort, type Diagram, type Side, buildDiagram } from '../core/diagram';
 import { DEFAULT_RULES } from '../core/rules';
 import { design } from '../core/test-utils';
 import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { type LayoutResult, type MeasureText, approxMeasure, layoutDiagram, sizeNode } from '../layout/elk-layout';
-import { checkSheet } from './check';
+import { checkSheet, wireShift } from './check';
 import { buildGeometry } from './geometry';
 import { polylineHitsRect } from './router';
 import { type SheetEdits, emptyEdits, parseSavedFile, type SavedFile } from './doc';
@@ -14,6 +14,7 @@ import {
   connect,
   copyNodes,
   deleteItems,
+  drawingPorts,
   effectiveDiagram,
   layoutToEdits,
   moveNodes,
@@ -28,9 +29,43 @@ import {
   toUserNode,
 } from './sheet';
 import { type InterfaceOf, SYMBOLS, type SymKey, type SymParams, newUserNode, symbolNode } from './symbols';
-import { diagramToVerilog } from './verilog-export';
 
 const noModules: InterfaceOf = () => undefined;
+
+/**
+ * What a wire carries: its source port, `[hi:lo]` when it carries a slice of it, and `<<n` when it
+ * appends n low zero bits. The zero bits are read from `shift` as the editor reads them: a label is only text.
+ */
+const carried = (x: DEdge) =>
+  `${x.source.port}${x.bits ? `[${x.bits.lo + x.bits.width - 1}:${x.bits.lo}]` : ''}${wireShift(x) ? `<<${wireShift(x)}` : ''}`;
+
+/** What drives an input port: what each wire into it carries. */
+const feeds = (d: Diagram, port: string) => d.edges.filter((x) => x.target.port === port).map(carried);
+
+/**
+ * What a diagram computes, to compare two that must do the same: each symbol's kind, cell type,
+ * Yosys parameters, block module and ports in order (a concatenation joins its inputs in that order,
+ * the first on top), the names of pins (the module's ports) and values of constants, and which bits
+ * every wire carries from where to where. Display text (operators, wire labels, instance names) is left out.
+ */
+function logic(d: Diagram) {
+  const named = new Set(['input', 'output', 'inout', 'const']);
+  const nodes = d.nodes
+    .filter((n) => n.kind !== 'text')
+    .map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      cellType: n.cellType,
+      module: n.moduleName,
+      params: n.params,
+      invertB: n.attrs?.invertB,
+      name: named.has(n.kind) ? n.label : undefined,
+      ports: n.ports.map((p) => `${p.name}:${p.dir}${p.inout ? ':inout' : ''}:${p.width}`),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const edges = d.edges.map((x) => `${carried(x)} -> ${x.target.port} (${x.width})`).sort();
+  return { nodes, edges };
+}
 
 const V1 = `module t(input [3:0] a, input [3:0] b, input s, output [3:0] y, output z);
   wire [3:0] sum = a + b;
@@ -349,9 +384,12 @@ describe('wires joined to a sliced wire', () => {
       expect(d.edges.find((x) => x.id === id)).toMatchObject({ source: { port: `${a}.out` }, width: 2, bits: { lo: 2, width: 2 } });
     }
     expect(checkSheet(d).messages).toEqual([]);
-    const v = diagramToVerilog(d, 'm');
-    for (const y of ['y1', 'y2', 'y3']) expect(v.code).toContain(`assign ${y} = ~a[3:2];`);
-    expect(v.warnings).toEqual([]);
+    // Each output is the inverse of a[3:2].
+    for (const [k, n] of [n1, n2, n3].entries()) {
+      expect(feeds(d, `${n}.A`), n).toEqual([`${a}.out[3:2]`]);
+      const y = d.nodes.find((x) => x.label === `y${k + 1}`)!;
+      expect(feeds(d, `${y.id}.in`), y.label).toEqual([`${n}.Y`]);
+    }
     // The same bits again are a duplicate; the whole bus is a different wire.
     expect(resolveConnection(d, onWire(w1), at(`${n2}.A`))).toEqual({ error: 'These pins are already connected.' });
     expect(resolveConnection(d, at(`${a}.out`), at(`${n2}.A`))).not.toHaveProperty('error');
@@ -365,7 +403,7 @@ describe('wires joined to a sliced wire', () => {
     const y2 = s.add('output', 'y2', { width: 2 });
     const w = s.wire(onWire(edge.id), `${y2}.in`);
     expect(s.d.edges.find((x) => x.id === w)).toMatchObject({ source: edge.source, width: 2, bits: { lo: 2, width: 2 } });
-    expect(diagramToVerilog(s.d, 't').code).toContain('assign y2 = a[3:2];');
+    expect(feeds(s.d, `${y2}.in`)).toEqual(['in:a.out[3:2]']);
   });
 
   it('keep the zero bits of a scaled (×4) wire they tap or join', async () => {
@@ -381,9 +419,8 @@ describe('wires joined to a sliced wire', () => {
     const w2 = s.wire(`${joined}.in`, scaled.target.port);
     for (const id of [w1, w2]) expect(s.d.edges.find((x) => x.id === id), id).toMatchObject({ source: scaled.source, width: 2, shift: 2 });
     expect(checkSheet(s.d).messages).toEqual([]);
-    const v = diagramToVerilog(s.d, 't');
-    expect(v.code).toContain("assign tap = {b, 2'd0};");
-    expect(v.code).toContain("assign joined = {b, 2'd0};");
+    // Both outputs are {b, 2'b00}.
+    for (const id of [tap, joined]) expect(feeds(s.d, `${id}.in`), id).toEqual(['in:b.out<<2']);
     // The scaled bits again are a duplicate; the plain bus is a different wire.
     expect(resolveConnection(s.d, onWire(scaled.id), at(`${tap}.in`))).toEqual({ error: 'These pins are already connected.' });
     expect(resolveConnection(s.d, at(scaled.source.port), at(`${tap}.in`))).not.toHaveProperty('error');
@@ -397,9 +434,18 @@ describe('wires joined to a sliced wire', () => {
     const w = d.wire(`${b}.out`, `${add}.B`);
     d.e = { ...d.e, edges: d.e.edges.map((x) => (x.id === w ? { ...x, shift: 2 } : x)) };
     const t = d.wire(onWire(w), `${y}.in`);
-    expect(diagramToVerilog(d.d, 'm').code).toContain("assign y = {b, 2'd0};");
+    expect(d.d.edges.find((x) => x.id === t)).toMatchObject({ source: { port: `${b}.out` }, width: 2, shift: 2 });
+    expect(feeds(d.d, `${add}.B`)).toEqual([`${b}.out<<2`]);
+    expect(feeds(d.d, `${y}.in`)).toEqual([`${b}.out<<2`]);
     d.e = { ...d.e, edges: d.e.edges.map((x) => (x.id === w || x.id === t ? { ...x, shift: undefined, label: '×4' } : x)) };
-    expect(diagramToVerilog(d.d, 'm').code).not.toContain("2'd0}");
+    for (const id of [w, t]) {
+      const x = d.d.edges.find((x) => x.id === id)!;
+      expect(x.label, id).toBe('×4');
+      expect(x.shift, id).toBeUndefined();
+      expect(wireShift(x), id).toBe(0);
+    }
+    expect(feeds(d.d, `${y}.in`)).toEqual([`${b}.out`]);
+    expect(feeds(d.d, `${add}.B`)).toEqual([`${b}.out`]);
   });
 });
 
@@ -692,12 +738,13 @@ describe('imported symbols', () => {
     const base = buildDiagram(await design({ 't.v': "module t(input [3:0] b, output y);\n  assign y = b != 4'd5;\nendmodule\n" }), 't');
     const k = base.nodes.find((n) => n.kind === 'const')!;
     expect(k.label).toBe("4'd5");
-    const before = diagramToVerilog(effectiveDiagram('t', base, emptyEdits(), noModules), 't');
+    const before = effectiveDiagram('t', base, emptyEdits(), noModules);
     for (const text of ['ZERO', "4'd7"]) {
       const d = effectiveDiagram('t', base, rename(emptyEdits(), k.id, text), noModules);
       const n = d.nodes.find((x) => x.id === k.id)!;
       expect(n.label).toBe("4'd5");
-      expect(diagramToVerilog(d, 't')).toEqual(before);
+      // The sheet is the same in every way, its logic included.
+      expect(d).toEqual(before);
       expect(toUserNode(n, 'u:1', noModules).params.value).toBe("4'd5");
     }
   });
@@ -708,10 +755,45 @@ describe('imported symbols', () => {
     const d = effectiveDiagram('w2', undefined, drawing, noModules);
     for (const n of d.nodes) for (const p of n.ports) expect(p.width, `${n.id}.${p.name}`).toBe(300);
     expect(checkSheet(d).messages).toEqual([]);
-    const v = diagramToVerilog(d, 'w2');
-    expect(v.code).toContain('input wire [299:0] a');
-    expect(v.code).toContain('output wire [299:0] y');
-    expect(v.warnings).toEqual([]);
+    expect(drawing.nodes.filter((n) => n.raw?.kind === 'input' || n.raw?.kind === 'output').map((n) => n.raw!.label)).toEqual(['a', 'y']);
+    // The frozen copies are pins all the same: the drawing computes what the sheet did, and its blocks have both ports.
+    expect(logic(d)).toEqual(logic(base));
+    expect(drawingPorts(drawing).map(({ name, dir, width }) => ({ name, dir, width }))).toEqual([
+      { name: 'a', dir: 'input', width: 300 },
+      { name: 'y', dir: 'output', width: 300 },
+    ]);
+  });
+
+  it('keep what an imported wire carries when it is renamed or its name cleared', async () => {
+    const src = "module sc(input [3:0] a, input [3:0] b, output [5:0] y, output [1:0] z);\n  assign y = a + {b, 2'b00};\n  assign z = a[3:2];\nendmodule\n";
+    const base = buildDiagram(await design({ 'sc.v': src }), 'sc', DEFAULT_RULES);
+    const scaled = base.edges.find((x) => x.shift)!;
+    const sliced = base.edges.find((x) => x.target.port === 'out:z.in')!;
+    expect(scaled).toMatchObject({ shift: 2, label: '×4' });
+    expect(carried(sliced)).toBe('in:a.out[3:2]');
+    // A label is only text: one that names other bits or another scale changes nothing it carries.
+    for (const text of ['b_shifted', 'a[1:0] ×8', '']) {
+      for (const x of [scaled, sliced]) {
+        const d = effectiveDiagram('sc', base, rename(emptyEdits(), x.id, text), noModules);
+        const e = d.edges.find((w) => w.id === x.id)!;
+        expect(e.label, text).toBe(text || undefined);
+        expect(carried(e), text).toBe(carried(x));
+        expect(logic(d), text).toEqual(logic(base));
+      }
+    }
+  });
+
+  it('name a renamed instance by its new name, and by its Verilog name again when the name is cleared', async () => {
+    const src = 'module leaf(input a, output y);\n  assign y = ~a;\nendmodule\nmodule top(input a, output y);\n  leaf u_leaf(.a(a), .y(y));\nendmodule\n';
+    const base = buildDiagram(await design({ 'top.v': src }), 'top');
+    const inst = base.nodes.find((n) => n.kind === 'instance')!;
+    expect(inst).toMatchObject({ moduleName: 'leaf', instanceName: 'u_leaf' });
+    const renamed = effectiveDiagram('top', base, rename(emptyEdits(), inst.id, 'first'), noModules).nodes.find((n) => n.id === inst.id)!;
+    expect(renamed).toMatchObject({ subLabel: 'first', instanceName: 'u_leaf', moduleName: 'leaf' });
+    const cleared = effectiveDiagram('top', base, rename(emptyEdits(), inst.id, ''), noModules).nodes.find((n) => n.id === inst.id)!;
+    expect(cleared.subLabel).toBeUndefined();
+    expect(cleared.instanceName).toBe('u_leaf');
+    expect(logic(effectiveDiagram('top', base, rename(emptyEdits(), inst.id, 'first'), noModules))).toEqual(logic(base));
   });
 });
 
@@ -724,11 +806,11 @@ describe('Copy to new drawing', () => {
       ['[3:0]', '{a, b, c, d}', 'concat'],
     ]) {
       const base = buildDiagram(await design({ 't.v': body(range, rhs) }), 't');
-      const before = diagramToVerilog(base, 't').code;
       const drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
       // The bar stays a frozen copy when a Concatenate would name its slices from the other end.
       expect(drawing.nodes.find((n) => n.sym === 'concat' || n.raw?.kind === 'join')?.sym, range).toBe(bar);
-      expect(diagramToVerilog(effectiveDiagram('t', undefined, drawing, noModules), 't').code, range).toBe(before);
+      // Every input of the bar is in its place, and wired as before.
+      expect(logic(effectiveDiagram('t', undefined, drawing, noModules)), range).toEqual(logic(base));
     }
   });
 
@@ -765,14 +847,20 @@ endmodule
     const drawing = toDrawing(base, await layoutDiagram(base), emptyEdits(), noModules);
     const withParams = base.nodes.filter((n) => n.params);
     expect(withParams.length).toBeGreaterThanOrEqual(2);
+    // A falling clock edge, a reset to 5 and signed operands (Yosys writes them in binary).
+    const set = (v: string | undefined) => v !== undefined && /1/.test(v);
+    expect(withParams.some((n) => n.params?.CLK_POLARITY !== undefined && !set(n.params.CLK_POLARITY))).toBe(true);
+    expect(withParams.some((n) => n.params?.ARST_VALUE !== undefined && parseInt(n.params.ARST_VALUE, 2) === 5)).toBe(true);
+    expect(withParams.some((n) => set(n.params?.A_SIGNED) && set(n.params?.B_SIGNED))).toBe(true);
+    const d = effectiveDiagram('t', undefined, drawing, noModules);
     for (const n of withParams) {
       const u = drawing.nodes.find((x) => x.raw?.cellType === n.cellType);
       expect(u?.sym, n.cellType).toBe('raw');
       expect(u?.raw?.params).toEqual(n.params);
+      // The drawn symbol carries them too.
+      expect(d.nodes.find((x) => x.id === u?.id)?.params, n.cellType).toEqual(n.params);
     }
-    const { code } = diagramToVerilog(effectiveDiagram('t', undefined, drawing, noModules), 't');
-    expect(code).toContain('negedge');
-    expect(code).toContain('$signed');
+    expect(logic(d)).toEqual(logic(base));
   });
 
   it('keeps the zero bits of scaled wires when they are copied and renamed', async () => {
@@ -783,12 +871,10 @@ endmodule
     expect(drawing.edges.filter((x) => x.shift).length).toBe(scaled.length);
     // A renamed label no longer says ×4, but the wire still carries the low zero bits.
     drawing = { ...drawing, edges: drawing.edges.map((x) => (x.shift ? { ...x, label: 'renamed' } : x)) };
-    const before = diagramToVerilog(base, 'score_calc').code;
-    const after = diagramToVerilog(effectiveDiagram('score_calc', undefined, drawing, noModules), 'score_calc').code;
-    // Appended low zero bits are written as the last part of a concatenation: `{x, 2'd0}`.
-    const zeros = (code: string) => (code.match(/, \d+'d0\}/g) ?? []).length;
-    expect(zeros(after)).toBe(zeros(before));
-    expect(zeros(after)).toBeGreaterThan(0);
+    const after = effectiveDiagram('score_calc', undefined, drawing, noModules);
+    expect(after.edges.filter((x) => x.label === 'renamed' && wireShift(x) > 0).length).toBe(scaled.length);
+    // Every wire carries the same bits as before, the low zero bits included.
+    expect(logic(after)).toEqual(logic(base));
   });
 
   it('reports a block whose module is gone', () => {
@@ -797,7 +883,6 @@ endmodule
     const d = effectiveDiagram('m', undefined, e, noModules);
     expect(d.nodes[0].attrs?.missingModule).toBe(true);
     expect(checkSheet(d).messages.join(' ')).toContain('gone, which no longer exists');
-    expect(diagramToVerilog(d, 'm').warnings.join(' ')).toContain("Module 'gone' of instance");
   });
 
   it('does not draw an inout pin wired to itself', async () => {
@@ -901,7 +986,7 @@ describe('a wire that taps or joins a scaled (×4) wire', () => {
     const joined = s.add('output', 'joined', { width: 4 });
     const w1 = s.wire(onWire(scaled.id), `${tap}.in`);
     const w2 = s.wire(`${joined}.in`, scaled.target.port);
-    // Without the note the new wire would read as b zero-extended, while the export writes {b, 2'd0}.
+    // Without the note the new wire would read as b zero-extended, while it carries {b, 2'b00}.
     for (const id of [w1, w2]) expect(s.d.edges.find((x) => x.id === id), id).toMatchObject({ width: 2, shift: 2, label: scaled.label });
     expect(checkSheet(s.d).messages).toEqual([]);
 
@@ -928,7 +1013,7 @@ describe('repeated pin names', () => {
   const shown = (s: Drawing) => buildGeometry({ netlist: s.d, pos: s.e.pos, routes: s.e.routes, measure: approxMeasure }).layout;
   const pinLabels = (s: Drawing) => s.d.nodes.filter((n) => n.kind === 'input' || n.kind === 'output').map((n) => n.label);
 
-  it('are reported with the names the Verilog gives them', () => {
+  it('are reported with the port names blocks of the drawing give them', () => {
     const s = new Drawing();
     const a = s.add('input', 'a');
     const y = s.add('output', 'y');
@@ -937,18 +1022,24 @@ describe('repeated pin names', () => {
     const a2 = s.add('input', 'a');
     const y2 = s.add('output', 'y');
     s.wire(`${a2}.out`, `${y2}.in`);
-    expect(diagramToVerilog(s.d, 'm').code).toContain('assign y_2 = a_2;');
+    // Each pair keeps its own wire, and a block of the drawing has a port for each pin.
+    expect(feeds(s.d, `${y}.in`)).toEqual([`${a}.out`]);
+    expect(feeds(s.d, `${y2}.in`)).toEqual([`${a2}.out`]);
+    expect(drawingPorts(s.e).map((p) => `${p.pin}:${p.name}`)).toEqual([`${a}:a`, `${y}:y`, `${a2}:a_2`, `${y2}:y_2`]);
     expect(checkSheet(s.d).messages).toEqual([
-      'Two pins are named a; the Verilog calls the second a_2.',
-      'Two pins are named y; the Verilog calls the second y_2.',
+      'Two pins are named a; blocks of this drawing call the second a_2.',
+      'Two pins are named y; blocks of this drawing call the second y_2.',
     ]);
-    // Names that only become the same in Verilog, three of a name, and a name the export has given away.
+    // On a Verilog sheet the blocks take their ports from the Verilog: pin names are only labels there.
+    expect(checkSheet(s.d, { verilog: true }).messages).toEqual([]);
+    // Names that only become the same in Verilog, three of a name, and a name another pin's port has taken.
     const t = new Drawing();
     for (const n of ['a b', 'a_b', 'q', 'q', 'q', 'q_2']) t.add('input', n);
+    expect(drawingPorts(t.e).map((p) => p.name)).toEqual(['a b', 'a_b_2', 'q', 'q_2', 'q_3', 'q_2_2']);
     expect(checkSheet(t.d).messages).toEqual([
-      'Pins a b and a_b have the same Verilog name a_b; the Verilog calls the second a_b_2.',
-      '3 pins are named q; the Verilog calls the others q_2 and q_3.',
-      'Another pin is written as q_2, so the Verilog calls pin q_2 q_2_2.',
+      'Pins a b and a_b have the same Verilog name a_b; blocks of this drawing call the second a_b_2.',
+      '3 pins are named q; blocks of this drawing call the others q_2 and q_3.',
+      "Another pin's port is q_2, so blocks of this drawing call pin q_2 q_2_2.",
     ]);
   });
 
@@ -970,9 +1061,10 @@ describe('repeated pin names', () => {
     expect(pinLabels(s)).toEqual(['a', 'y', 'in1', 'in2', 'a2', 'y2', 'in3', 'in4']);
     expect(s.d.nodes.filter((n) => n.kind === 'instance').map((n) => n.subLabel)).toEqual(['u1', 'u2']);
     expect(checkSheet(s.d).messages).toEqual([]);
-    const v = diagramToVerilog(s.d, 'm');
-    expect(v.code).toContain('assign y2 = a2;');
-    expect(v.warnings.filter((w) => /used more than once/.test(w))).toEqual([]);
+    // Every pin is a port of its own name; the pasted y is fed by the pasted a.
+    expect(drawingPorts(s.e).map((p) => p.name)).toEqual(pinLabels(s));
+    const pin = (label: string) => s.d.nodes.find((n) => n.label === label)!.id;
+    expect(feeds(s.d, `${pin('y2')}.in`)).toEqual([`${pin('a2')}.out`]);
     // The pasted wires join the pasted symbols.
     const copies = s.d.edges.filter((x) => pasted.includes(x.id));
     expect(copies).toHaveLength(2);

@@ -106,7 +106,7 @@ describe('the JSON window', () => {
 describe('Properties of a drawing', () => {
   const inspect = (id: string, aluDrawn = false) => {
     state(aluDrawn).selection = new Set([id]);
-    return renderToStaticMarkup(<Inspector onExportVerilog={() => {}} />);
+    return renderToStaticMarkup(<Inspector />);
   };
 
   it('keeps to what is needed: the JSON is in its own window, the pins folded', () => {

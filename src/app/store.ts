@@ -42,6 +42,7 @@ import {
   connect,
   copyNodes,
   deleteItems,
+  drawingPorts,
   effectiveDiagram,
   fitNewOutlines,
   fitWider,
@@ -64,11 +65,11 @@ import {
   toDrawing,
   userIds,
 } from '../editor/sheet';
-import { type InterfaceOf, type ModulePort, type SymKey, type SymParams, type UserNode, clampParam, newUserNode, symbolNode } from '../editor/symbols';
+import { type InterfaceOf, type SymKey, type SymParams, type UserNode, newUserNode, symbolNode } from '../editor/symbols';
 import { orthogonalize } from '../editor/router';
 import { legContaining } from '../editor/draw-wire';
 import { type SheetIssues, checkSheet } from '../editor/check';
-import { verilogIdent } from '../editor/verilog-export';
+import { verilogIdent } from '../editor/verilog-ident';
 import { type ComponentDef, componentSymbol, followsPreset, isPart, partInterface, partNamed } from '../editor/components';
 
 export type { PathEntry, ViewMode } from '../editor/doc';
@@ -415,7 +416,7 @@ const rulesKey = (rules: ReadonlySet<RuleId>) => RULES.map((r) => (rules.has(r.i
 function uniqueModuleName(want: string, taken: Set<string>): string {
   let base = want.replace(/[^A-Za-z0-9_$]/g, '_');
   if (!/^[A-Za-z_]/.test(base)) base = `m_${base}`;
-  // Never a Verilog keyword: the export would have to write the module under another name.
+  // Never a Verilog keyword: no Verilog module can have that name.
   base = verilogIdent(base);
   if (!taken.has(base)) return base;
   for (let i = 2; ; i++) if (!taken.has(`${base}_${i}`)) return `${base}_${i}`;
@@ -433,47 +434,6 @@ export function viewModeOf(key: string): ViewMode | undefined {
 /** Whether two paths go down the same instances to the same sheet. */
 export function samePath(a: readonly PathEntry[], b: readonly PathEntry[]): boolean {
   return a.length === b.length && a.every((x, i) => x.instance === b[i].instance && x.module === b[i].module && !x.drawn === !b[i].drawn);
-}
-
-export interface DrawingPort extends ModulePort {
-  /** The pin symbol (u:<n>) the port comes from. */
-  pin: string;
-}
-
-/**
- * The ports of a block that instantiates a drawing: one per pin, in drawing
- * order. diagramToVerilog writes each pin as verilogIdent(label), made unique
- * with _2, _3… in the same order. A port is named like its pin when the
- * export writes verilogIdent of that name (the instance's .name() then matches
- * the module's port), and takes the written name when the pin had to be made
- * unique (`a b` and `a_b` are both a_b; input x and output x): otherwise the
- * instance connects the wrong port and a pin is lost. Pins keep their names in
- * the common case, so block port IDs (`<block>.<name>`) in saved work stay valid.
- */
-export function drawingPorts(e: SheetEdits | undefined): DrawingPort[] {
-  const ports: DrawingPort[] = [];
-  const used = new Set<string>();
-  const seen = new Set<string>();
-  for (const n of e?.nodes ?? []) {
-    // A pin wider than a library pin is a frozen copy (`raw`, see toUserNode); the export writes it as a port all the same.
-    const raw = n.sym === 'raw' ? n.raw : undefined;
-    const dir = raw ? raw.kind : n.sym;
-    if (dir !== 'input' && dir !== 'output' && dir !== 'inout') continue;
-    // effectiveDiagram draws a repeated ID once.
-    if (seen.has(n.id)) continue;
-    seen.add(n.id);
-    // The label symbolNode gives the pin, and the take() rule of diagramToVerilog.
-    const label = raw ? n.name || raw.label : n.name || (dir === 'input' ? 'in' : dir === 'output' ? 'out' : 'io');
-    const ident = verilogIdent(label);
-    let written = ident;
-    for (let i = 2; used.has(written); i++) written = `${ident}_${i}`;
-    used.add(written);
-    const own = label.trim();
-    // The width the module header gets (see diagramToVerilog).
-    const width = raw ? Math.max(1, (raw.ports.find((q) => q.dir === (dir === 'output' ? 'in' : 'out')) ?? raw.ports[0])?.width ?? 1) : clampParam('width', n.params.width, 1);
-    ports.push({ pin: n.id, name: own && verilogIdent(own) === written ? own : written, dir, width });
-  }
-  return ports;
 }
 
 /**
@@ -809,8 +769,8 @@ export function followParamods(doc: EditDoc, before: IRDesign, after: IRDesign):
 
 /**
  * Wires drawn with a bit range that their source no longer has (it was made
- * narrower since): the sheet draws them, and the Verilog export writes them,
- * as carrying all of the source, which their labels (`d[7:4]`) hide.
+ * narrower since): the sheet takes them as carrying all of the source, which
+ * their labels (`d[7:4]`) hide.
  */
 export function staleSlices(d: Diagram, e: SheetEdits | undefined): { edge: string; source: string; text: string }[] {
   const own = (n: DNode) => (n.kind === 'input' || n.kind === 'output' || n.kind === 'inout' || n.kind === 'const' ? n.label : (n.subLabel ?? n.label));
@@ -1161,7 +1121,7 @@ export const useStore = create<State>((set, get) => {
     // run through a symbol placed now are routed again, as after a move.
     const moved = placed.length ? new Set([...(opts.moved ?? []), ...placed]) : opts.moved;
     const g = buildGeometry({ netlist, pos, routes, measure, fast: !!opts.fast, moved, previous: s.layout });
-    let issues = checkSheet(netlist);
+    let issues = checkSheet(netlist, { verilog: !drawn });
     // A wire whose bit range its source no longer has carries all of it, which its label hides (see staleSlices).
     const stale = staleSlices(netlist, e);
     if (stale.length) issues = { ...issues, flagged: new Set([...issues.flagged, ...stale.map((w) => w.edge)]), messages: [...issues.messages, ...stale.map((w) => w.text)] };
@@ -1320,8 +1280,8 @@ export const useStore = create<State>((set, get) => {
   };
 
   /**
-   * Drawings and Verilog modules share one namespace: blocks, drill-down and the
-   * Verilog export find a module by name. New and renamed drawings avoid the
+   * Drawings and Verilog modules share one namespace: blocks and drill-down
+   * find a module by name. New and renamed drawings avoid the
    * names of Verilog modules, but Verilog imported later can declare one. Such a
    * drawing is renamed, with the blocks that use it, also in the undo history,
    * so that no undo brings the clash back.
@@ -1974,10 +1934,13 @@ export const useStore = create<State>((set, get) => {
       const isPin = (n: DNode) => n.kind === 'input' || n.kind === 'output' || n.kind === 'inout';
       const n = d?.nodes.find((x) => x.id === id);
       const want = text.trim() ? verilogIdent(text.trim()) : undefined;
-      // Two pins of one name would be two ports of one name: the export would rename the second.
+      // Two pins of one name would read as one signal, but a block of a drawing gives them two ports (see drawingPorts).
       const other = n && want && isPin(n) ? d!.nodes.find((x) => x.id !== id && isPin(x) && verilogIdent(x.label) === want) : undefined;
       if (other) {
-        const why = `Another pin is named ${other.label}; the Verilog would call this one ${want}_2. Pick another name.`;
+        const why =
+          other.label.trim() === text.trim()
+            ? `Another pin is named ${other.label}. Pick another name.`
+            : `Another pin, ${other.label}, has the same Verilog name ${want}. Pick another name.`;
         set({ notice: why });
         return why;
       }
@@ -2235,9 +2198,8 @@ export const useStore = create<State>((set, get) => {
       // The files changed meanwhile: these blocks are gone.
       if (get().blockDesign !== blockDesign) return;
       const now = get();
-      // The new drawings take no module's name, nor the name the Verilog export gives an automatic block
-      // or Yosys's copy of a parameterized module (top/score → top_score): the export would then write
-      // those under other names, with warnings about names the user never wrote.
+      // The new drawings take no module's name, nor the Verilog name of an automatic block or of
+      // Yosys's copy of a parameterized module (top/score → top_score), so no two modules read alike.
       const madeUp = Object.keys(blockDesign?.modules ?? {}).map(verilogIdent);
       const taken = new Set([...now.doc.drawn, ...Object.keys(now.design?.modules ?? {}), ...now.moduleNames, ...madeUp, ...partNames()]);
       const name = uniqueModuleName(`${module.replace(/^.*\//, '')}_drawing`, taken);
@@ -2263,8 +2225,8 @@ export const useStore = create<State>((set, get) => {
       const retarget = (e: SheetEdits): SheetEdits => {
         const ports = new Map<string, Map<string, string>>();
         // An automatic block is often named after the output it drives (block game_result, output game_result).
-        // The Verilog export of the sheet names that instance apart from the port without a word, as the name is
-        // made up; the copy names its block the same way, or its export warns about a name the user never gave.
+        // In Verilog an instance and a port of one module cannot share a name: the copy names its block apart
+        // from the pins (game_result_2), as that name is made up and the pin's is the user's.
         const pinKinds: readonly string[] = ['input', 'output', 'inout'];
         const pinSym = (u: UserNode) => pinKinds.includes(u.sym === 'raw' ? (u.raw?.kind ?? '') : u.sym);
         const used = new Set([

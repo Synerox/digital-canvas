@@ -6,7 +6,7 @@ import { type PathEntry, moduleTitle, sameFile, useStore } from './store';
 
 /**
  * The name an instance has on its parent's sheet in this view: as it was renamed there (the
- * block shows it, and the Verilog export writes it), or as the Verilog names it.
+ * block shows it), or as the Verilog names it.
  */
 function instanceName(view: IRDesign | undefined, doc: EditDoc, mode: ViewMode, parent: PathEntry, instance: string): string {
   const cell = view?.modules[parent.module]?.cells.find((c) => c.isInstance && c.name === instance);

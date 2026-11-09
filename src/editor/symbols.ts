@@ -7,7 +7,7 @@
  * as the bus width or the number of inputs re-derives the ports.
  *
  * Cell types reuse the Yosys names where one exists ($and, $add, $mux, $dff…)
- * so that drawn and imported symbols look the same and export the same way.
+ * so that drawn and imported symbols look and behave the same.
  * Symbols Yosys has no cell for use `dc:` types (dc:nand, dc:mux, dc:decoder…).
  */
 import type { DNode, DPort, Side } from '../core/diagram';
@@ -239,7 +239,7 @@ const OP_LABEL: Record<string, string> = {
 /** Names of a gate's inputs: up to X (Y is its output). */
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWX';
 
-/** The name of a gate's input `k`: A, B… X, then I24, I25… (the export goes by their order). */
+/** The name of a gate's input `k`: A, B… X, then I24, I25… */
 export function gateInputName(k: number): string {
   return k < LETTERS.length ? LETTERS[k] : `I${k}`;
 }
