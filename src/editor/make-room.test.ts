@@ -397,6 +397,48 @@ describe('fitWider', () => {
     ]);
     expect(effectiveDiagram('m', undefined, block, none).nodes.find((n) => n.id === 'u:1')!.attrs?.missingModule).toBe(true);
     expect(reduce(block, ['u:2']).pos['u:1']).toEqual({ x: 160, y: 20 });
+    // One left of the gate would not move with a push either: it changes nothing.
+    const far = sheet([
+      ['u:1', 'block', 0, 0, { module: 'gone' }],
+      ['u:2', 'or', 600, 600, OR8],
+      ['u:3', 'not', 900, 900],
+    ]);
+    expect(reduce(far, ['u:2']).pos).toEqual(far.pos);
+  });
+
+  it('places a wire label in the band again, and leaves wires not drawn now as they are', () => {
+    // A straight wire drawn by the user, its label where the gate grows: the label goes, the wire is shortened.
+    const labelled = sheet(
+      [
+        ['u:1', 'or', 100, 100, OR8],
+        ['u:2', 'not', 220, 100],
+      ],
+      { 'u:1.Y>u:2.A': [{ x: 140, y: 120 }, { x: 220, y: 120 }] },
+      true,
+    );
+    const [w] = Object.keys(labelled.routes);
+    const withLabel = { ...labelled, routes: { [w]: { ...labelled.routes[w], label: { x: 145, y: 104, width: 40, height: 14 } } } };
+    const out = reduce(withLabel, ['u:1']);
+    expect(out.pos).toEqual(labelled.pos);
+    expect(out.routes[w]).toEqual({ points: [{ x: 150, y: 120 }, { x: 220, y: 120 }], manual: true });
+    // A wire into the B input of a gate switched to Reduce is not drawn (it comes back with its pin): it is no reason
+    // to push, and its route is kept for when it comes back.
+    const hidden = setParams(
+      sheet(
+        [
+          ['u:1', 'or', 100, 100, OR8],
+          ['u:2', 'or', 220, 100, OR8],
+        ],
+        { 'u:1.Y>u:2.B': [{ x: 140, y: 120 }, { x: 200, y: 120 }, { x: 200, y: 130 }, { x: 220, y: 130 }] },
+        true,
+      ),
+      'u:2',
+      { mode: 'reduce' },
+    );
+    expect(effectiveDiagram('m', undefined, hidden, none).edges).toEqual([]);
+    const kept = reduce(hidden, ['u:1']);
+    expect(kept.pos).toEqual(hidden.pos);
+    expect(kept.routes).toEqual(hidden.routes);
   });
 
   it('moves the rest as one column when any of the gates has no room, so wires keep their shapes', () => {

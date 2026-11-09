@@ -1038,7 +1038,11 @@ export const useStore = create<State>((set, get) => {
       let e = changed;
       if (old.oldOutlines) {
         const settled = fitNewOutlines(old, withHidden(module, base, old), measure);
-        e = { ...changed, pos: settled.pos, routes: settled.routes };
+        // The symbols and the routes of the wires the change kept (it may drop a wire), where the refit put them (it
+        // may drop a route).
+        const routes = Object.entries(changed.routes).flatMap(([k, r]) => (!(k in old.routes) ? [[k, r] as const] : settled.routes[k] ? [[k, settled.routes[k]] as const] : []));
+        const pos = Object.fromEntries(Object.entries(changed.pos).map(([k, p]) => [k, settled.pos[k] ?? p]));
+        e = { ...changed, pos, routes: Object.fromEntries(routes) };
         delete e.oldOutlines;
       }
       if (out === after) out = { ...after };

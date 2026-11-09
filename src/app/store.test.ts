@@ -1051,6 +1051,33 @@ describe('store', () => {
     expect(st().layout!.nodes.find((n) => n.id === 'u:2')!.x).toBe(170);
   });
 
+  it('keeps no route of a wire a preset change drops on a drawing with older outlines', async () => {
+    // Two wires into I2 of a 2-input MUX (not drawn until it has a third input); one is drawn by the user. With four
+    // inputs the second is a second driver of I2, and goes.
+    const m: ComponentDef = { name: 'm', base: 'mux', params: { inputs: 2, width: 4 } };
+    const g: SheetEdits = {
+      ...drawing(
+        [
+          { ...newUserNode('u:1', 'mux', { params: { inputs: 2, width: 4 } }), component: 'm' },
+          newUserNode('u:4', 'input', { name: 'a', params: { width: 4, style: 'label' } }),
+          newUserNode('u:5', 'input', { name: 'b', params: { width: 4, style: 'label' } }),
+        ],
+        [
+          { id: 'w:6', source: { node: 'u:4', port: 'u:4.out' }, target: { node: 'u:1', port: 'u:1.I2' } },
+          { id: 'w:7', source: { node: 'u:5', port: 'u:5.out' }, target: { node: 'u:1', port: 'u:1.I2' } },
+        ],
+      ),
+      pos: { 'u:1': { x: 200, y: 100 }, 'u:4': { x: 0, y: 200 }, 'u:5': { x: 0, y: 300 } },
+      routes: { 'w:7': { points: [{ x: 40, y: 310 }, { x: 120, y: 310 }, { x: 120, y: 150 }, { x: 200, y: 150 }], manual: true } },
+    };
+    const f: SheetEdits = { ...drawing([newUserNode('u:1', 'not')]), pos: { 'u:1': { x: 0, y: 0 } } };
+    await open({}, { outlines: 2, doc: { drawn: ['f', 'g'], sheets: { 'd:f': f, 'd:g': g }, components: [m] }, path: [{ instance: 'f', module: 'f', drawn: true }] });
+    st().setComponents([{ ...m, params: { inputs: 4, width: 4 } }]);
+    const after = st().doc.sheets['d:g'];
+    expect(after.edges.map((x) => x.id)).toEqual(['w:6']);
+    expect(Object.keys(after.routes).filter((k) => !after.edges.some((x) => x.id === k))).toEqual([]);
+  });
+
   it('moves what is right of gates placed from a preset that got more inputs', async () => {
     const gate: ComponentDef = { name: 'gate', base: 'and', params: { inputs: 2 } };
     const d: SheetEdits = {

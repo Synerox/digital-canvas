@@ -992,10 +992,13 @@ export function fitWider(e: SheetEdits, d: Diagram, was: ReadonlyMap<string, Siz
 
 /**
  * Symbol `id` (`was` big before; as tall now) grown right into free room: no symbol in the band it grows into, nor
- * within the room a wire's stub takes beside it (as makeRoom keeps; a block whose pins are not known yet may reach
- * anywhere right of and below its corner). Its own output wires that run straight on out of that band start at its
- * right edge now; other wires through the band are routed again, unless the user drew them (manual): those are kept
- * as they are, so the room is not free. Undefined when it is not.
+ * within the room a wire's stub takes beside it (as makeRoom keeps). A block whose pins are not known yet may reach
+ * anywhere right of and below its corner: one with its corner in the band, or above it, would have moved right with
+ * a push, so it counts (one left of the band would not have, so it changes nothing). Its own output wires that run
+ * straight on out of that band start at its right edge now; other wires through the band are routed again, unless
+ * the user drew them (manual): those are kept as they are, so the room is not free. Wire labels in the band are
+ * placed again. Wires not drawn now (their pin is gone, see setParams) are left as they are. Undefined when the room
+ * is not free.
  */
 function growInPlace(e: SheetEdits, d: Diagram, id: string, was: Size, measure: MeasureText): SheetEdits | undefined {
   const at = e.pos[id];
@@ -1011,16 +1014,23 @@ function growInPlace(e: SheetEdits, d: Diagram, id: string, was: Size, measure: 
   for (const m of d.nodes) {
     const p = e.pos[m.id];
     if (m.id === id || !p) continue;
-    if (hits(m.attrs?.missingModule ? { ...p, width: Infinity, height: Infinity } : { ...p, ...sizeNode(m, measure) })) return undefined;
+    const unsized = !!m.attrs?.missingModule;
+    if (unsized ? p.x >= band.x - 0.5 && hits({ ...p, width: Infinity, height: Infinity }) : hits({ ...p, ...sizeNode(m, measure) })) return undefined;
   }
+  const drawn = new Set(d.edges.map((x) => x.id));
   const own = new Set(d.edges.filter((x) => x.source.node === id).map((x) => x.id));
   const routes: Record<string, RouteRec> = { ...e.routes };
-  for (const [k, r] of Object.entries(e.routes)) {
+  for (const [k, route] of Object.entries(e.routes)) {
+    if (!drawn.has(k)) continue;
+    let r = route;
+    if (r.label && hits(r.label)) {
+      const { label: _, ...rest } = r;
+      r = routes[k] = rest;
+    }
     const [a, b, ...rest] = r.points;
-    const straightOut =
-      own.has(k) && !!b && Math.abs(a.x - band.x) <= 0.5 && b.y === a.y && b.x >= band.x + band.width && !polylineHitsRect([b, ...rest], band) && !(r.label && hits(r.label));
+    const straightOut = own.has(k) && !!b && Math.abs(a.x - band.x) <= 0.5 && b.y === a.y && b.x >= band.x + band.width && !polylineHitsRect([b, ...rest], band);
     if (straightOut) routes[k] = { ...r, points: [{ x: right, y: a.y }, b, ...rest] };
-    else if (own.has(k) || polylineHitsRect(r.points, band) || (r.label && hits(r.label))) {
+    else if (own.has(k) || polylineHitsRect(r.points, band)) {
       if (r.manual) return undefined;
       delete routes[k];
     }
