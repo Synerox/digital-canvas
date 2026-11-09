@@ -519,13 +519,12 @@ export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
         zeroExtended = true;
       }
     }
-    if (arithmetic && runs.length === 2 && runs[0].kind === 'const' && runs[1].kind === 'net') {
-      // {x, 2'b00}: low-order zeros multiply by a power of two.
-      const k = runs[0].bits.length;
-      if (runs[0].bits.every((b) => b === '0') && k < 31) {
-        connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`, k);
-        runs = [];
-      }
+    // {x, 2'b00}: low-order zeros multiply by a power of two. Other low-order constants ({x, 2'b01})
+    // are a concatenation like any other.
+    const low = runs[0];
+    if (arithmetic && runs.length === 2 && low.kind === 'const' && runs[1].kind === 'net' && low.bits.every((b) => b === '0') && low.bits.length < 31) {
+      const k = low.bits.length;
+      connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`, k);
     } else if (runs.length <= 1) {
       for (const r of runs) {
         connectRun(r, { node: s.node, port: s.port }, r.lo === 0 && (zeroExtended || r.bits.length === s.bits.length), undefined, undefined, constId(r));

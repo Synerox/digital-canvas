@@ -4,6 +4,7 @@ import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { JSON_OUT, yosysArgs } from '../yosys/script';
 import { buildDesign, buildHierarchy, formatConst, parseSrc } from './ir';
 import { buildDiagram } from './diagram';
+import { checkSheet } from '../editor/check';
 import { layoutDiagram } from '../layout/elk-layout';
 import { type YosysDesign, parseYosysJson } from './yosys-json';
 
@@ -88,6 +89,28 @@ describe('semantic transforms', () => {
     // The zero padding is there in the netlist; the diagram draws none of it.
     const sum = design.modules.score_calc.cells.find((c) => c.type === '$add')!;
     expect(sum.connections.A.includes('0') && sum.connections.B.includes('0')).toBe(true);
+  }, 60_000);
+
+  it('draws other low-order constants into arithmetic as a concatenation, never as an unconnected operand', async () => {
+    for (const expr of ["a + {b, 2'b01}", "a == {b, 2'b10}", "a + {b, 2'b00}"]) {
+      const src = `module m(input [7:0] a, input [1:0] b, output [7:0] y); assign y = ${expr}; endmodule`;
+      const d = buildDiagram(buildDesign(await elaborate({ 'm.v': src }), { 'm.v': src }), 'm');
+      const op = d.nodes.find((n) => n.kind === 'cell')!;
+      // Every input of the operator is driven, and b reaches it.
+      for (const p of op.ports.filter((q) => q.dir === 'in')) expect(d.edges.some((e) => e.target.port === p.id), `${expr}: ${p.name}`).toBe(true);
+      expect(checkSheet(d, { verilog: true }).messages.join(' '), expr).not.toMatch(/not connected/);
+      const fromB = d.edges.find((e) => e.source.node === 'in:b')!;
+      if (expr.endsWith("2'b00}")) {
+        // Only zeros are a ×4.
+        expect(fromB.target.node).toBe(op.id);
+        expect(fromB.label).toBe('×4');
+      } else {
+        // {b, 2'b01}: a bar joining b and the constant.
+        expect(fromB.target.node, expr).toMatch(/^join:/);
+        const join = fromB.target.node;
+        expect(d.edges.some((e) => e.target.node === join && d.nodes.find((n) => n.id === e.source.node)?.kind === 'const'), expr).toBe(true);
+      }
+    }
   }, 60_000);
 
   it('draws an inverted enable when the MUX passes data on select = 0', async () => {

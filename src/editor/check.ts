@@ -108,8 +108,8 @@ export function checkSheet(d: Diagram, opts: { verilog?: boolean } = {}): SheetI
     const t = port.get(e.target.port);
     if (!t) continue;
     const width = e.width + wireShift(e);
-    // Arithmetic and compare operands are zero-extended (how Verilog widens them, and how
-    // the import's "Hide zero extension" rule draws them), so a narrower wire is fine there.
+    // Arithmetic and compare operands are zero-extended (how Verilog widens them, and how the
+    // import draws high-order zero padding: as a plain wire, see core/rules), so a narrower wire is fine there.
     const extended = width < t.width && t.cellType !== undefined && ARITHMETIC.has(t.cellType);
     if (t.width !== width && !extended) {
       flag(e.id, 'does not match the input it feeds');

@@ -497,8 +497,8 @@ const PLACE_WIRE_CLEARANCE = 20;
 const PLACE_WIRE_SEARCH = 200;
 
 /**
- * Positions for symbols that have none yet (new in a re-import, or after a
- * drawing rule changed the netlist): each goes where ELK put it relative to
+ * Positions for symbols that have none yet (new in a re-import, or in a file
+ * saved while the drawing rules could be switched off): each goes where ELK put it relative to
  * a neighbour that already has a position, then moves down until it keeps
  * clear of the other symbols and, when it can nearby, of the stored wires in
  * `routes` (a wire on its outline or a stub's length from it would read as

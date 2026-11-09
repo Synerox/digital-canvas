@@ -1244,7 +1244,7 @@ export const useStore = create<State>((set, get) => {
     }
     if (drawnGone(get().path)) return openFallback();
     // A Verilog sheet that is no longer pinned is drawn from its ELK layout, which openPath
-    // skips while every symbol has a stored position (and a rule change or re-import drops
+    // skips while every symbol has a stored position (and a rebuild or re-import drops
     // the cached one): open the sheet again, which lays it out.
     const s = get();
     if (!isDrawnKey(sheet) && settled(s) && s.base && !s.baseLayout && !isPinned(doc.sheets[sheet])) return get().openPath(s.path);

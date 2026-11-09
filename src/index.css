@@ -127,7 +127,7 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .palette-tip { margin: 8px 2px; }
 
 .props-pane .inspector { padding: 10px; overflow: auto; flex: 1; }
-.inspector h3 { padding: 0; margin-bottom: 8px; }
+.inspector h3 { padding: 0; margin-bottom: 8px; text-transform: none; letter-spacing: 0; font-size: 12px; }
 .prop { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
 .prop input, .prop select { width: 100%; margin: 0; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; color: var(--ink); }
 .prop input.invalid { border-color: #e03131; }
