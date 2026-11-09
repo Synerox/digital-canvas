@@ -17,7 +17,6 @@ function reopen(name: string, e: SheetEdits): SheetEdits {
     files: {},
     rules: [],
     viewMode: 'blocks',
-    theme: 'report',
     doc: { drawn: [name], sheets: { [`d:${name}`]: e } },
     path: [{ instance: name, module: name, drawn: true }],
   };

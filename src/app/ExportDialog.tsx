@@ -1,22 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LayoutResult } from '../layout/elk-layout';
 import { downloadBlob, exportSvg, svgToPng } from '../render/export';
-import { THEMES, type ThemeName } from '../render/theme';
+import { THEME } from '../render/theme';
 import { useEscape } from './Dialogs';
 
 interface Props {
   layout: LayoutResult;
-  initialTheme: ThemeName;
   name: string;
   onClose(): void;
 }
 
-export function ExportDialog({ layout, initialTheme, name, onClose }: Props) {
-  const [themeName, setThemeName] = useState<ThemeName>(initialTheme);
+export function ExportDialog({ layout, name, onClose }: Props) {
   const [pngUrl, setPngUrl] = useState<string>();
   const [message, setMessage] = useState<string>();
-  const theme = THEMES[themeName];
-  const svg = exportSvg(layout, theme);
+  const svg = exportSvg(layout, THEME);
   const box = useRef<HTMLDivElement>(null);
   useEscape(onClose);
   // Focus moves into the dialog, off the button that opened it (Enter there would open it again).
@@ -66,14 +63,7 @@ export function ExportDialog({ layout, initialTheme, name, onClose }: Props) {
             ×
           </button>
         </div>
-        <div className="row">
-          {(Object.keys(THEMES) as ThemeName[]).map((t) => (
-            <label key={t} className="radio">
-              <input type="radio" checked={themeName === t} onChange={() => setThemeName(t)} /> {THEMES[t].label}
-            </label>
-          ))}
-        </div>
-        <div className="preview" style={{ background: theme.background }}>
+        <div className="preview" style={{ background: THEME.background }}>
           {pngUrl ? <img src={pngUrl} alt={`${name} diagram`} /> : <span className="muted">Rendering…</span>}
         </div>
         <div className="row">

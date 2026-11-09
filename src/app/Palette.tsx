@@ -6,7 +6,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type LayoutResult, approxMeasure, sizeNode } from '../layout/elk-layout';
 import { DiagramGraphic } from '../render/DiagramGraphic';
-import { THEMES } from '../render/theme';
+import { THEME } from '../render/theme';
 import { SYMBOLS, SYMBOL_BY_KEY, type SymKey, type SymParams, type SymbolGroup, newUserNode, symbolNode } from '../editor/symbols';
 import { componentSymbol, isPart } from '../editor/components';
 import { ComponentsDialog } from './ComponentsDialog';
@@ -44,7 +44,7 @@ const Icon = memo(function Icon({ sym, params }: { sym: SymKey; params?: SymPara
   const vb = `${-pad - (n.kind === 'join' ? extra : 0)} ${-pad} ${n.width + 2 * pad + extra} ${n.height + 2 * pad}`;
   return (
     <svg viewBox={vb} className="palette-icon" aria-hidden="true">
-      <DiagramGraphic layout={layout} theme={THEMES.report} />
+      <DiagramGraphic layout={layout} theme={THEME} />
     </svg>
   );
 });

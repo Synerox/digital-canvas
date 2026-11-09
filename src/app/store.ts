@@ -10,7 +10,7 @@ import { AUCTION_FILE, AUCTION_SOURCE } from '../examples/auction';
 import { FRUIT_FILE, FRUIT_SOURCE } from '../examples/fruit-battle';
 import { GRID, LayoutCancelled, type LayoutResult, type MeasureText, type Point, cancelLayouts, layoutDiagram, sizeNode } from '../layout/elk-layout';
 import { canvasMeasure } from '../render/export';
-import { THEMES, type ThemeName } from '../render/theme';
+import { THEME } from '../render/theme';
 import { YosysError, type YosysErrorKind, type YosysStatus, elaborate } from '../yosys/client';
 import { declaredModules } from '../yosys/script';
 import {
@@ -138,7 +138,7 @@ function stableJson(v: unknown): string {
 /**
  * What a copy of the work in the browser holds, read as Open reads it: `work` is what a tab can
  * lose (the files, the rules, the edits and the edits put aside), `view` where it looks (sheet,
- * view, Top, theme) and whether it is saved to a file. Undefined for text that is not a copy.
+ * view, Top) and whether it is saved to a file. Undefined for text that is not a copy.
  */
 export function copyKeys(text: string): { work: string; view: string } | undefined {
   try {
@@ -146,7 +146,7 @@ export function copyKeys(text: string): { work: string; view: string } | undefin
     const saved = (JSON.parse(text) as { saved?: unknown }).saved === true;
     return {
       work: stableJson({ files: f.files, rules: [...f.rules].sort(), doc: compactDoc(f.doc), putAside: parsePutAside(text) }),
-      view: stableJson({ top: f.top, viewMode: f.viewMode, theme: f.theme, path: f.path, saved }),
+      view: stableJson({ top: f.top, viewMode: f.viewMode, path: f.path, saved }),
     };
   } catch {
     return undefined;
@@ -235,7 +235,6 @@ interface State {
   /** Source ranges highlighted in the code panel. */
   codeRanges: SrcRange[];
   codeFile?: string;
-  theme: ThemeName;
   rules: ReadonlySet<RuleId>;
   elapsedMs?: number;
   /** The full circuit held back while status is 'too-large'. */
@@ -277,7 +276,6 @@ interface State {
   selectAll(): void;
   selectLine(file: string, line: number): void;
   setCodeFile(file: string): void;
-  setTheme(t: ThemeName): void;
   toggleRule(id: RuleId): Promise<void>;
   setTop(top: string | undefined): Promise<void>;
   setNotice(text: string | undefined): void;
@@ -370,16 +368,10 @@ let copied: { work: string; view: string } | undefined;
  */
 let copiedWork: { doc: EditDoc; derived: EditDoc; files: Record<string, string>; rules: ReadonlySet<RuleId>; putAside: PutAside } | undefined;
 
-const measures = new Map<string, MeasureText>();
-/** Text measurement for a theme's font (one canvas per font). */
-export function measureFor(theme: ThemeName): MeasureText {
-  const font = THEMES[theme].font;
-  let m = measures.get(font);
-  if (!m) {
-    m = canvasMeasure(font);
-    measures.set(font, m);
-  }
-  return m;
+let measurer: MeasureText | undefined;
+/** Text measurement in the drawings' font (one canvas, made when first needed). */
+export function textMeasure(): MeasureText {
+  return (measurer ??= canvasMeasure(THEME.font));
 }
 
 /** Resolve after pending events (clicks, rendering) have been handled. */
@@ -1054,7 +1046,7 @@ export const useStore = create<State>((set, get) => {
    */
   const roomForWider = (before: EditDoc['sheets'], after: EditDoc['sheets']): EditDoc['sheets'] => {
     if (after === before) return after;
-    const measure = measureFor(get().theme);
+    const measure = textMeasure();
     const width = (u: UserNode) => sizeNode(symbolNode(u, interfaceOf), measure).width;
     let out = after;
     for (const [key, e] of Object.entries(after)) {
@@ -1149,7 +1141,7 @@ export const useStore = create<State>((set, get) => {
     if (!drawn && (!s.base || !settled(s))) return;
     let e = opts.fast ?? edits();
     const netlist = effectiveDiagram(currentModule(), drawn ? undefined : s.base, e, interfaceOf);
-    const measure = measureFor(s.theme);
+    const measure = textMeasure();
     // Saved with the symbol outlines of before: the symbols that grew since get room, once (stored below).
     const refitted = !!e.oldOutlines;
     if (e.oldOutlines) e = fitNewOutlines(e, withHidden(currentModule(), drawn ? undefined : s.base, e, netlist), measure);
@@ -1254,7 +1246,7 @@ export const useStore = create<State>((set, get) => {
     let l = layoutCache.get(key);
     if (l) return l;
     try {
-      l = await layoutDiagram(diagram, measureFor(get().theme));
+      l = await layoutDiagram(diagram, textMeasure());
     } catch (e) {
       if (e instanceof LayoutCancelled) return undefined;
       throw e;
@@ -1269,7 +1261,7 @@ export const useStore = create<State>((set, get) => {
    * Undefined when the layout was cancelled.
    */
   const autoBlockSheet = async (module: string): Promise<{ netlist: Diagram; layout: LayoutResult; edits: SheetEdits } | undefined> => {
-    const { blockDesign, rules, theme, doc } = get();
+    const { blockDesign, rules, doc } = get();
     if (!blockDesign?.modules[module]) return undefined;
     const cacheKey = `blocks:${module}:${rulesKey(rules)}`;
     let base = baseCache.get(cacheKey);
@@ -1279,7 +1271,7 @@ export const useStore = create<State>((set, get) => {
     }
     const saved = doc.sheets[sheetKey({ instance: module, module }, 'blocks')] ?? emptyEdits();
     const netlist = effectiveDiagram(module, base, saved, interfaceOf);
-    const measure = measureFor(theme);
+    const measure = textMeasure();
     // As refresh() draws it: with room for the symbols that grew since an older file was saved.
     const e = saved.oldOutlines ? fitNewOutlines(saved, withHidden(module, base, saved, netlist), measure) : saved;
     let { pos, routes } = e;
@@ -1384,7 +1376,6 @@ export const useStore = create<State>((set, get) => {
       topOverride: f.top,
       rules: new Set(f.rules.filter((r) => RULES.some((x) => x.id === r))),
       viewMode: f.viewMode,
-      theme: f.theme,
       doc: f.doc,
       putAside,
       past: [],
@@ -1545,7 +1536,6 @@ export const useStore = create<State>((set, get) => {
     selection: new Set(),
     highlighted: new Set(),
     codeRanges: [],
-    theme: 'report',
     rules: DEFAULT_RULES,
     viewMode: 'blocks',
     issues: { flagged: new Set(), messages: [] },
@@ -1858,11 +1848,6 @@ export const useStore = create<State>((set, get) => {
       set({ codeFile: file });
     },
 
-    setTheme(t) {
-      set({ theme: t });
-      scheduleAutosave();
-    },
-
     setNotice(text) {
       set({ notice: text });
     },
@@ -1909,7 +1894,7 @@ export const useStore = create<State>((set, get) => {
         if (p.sym === 'text') node.name = 'Note';
         // Linked to its preset only while it has the preset's settings (see followsPreset).
         if (p.component && followsPreset({ ...node, component: p.component }, get().doc.components)) node.component = p.component;
-        const size = sizeNode(symbolNode(node, interfaceOf), measureFor(get().theme));
+        const size = sizeNode(symbolNode(node, interfaceOf), textMeasure());
         let pos = { x: snap(at.x - size.width / 2), y: snap(at.y - size.height / 2) };
         // A second click on the same spot would put the new symbol exactly over the last one, hiding it: it goes a
         // little down and to the right instead, where both show.
@@ -2014,7 +1999,7 @@ export const useStore = create<State>((set, get) => {
         if (next === e || !was || !next.pos[id]) return next;
         const s = get();
         const d = withHidden(currentModule(), isDrawnKey(s.sheet) ? undefined : s.base, next);
-        return fitWider(next, d, new Map([[id, was.width]]), measureFor(s.theme));
+        return fitWider(next, d, new Map([[id, was.width]]), textMeasure());
       });
       // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
       const s = get();
@@ -2049,7 +2034,7 @@ export const useStore = create<State>((set, get) => {
       set({ status: 'layout' });
       let l: LayoutResult;
       try {
-        l = await layoutDiagram(s.netlist, measureFor(s.theme));
+        l = await layoutDiagram(s.netlist, textMeasure());
       } catch (e) {
         set({ status: 'ready' });
         if (e instanceof LayoutCancelled) return;
@@ -2315,7 +2300,7 @@ export const useStore = create<State>((set, get) => {
       // A block is titled with its drawing's name now, longer than the automatic block's, and named under it: it
       // grows, and what is right of it moves right to make room, so no block covers another one or its pins and wires.
       const iface: InterfaceOf = (n) => (doc.drawn.includes(n) ? { label: n, ports: drawingPorts(doc.sheets[`d:${n}`]) } : interfaceOf(n));
-      const measure = measureFor(now.theme);
+      const measure = textMeasure();
       const copies: [SheetEdits, string][] = [[main, `d:${name}`], ...[...subs].map(([m, d]): [SheetEdits, string] => [d, `d:${names.get(m)}`])];
       for (const [d, key] of copies) {
         const e = sheets[key];
@@ -2352,7 +2337,6 @@ export const useStore = create<State>((set, get) => {
         ...(s.topOverride ? { top: s.topOverride } : {}),
         rules: [...s.rules],
         viewMode: s.viewMode,
-        theme: s.theme,
         doc: compactDoc(s.doc),
         path: s.path,
         ...(Object.keys(s.putAside).length ? { putAside: s.putAside } : {}),

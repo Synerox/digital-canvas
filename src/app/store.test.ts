@@ -36,7 +36,6 @@ import {
   drawingPorts,
   followPinRenames,
   importedTop,
-  measureFor,
   moduleTitle,
   pasteSpot,
   planDrop,
@@ -44,6 +43,7 @@ import {
   planOpen,
   renameDrawingIn,
   sheetsUsing,
+  textMeasure,
   useStore,
   viewModeOf,
   withoutModuleDefinitions,
@@ -67,7 +67,6 @@ async function open(files: Record<string, string>, extra: Partial<SavedFile> = {
     files,
     rules: [...DEFAULT_RULES],
     viewMode: 'blocks',
-    theme: 'report',
     doc: { sheets: {}, drawn: [] },
     path: [],
     ...extra,
@@ -910,6 +909,28 @@ describe('store', () => {
     expect(box(add).y).toBe(20);
     st().restoreHidden();
     expect(apart(add, io('output', 'z'))).toBe(true);
+  });
+
+  it('opens a drawing saved with the beige theme in the one white look, and saves it without a theme', async () => {
+    const d: SheetEdits = { ...drawing([pin('u:1', 'input', 'a'), pin('u:2', 'output', 'y')]), pos: { 'u:1': { x: 0, y: 0 }, 'u:2': { x: 200, y: 0 } } };
+    const old = {
+      format: 'digital-canvas',
+      version: 1,
+      outlines: OUTLINES,
+      files: {},
+      rules: [],
+      viewMode: 'blocks',
+      theme: 'slides',
+      doc: { drawn: ['old'], sheets: { 'd:old': d } },
+      path: [{ instance: 'old', module: 'old', drawn: true }],
+    };
+    await st().loadSaved(JSON.stringify(old));
+    expect(st().layout!.nodes.map((n) => n.id).sort()).toEqual(['u:1', 'u:2']);
+    expect(st()).not.toHaveProperty('theme');
+    const saved = st().savedFile();
+    expect(saved).not.toHaveProperty('theme');
+    // The browser's copy of before (with its theme) is the same work, looked at the same way, as the one made now.
+    expect(copyKeys(JSON.stringify(old))).toEqual(copyKeys(JSON.stringify(saved)));
   });
 
   it('moves what is right of a gate that got wider with more inputs, rather than covering it', async () => {
@@ -1915,7 +1936,7 @@ endmodule
   }, 60_000);
 
   it('routes a stored wire again when a symbol is placed on it (C16)', async () => {
-    const measure = measureFor('report');
+    const measure = textMeasure();
     const a: UserNode = pin('u:1', 'input', 'a');
     const y: UserNode = pin('u:2', 'output', 'y');
     const inv: UserNode = newUserNode('u:3', 'not');
