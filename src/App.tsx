@@ -207,7 +207,8 @@ export default function App() {
         if (k === 'a') return take(), st.selectAll();
         if (k === 'c') return st.copy() ? take() : undefined;
         if (k === 'x') return take(), st.cut();
-        if (k === 'v') return take(), paste();
+        // A held key pastes a drawing once (as in the Drawings list), not one new drawing per repeat.
+        if (k === 'v') return take(), e.repeat && pasteTarget() === 'drawing' ? undefined : paste();
         if (k === 'd') return take(), st.duplicate();
         return;
       }

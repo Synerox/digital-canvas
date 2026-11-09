@@ -1260,15 +1260,28 @@ export const useStore = create<State>((set, get) => {
   };
 
   /**
-   * When a drawing on the open path is gone (deleted, or a Redo of that): open the sheet it was opened from,
-   * else the drawing that takes its place in the list (`before`: the list before it went; the next one, or the
-   * one before the last), else the Verilog top. False when the open path has no such drawing.
+   * When a drawing on the open path is gone (`before`: the list of drawings before), after a delete or an
+   * Undo/Redo: a renamed one (Redo of a rename) opens under its new name; for a deleted one, the sheet it was
+   * opened from opens, else the drawing that takes its place in the list (the next one, or the one before the
+   * last), else the Verilog top. False when the open path has no such drawing.
    */
   const leaveGoneDrawing = (before: readonly string[]): boolean => {
-    const { doc, path } = get();
+    const { doc } = get();
     const gone = (d: string) => !doc.drawn.includes(d);
+    let { path } = get();
+    if (!path.some((p) => p.drawn && gone(p.module))) return false;
+    // A rename keeps the drawing's place in the list (renameDrawingIn).
+    if (before.length === doc.drawn.length) {
+      for (const [i, from] of before.entries()) {
+        const to = doc.drawn[i];
+        if (to !== from && gone(from) && !before.includes(to)) path = renamePathDrawing(path, from, to);
+      }
+    }
     const cut = path.findIndex((p) => p.drawn && gone(p.module));
-    if (cut < 0) return false;
+    if (cut < 0) {
+      void get().openPath(path);
+      return true;
+    }
     if (cut > 0) {
       void get().openPath(path.slice(0, cut));
       return true;

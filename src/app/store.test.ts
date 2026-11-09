@@ -2152,6 +2152,30 @@ describe('the Drawings list: delete, copy and paste a drawing', () => {
     expect(st().path).toEqual(at('outer'));
   }, 60_000);
 
+  it('opens a renamed drawing under its new name on Redo of the rename (not as if it were deleted)', async () => {
+    await open({}, { doc: three(), path: at('outer') });
+    expect(st().renameDrawing('outer', 'outer2')).toBeUndefined();
+    expect(st().path).toEqual(at('outer2'));
+    st().undo();
+    await settle();
+    expect(st().path).toEqual(at('outer'));
+    st().redo();
+    await settle();
+    expect(st().path).toEqual(at('outer2'));
+    expect(st().sheet).toBe('d:outer2');
+    // Opened as a block: the path follows the rename too.
+    await st().enterInstance('u:3', 'inner', true);
+    await settle();
+    st().renameDrawing('inner', 'inner2');
+    st().undo();
+    await settle();
+    expect(st().path.map((p) => p.module)).toEqual(['outer2', 'inner']);
+    st().redo();
+    await settle();
+    expect(st().path.map((p) => p.module)).toEqual(['outer2', 'inner2']);
+    expect(st().sheet).toBe('d:inner2');
+  }, 60_000);
+
   it('stops placing a block of a drawing that is deleted, or that an Undo takes away', async () => {
     await open({}, { doc: three(), path: at('outer') });
     st().startPlacing({ sym: 'block', params: { module: 'spare' } });
