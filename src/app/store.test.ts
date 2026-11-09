@@ -2034,6 +2034,26 @@ endmodule
     expect(st().placing).toBeUndefined();
   }, 60_000);
 
+  it('puts down a picked part when the library no longer has it, and keeps a picked preset following its change (P2)', async () => {
+    await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
+    st().newDrawing('top');
+    await settle();
+    const defs = parseComponents('[{ "name": "and5", "base": "and", "inputs": 5 }, { "name": "alu", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"] }]').defs!;
+    st().setComponents(defs);
+    st().startPlacing(componentSymbol(defs[1]));
+    st().placeAt({ x: 0, y: 0 }, true);
+    // Another part only: the alu is gone, so clicks would place blocks with no pins.
+    st().setComponents([defs[0]]);
+    expect(st().placing).toBeUndefined();
+    // Undo brings the part back, not the pick.
+    st().undo();
+    expect(st().doc.components?.map((c) => c.name)).toEqual(['and5', 'alu']);
+    // A preset picked follows a change of its settings and stays picked.
+    st().startPlacing({ ...componentSymbol(defs[0]), component: 'and5' });
+    st().setComponents(parseComponents('[{ "name": "and5", "base": "and", "inputs": 6 }, { "name": "alu", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"] }]').defs!);
+    expect(st().placing).toEqual({ sym: 'and', params: { inputs: 6 }, component: 'and5' });
+  }, 60_000);
+
   it('refuses to give a pin the name another pin has (F13)', async () => {
     await open({}, { doc: { drawn: [], sheets: {} }, path: [] });
     st().newDrawing('pins');

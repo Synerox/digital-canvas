@@ -2158,7 +2158,8 @@ export const useStore = create<State>((set, get) => {
       // The symbols placed from a preset follow it: one undo step with the change of the library.
       doc.sheets = roomForWider(s.doc.sheets, followComponents(s.doc.sheets, s.doc.components, defs, renamed, interfaceOf));
       if (doc.sheets === s.doc.sheets && JSON.stringify(doc.components ?? []) === JSON.stringify(s.doc.components ?? [])) return;
-      const placing = placingNow(s.placing, defs, renamed);
+      // A preset being placed follows the change; a part removed (or renamed) is not placed any more, as after Undo.
+      const placing = placingWith(placingNow(s.placing, defs, renamed), doc);
       pushDoc(doc, placing !== s.placing ? { placing } : {});
       refresh();
     },

@@ -7,7 +7,7 @@ import { type EditDoc, emptyDoc } from '../editor/doc';
 import { declaredModules } from '../yosys/script';
 import { type PutAside, changeFiles, importedTop, planImport as planFiles, useStore } from './store';
 
-/** Close a dialog on Escape, before the canvas and the shortcuts see the key. */
+/** Close a dialog on Escape, before the shortcuts see the key (the canvas leaves keys alone while a dialog is open). */
 // oxlint-disable-next-line react/only-export-components
 export function useEscape(onClose: () => void) {
   useEffect(() => {

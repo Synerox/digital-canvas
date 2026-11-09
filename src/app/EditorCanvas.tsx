@@ -211,10 +211,18 @@ export function EditorCanvas() {
   const mode = useRef<Mode>({ kind: 'none' });
   /** The canvas's own count of clicks, for the double-clicks the browser sends no dblclick for. */
   const [clicks] = useState(() => new ClickRun());
-  /** Where the symbol being placed shows (see Ghost): the pointer, while it is over the canvas. */
+  /**
+   * Where the symbol being placed shows (see Ghost): the pointer while it is over the canvas, in pixels from the
+   * canvas's corner, so that a scroll or zoom (which moves the drawing, not the pointer) leaves it under the pointer.
+   */
   const [pointer, setPointer] = useState<Point>();
   /** The same point again renders nothing (a drag over the canvas reports the pointer many times a second). */
-  const showGhostAt = (w: Point) => setPointer((p) => (p && p.x === w.x && p.y === w.y ? p : w));
+  const showGhostAt = (cx: number, cy: number) => {
+    const r = wrap.current?.getBoundingClientRect();
+    if (!r) return;
+    const at = { x: cx - r.left, y: cy - r.top };
+    setPointer((p) => (p && p.x === at.x && p.y === at.y ? p : at));
+  };
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number }>();
   /** Wires being drawn or reshaped, drawn dashed over the sheet. */
   const [wireDrafts, setWireDrafts] = useState<Point[][]>();
@@ -398,6 +406,8 @@ export function EditorCanvas() {
     const down = (ev: KeyboardEvent) => {
       const t = ev.target as Element | null;
       if (t?.closest?.('input, textarea, select, [role=menu]')) return;
+      // A dialog or the JSON window is open: its Esc closes it (see useEscape), not what the canvas is doing behind it.
+      if (document.querySelector('.modal-backdrop')) return;
       if (ev.key === ' ' && !ev.repeat) setSpaceDown(true);
       const m = mode.current;
       if (m.kind === 'wire') {
@@ -585,7 +595,7 @@ export function EditorCanvas() {
         if (!Array.from(ev.dataTransfer.types).includes('application/x-dc-symbol')) return;
         ev.preventDefault();
         // The symbol dragged from the library shows where it will land, as when it is placed by clicks.
-        if (store().placing) showGhostAt(toWorld(ev.clientX, ev.clientY));
+        if (store().placing) showGhostAt(ev.clientX, ev.clientY);
       }}
       onDragLeave={(ev) => {
         if (!ev.currentTarget.contains(ev.relatedTarget as Node | null)) setPointer(undefined);
@@ -695,7 +705,7 @@ export function EditorCanvas() {
         const w = toWorld(ev.clientX, ev.clientY);
         const m = mode.current;
         const s = store();
-        if (s.placing) showGhostAt(w);
+        if (s.placing) showGhostAt(ev.clientX, ev.clientY);
         if (m.kind === 'none' || m.kind === 'wire') {
           const hit = hitFrom(m.kind === 'wire' ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target);
           if (layout) {
@@ -936,7 +946,7 @@ export function EditorCanvas() {
               pointerEvents="none"
             />
           )}
-          {placing && pointer && <Ghost at={pointer} />}
+          {placing && pointer && <Ghost at={{ x: (pointer.x - view.x) / view.k, y: (pointer.y - view.y) / view.k }} />}
         </g>
       </svg>
       <div className="zoom-controls" onPointerDown={(ev) => ev.stopPropagation()} onDoubleClick={(ev) => ev.stopPropagation()}>

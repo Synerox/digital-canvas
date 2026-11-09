@@ -11,7 +11,7 @@ import { THEME } from '../render/theme';
 import { SYMBOLS, SYMBOL_BY_KEY, type SymKey, type SymParams, type SymbolGroup, newUserNode, symbolNode } from '../editor/symbols';
 import { componentSymbol, isPart } from '../editor/components';
 import { ComponentsDialog } from './ComponentsDialog';
-import { moduleTitle, useStore } from './store';
+import { type Placing, moduleTitle, useStore } from './store';
 import { openSettings } from './settings';
 import { ClickRun } from './click-run';
 import { ui } from './ui-events';
@@ -67,6 +67,8 @@ export function Palette() {
   // The same parameters each render, so that the icons (memoized by them) are not laid out again.
   const placed = useMemo(() => new Map((components ?? []).map((c) => [c.name, componentSymbol(c)])), [components]);
   const search = useRef<HTMLInputElement>(null);
+  /** What was picked when a drag from the library began (`was`), and the drag's own pick: a drag that places nothing gives `was` back. */
+  const beforeDrag = useRef<{ was: Placing | undefined; dragged: Placing }>(undefined);
 
   useEffect(() => {
     const focus = () => search.current?.focus();
@@ -103,7 +105,16 @@ export function Palette() {
         onDragStart={(ev) => {
           ev.dataTransfer.setData('application/x-dc-symbol', sym);
           ev.dataTransfer.effectAllowed = 'copy';
+          beforeDrag.current = { was: useStore.getState().placing, dragged: what };
           startPlacing(what);
+        }}
+        onDragEnd={() => {
+          const d = beforeDrag.current;
+          beforeDrag.current = undefined;
+          // Cancelled (Esc), or let go anywhere but the canvas: nothing was placed (a drop on the canvas puts the
+          // dragged symbol down), and what was picked before stays picked. (The page takes drops of files anywhere, so
+          // the drag's dropEffect does not tell.)
+          if (d && useStore.getState().placing === d.dragged) startPlacing(d.was);
         }}
         data-settings-from={component ? `library:${component}` : undefined}
         onClick={(ev) => {
