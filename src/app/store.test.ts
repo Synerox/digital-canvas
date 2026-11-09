@@ -1010,6 +1010,47 @@ describe('store', () => {
     }
   });
 
+  it('switches a gate there and back without moving anything, its output wire routed by the app', async () => {
+    const d: SheetEdits = {
+      ...drawing([newUserNode('u:1', 'or', { params: { inputs: 2, width: 8, mode: 'bitwise' } }), newUserNode('u:2', 'not'), newUserNode('u:3', 'not')], [
+        { id: 'w:1', source: { node: 'u:1', port: 'u:1.Y' }, target: { node: 'u:2', port: 'u:2.A' } },
+      ]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 300, y: 40 }, 'u:3': { x: 300, y: 300 } },
+      routes: { 'w:1': { points: [{ x: 140, y: 120 }, { x: 260, y: 120 }, { x: 260, y: 60 }, { x: 300, y: 60 }] } },
+    };
+    await open({}, { doc: { drawn: ['g'], sheets: { 'd:g': d } }, path: [{ instance: 'g', module: 'g', drawn: true }] });
+    const xs = () => ['u:2', 'u:3'].map((id) => st().layout!.nodes.find((n) => n.id === id)!.x);
+    for (let k = 0; k < 3; k++) {
+      st().setNodeParams('u:1', { mode: 'reduce' });
+      expect(xs()).toEqual([300, 300]);
+      st().setNodeParams('u:1', { mode: 'bitwise' });
+      expect(xs()).toEqual([300, 300]);
+    }
+    // Its wire still runs from its output to the inverter.
+    const w = st().layout!.edges.find((x) => x.id === 'w:1')!;
+    expect([w.points[0], w.points.at(-1)]).toEqual([
+      { x: 140, y: 120 },
+      { x: 300, y: 60 },
+    ]);
+  });
+
+  it('makes room once on a drawing not opened since a file with older outlines was read, when a preset changes', async () => {
+    const gate: ComponentDef = { name: 'gate', base: 'or', params: { inputs: 2, width: 8, mode: 'bitwise' } };
+    const g: SheetEdits = {
+      ...drawing([{ ...newUserNode('u:1', 'or', { params: { inputs: 2, width: 8, mode: 'bitwise' } }), component: 'gate' }, newUserNode('u:2', 'not')]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 160, y: 100 } },
+    };
+    const f: SheetEdits = { ...drawing([newUserNode('u:1', 'not')]), pos: { 'u:1': { x: 0, y: 0 } } };
+    await open({}, { outlines: 2, doc: { drawn: ['f', 'g'], sheets: { 'd:f': f, 'd:g': g }, components: [gate] }, path: [{ instance: 'f', module: 'f', drawn: true }] });
+    expect(st().doc.sheets['d:g'].oldOutlines).toBe(2);
+    st().setComponents([{ ...gate, params: { ...gate.params, mode: 'reduce' } }]);
+    expect(st().doc.sheets['d:g'].oldOutlines).toBeUndefined();
+    await st().openPath([{ instance: 'g', module: 'g', drawn: true }]);
+    await settle();
+    // 10 px for the lead of the gate, not twice that.
+    expect(st().layout!.nodes.find((n) => n.id === 'u:2')!.x).toBe(170);
+  });
+
   it('moves what is right of gates placed from a preset that got more inputs', async () => {
     const gate: ComponentDef = { name: 'gate', base: 'and', params: { inputs: 2 } };
     const d: SheetEdits = {

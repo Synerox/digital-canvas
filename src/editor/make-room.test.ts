@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { approxMeasure, type Point, sizeNode } from '../layout/elk-layout';
 import { OUTLINES, type SheetEdits, emptyEdits, parseSavedFile } from './doc';
-import { addNodes, connect, effectiveDiagram, fitNewOutlines, makeRoom, resolveConnection } from './sheet';
+import { addNodes, connect, effectiveDiagram, fitNewOutlines, fitWider, makeRoom, resolveConnection, setParams } from './sheet';
 import { type InterfaceOf, type SymKey, type SymParams, newUserNode } from './symbols';
 
 const size = (width: number, height: number) => ({ width, height });
@@ -313,6 +313,120 @@ describe('fitNewOutlines', () => {
     const out = fitNewOutlines(e, missing, approxMeasure);
     expect(out.pos).toEqual(e.pos);
     expect(out.oldOutlines).toBeUndefined();
+  });
+});
+
+describe('fitWider', () => {
+  const none: InterfaceOf = () => undefined;
+  /** A drawing: symbols at these corners, wires with these saved routes (drawn by the user when `manual`). */
+  const sheet = (items: [string, SymKey, number, number, SymParams?][], routes: Record<string, Point[]> = {}, manual = false) => {
+    let e = addNodes(
+      emptyEdits(),
+      items.map(([id, sym, x, y, params]) => {
+        const node = newUserNode(id, sym);
+        return { node: params ? { ...node, params: { ...node.params, ...params } } : node, pos: { x, y } };
+      }),
+    );
+    for (const k of Object.keys(routes)) {
+      const [from, to] = k.split('>');
+      const d = effectiveDiagram('m', undefined, e, none);
+      const c = resolveConnection(d, { kind: 'port', node: from.split('.')[0], port: from }, { kind: 'port', node: to.split('.')[0], port: to });
+      if ('error' in c) throw new Error(c.error);
+      let id: string;
+      [id, e] = connect(e, c);
+      e = { ...e, routes: { ...e.routes, [id]: { points: routes[k], ...(manual ? { manual: true } : {}) } } };
+    }
+    return e;
+  };
+  const OR8 = { inputs: 2, width: 8, mode: 'bitwise' } as const;
+  /** Switch these gates to Reduce (40 wide then, 50 now) and make room. */
+  const reduce = (e: SheetEdits, ids: string[], iface: InterfaceOf = none) => {
+    const next = ids.reduce((acc, id) => setParams(acc, id, { mode: 'reduce' }), e);
+    return fitWider(next, effectiveDiagram('m', undefined, next, iface), new Map(ids.map((id) => [id, { width: 40, height: 40 }])), approxMeasure);
+  };
+
+  it('grows into free room: nothing moves; its own wires start at its edge, or are routed again', () => {
+    const e = sheet(
+      [
+        ['u:1', 'or', 100, 100, OR8],
+        ['u:2', 'not', 300, 40],
+        ['u:3', 'not', 300, 300],
+      ],
+      { 'u:1.Y>u:2.A': [{ x: 140, y: 120 }, { x: 260, y: 120 }, { x: 260, y: 60 }, { x: 300, y: 60 }] },
+    );
+    const [w] = Object.keys(e.routes);
+    const out = reduce(e, ['u:1']);
+    expect(out.pos).toEqual(e.pos);
+    expect(out.routes[w].points).toEqual([{ x: 150, y: 120 }, { x: 260, y: 120 }, { x: 260, y: 60 }, { x: 300, y: 60 }]);
+    // As the router leaves a pin (two grid steps, then a bend), through the band it grows into: routed again.
+    const bent = sheet(
+      [
+        ['u:1', 'or', 100, 100, OR8],
+        ['u:2', 'not', 300, 40],
+      ],
+      { 'u:1.Y>u:2.A': [{ x: 140, y: 120 }, { x: 160, y: 120 }, { x: 160, y: 60 }, { x: 300, y: 60 }] },
+    );
+    const again = reduce(bent, ['u:1']);
+    expect(again.pos).toEqual(bent.pos);
+    expect(again.routes).toEqual({});
+    // Drawn so by the user: kept, so there is no room; what is right of the gate moves.
+    const drawn = sheet(
+      [
+        ['u:1', 'or', 100, 100, OR8],
+        ['u:2', 'not', 300, 40],
+      ],
+      { 'u:1.Y>u:2.A': [{ x: 140, y: 120 }, { x: 160, y: 120 }, { x: 160, y: 60 }, { x: 300, y: 60 }] },
+      true,
+    );
+    const pushed = reduce(drawn, ['u:1']);
+    expect(pushed.pos['u:2']).toEqual({ x: 310, y: 40 });
+    expect(pushed.routes[Object.keys(drawn.routes)[0]].points.map((p) => p.x)).toEqual([150, 170, 170, 310]);
+  });
+
+  it('pushes when a symbol is close, or a block whose pins are not known yet may reach there', () => {
+    const near = sheet([
+      ['u:1', 'or', 100, 100, OR8],
+      ['u:2', 'not', 160, 100],
+      ['u:3', 'not', 300, 300],
+    ]);
+    expect(reduce(near, ['u:1']).pos).toMatchObject({ 'u:2': { x: 170, y: 100 }, 'u:3': { x: 310, y: 300 } });
+    // A block of a module not loaded (or that failed) is drawn small; it may be taller once it loads.
+    const block = sheet([
+      ['u:1', 'block', 150, 20, { module: 'alu8' }],
+      ['u:2', 'or', 100, 100, OR8],
+    ]);
+    expect(effectiveDiagram('m', undefined, block, none).nodes.find((n) => n.id === 'u:1')!.attrs?.missingModule).toBe(true);
+    expect(reduce(block, ['u:2']).pos['u:1']).toEqual({ x: 160, y: 20 });
+  });
+
+  it('moves the rest as one column when any of the gates has no room, so wires keep their shapes', () => {
+    // Two gates of a preset, one under the other: the lower one has an inverter close by.
+    const e = sheet(
+      [
+        ['u:1', 'or', 100, 100, OR8],
+        ['u:2', 'or', 100, 200, OR8],
+        ['u:3', 'not', 300, 40],
+        ['u:4', 'not', 160, 200],
+      ],
+      { 'u:1.Y>u:3.A': [{ x: 140, y: 120 }, { x: 260, y: 120 }, { x: 260, y: 60 }, { x: 300, y: 60 }] },
+    );
+    const out = reduce(e, ['u:1', 'u:2']);
+    expect(out.pos).toMatchObject({ 'u:1': { x: 100, y: 100 }, 'u:2': { x: 100, y: 200 }, 'u:3': { x: 310, y: 40 }, 'u:4': { x: 170, y: 200 } });
+    expect(out.routes[Object.keys(e.routes)[0]].points).toEqual([{ x: 150, y: 120 }, { x: 270, y: 120 }, { x: 270, y: 60 }, { x: 310, y: 60 }]);
+  });
+
+  it('pushes as before for a gate that is also taller (its output pin moves down)', () => {
+    const e = sheet(
+      [
+        ['u:1', 'and', 100, 100],
+        ['u:2', 'not', 220, 100],
+      ],
+      { 'u:1.Y>u:2.A': [{ x: 140, y: 120 }, { x: 220, y: 120 }] },
+      true,
+    );
+    const next = setParams(e, 'u:1', { inputs: 3 });
+    const out = fitWider(next, effectiveDiagram('m', undefined, next, none), new Map([['u:1', { width: 40, height: 40 }]]), approxMeasure);
+    expect(out.pos['u:2']).toEqual({ x: 230, y: 100 });
   });
 });
 
