@@ -15,7 +15,7 @@
  * The text the user writes is read by parseComponents, which explains what is wrong; the
  * file loader reads the saved definitions with loadComponents, which drops what is wrong.
  */
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, literalWidth } from './symbols';
+import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, gateMode, literalWidth } from './symbols';
 import { verilogIdent } from './verilog-ident';
 
 export interface ComponentDef {
@@ -45,9 +45,13 @@ export const COMPONENTS_EXAMPLE = `[
   { "name": "and5", "title": "AND (5 inputs)", "base": "and", "inputs": 5 },
   { "name": "mux4x8", "title": "MUX 4 × 8 bits", "base": "mux", "inputs": 4, "width": 8 },
   { "name": "alu", "title": "ALU", "inputs": ["a[7:0]", "b[7:0]", "op[2:0]"], "outputs": ["y[7:0]", "zero"] },
-  { "name": "lut6", "inputs": 6, "outputs": 1 }
+  { "name": "lut6", "inputs": 6, "outputs": 1 },
+  { "name": "any8", "title": "OR of 8 bits (|a)", "base": "or", "width": 8, "mode": "reduce" }
 ]
 `;
+
+/** What "mode" takes, as the errors and hints say it. */
+const MODE_TEXT = '"bitwise" (a | b) or "reduce" (|a: one input, a 1-bit output)';
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const NAME = /^[A-Za-z_][A-Za-z0-9_$]*$/;
@@ -56,6 +60,16 @@ const [MIN_WIDTH, MAX_WIDTH] = PARAM_LIMITS.width;
 /** The fields a preset of `base` may set. */
 function presetFields(base: SymKey): string[] {
   return (SYMBOL_BY_KEY[base]?.params ?? []).filter((p) => p !== 'module');
+}
+
+/**
+ * The fields that say what a `sym` symbol with `params` is: those of presetFields, but "inputs" for a gate in
+ * reduce mode, which has one input (its "inputs" waits for when it is bitwise again, see GateMode). Its JSON
+ * leaves it out, and two reduce gates are the same whatever it is.
+ */
+function settingFields(sym: SymKey, params: SymParams): string[] {
+  const fields = presetFields(sym);
+  return gateMode({ mode: params.mode ?? SYMBOL_BY_KEY[sym]?.defaults.mode }) === 'reduce' ? fields.filter((f) => f !== 'inputs') : fields;
 }
 
 /** Whether a component is a part of its own (a module with pins), not a preset. */
@@ -154,6 +168,11 @@ function componentOf(v: unknown, k: number, taken: (name: string) => string | un
       if (key === 'style') {
         if (val !== 'label' && val !== 'text') throw new Bad(`${where}: "style" is "label" (the name in a label outline) or "text" (the name only).`);
         params.style = val;
+        continue;
+      }
+      if (key === 'mode') {
+        if (val !== 'bitwise' && val !== 'reduce') throw new Bad(`${where}: "mode" is ${MODE_TEXT}.`);
+        params.mode = val;
         continue;
       }
       const lim = PARAM_LIMITS[key as keyof typeof PARAM_LIMITS];
@@ -338,11 +357,11 @@ export function componentSymbol(def: ComponentDef): { sym: SymKey; params: SymPa
   return isPart(def) ? { sym: 'block', params: { module: def.name } } : { sym: def.base!, params: { ...def.params } };
 }
 
-/** Every setting of a `sym` symbol: `params`, with the library's defaults for those it leaves out. */
+/** Every setting of a `sym` symbol: `params`, with the library's defaults for those it leaves out (but a reduce gate's "inputs", see settingFields). */
 export function fullSettings(sym: SymKey, params: SymParams): SymParams {
   const out: SymParams = {};
   const def = SYMBOL_BY_KEY[sym];
-  for (const f of presetFields(sym)) {
+  for (const f of settingFields(sym, params)) {
     const v = params[f as keyof SymParams] ?? def?.defaults[f as keyof SymParams];
     if (v !== undefined) (out as Record<string, unknown>)[f] = v;
   }
@@ -417,7 +436,7 @@ export function sameSettings(sym: SymKey, a: SymParams, b: SymParams): boolean {
 export function symbolJson(sym: SymKey, params: SymParams): string {
   const def = SYMBOL_BY_KEY[sym];
   const o: Record<string, unknown> = { sym };
-  for (const f of presetFields(sym)) {
+  for (const f of settingFields(sym, params)) {
     const v = params[f as keyof SymParams] ?? def?.defaults[f as keyof SymParams];
     if (v !== undefined) o[f] = v;
   }
@@ -430,6 +449,7 @@ export function settingsHint(sym: SymKey): string {
     .map((f) => {
       if (f === 'value') return `"value" a Verilog number such as "4'd2"`;
       if (f === 'style') return `"style" "label" (the name in a label outline) or "text" (the name only)`;
+      if (f === 'mode') return `"mode" ${MODE_TEXT}`;
       const [lo, hi] = PARAM_LIMITS[f as keyof typeof PARAM_LIMITS];
       // "width" is bits, not the size of the drawing: say so (the symbol shows them on its pins).
       const unit = f === 'width' ? (sym === 'decoder' ? ' select bits' : ' bits') : f === 'shift' ? ' bits of the shift amount' : '';

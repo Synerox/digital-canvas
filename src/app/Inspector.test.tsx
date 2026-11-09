@@ -78,6 +78,35 @@ describe('Inspector', () => {
     expect(show(['u:3', 'u:1'].concat(['w:9']))).toContain('Show 1 pin as');
   });
 
+  it("shows a gate's mode, Bitwise or Reduce, first; a reduce gate has no input count", () => {
+    const nodes = [
+      newUserNode('u:1', 'or', { params: { inputs: 3, width: 4, mode: 'bitwise' } }),
+      newUserNode('u:2', 'or', { params: { inputs: 3, width: 4, mode: 'reduce' } }),
+      // Saved before modes existed: bitwise.
+      newUserNode('u:3', 'nand', { params: { inputs: 2, width: 1 } }),
+      newUserNode('u:4', 'not'),
+    ];
+    const edits = { ...emptyEdits(), nodes, next: 5 };
+    const netlist = effectiveDiagram('d', undefined, edits, () => undefined);
+    const layout: LayoutResult = {
+      module: 'd',
+      width: 100,
+      height: 100,
+      nodes: netlist.nodes.map((n) => ({ ...n, x: 0, y: 0, width: 40, height: 40, ports: n.ports.map((p) => ({ ...p, x: 0, y: 0 })) })),
+      edges: [],
+    };
+    const show = (id: string) =>
+      render({ files: {}, layout, netlist, sheet: 'd:d', path: [{ instance: 'd', module: 'd', drawn: true }], doc: { drawn: ['d'], sheets: { 'd:d': edits } }, selection: new Set([id]) });
+    const marked = (html: string) => [...html.matchAll(/aria-pressed="(true|false)" title="[^"]*">(Bitwise|Reduce)<\/button>/g)].map((m) => `${m[2]}:${m[1]}`);
+    const fields = (html: string) => [...html.matchAll(/<span>([^<]+)<\/span>/g)].map((m) => m[1]);
+    expect(marked(show('u:1'))).toEqual(['Bitwise:true', 'Reduce:false']);
+    expect(fields(show('u:1'))).toEqual(['Mode', 'Inputs', 'Width (bits)']);
+    expect(marked(show('u:2'))).toEqual(['Bitwise:false', 'Reduce:true']);
+    expect(fields(show('u:2'))).toEqual(['Mode', 'Input width (bits)']);
+    expect(marked(show('u:3'))).toEqual(['Bitwise:true', 'Reduce:false']);
+    expect(show('u:4')).not.toContain('Mode');
+  });
+
   it('says why a wire is flagged: its width, or a second wire into the same input', () => {
     const nodes = [newUserNode('u:1', 'input', { name: 'a' }), newUserNode('u:2', 'input', { name: 'b', params: { width: 4 } }), newUserNode('u:3', 'and')];
     const wire = (id: string, from: string, to: string) => ({ id, source: { node: from, port: `${from}.out` }, target: { node: 'u:3', port: `u:3.${to}` } });

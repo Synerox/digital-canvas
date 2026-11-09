@@ -49,7 +49,32 @@ export type SymKey =
   /** A copy of an imported symbol, kept exactly as it was drawn (its ports cannot be changed). */
   | 'raw';
 
-export type ParamName = 'width' | 'inputs' | 'value' | 'module' | 'shift' | 'parts' | 'style';
+export type ParamName = 'width' | 'inputs' | 'value' | 'module' | 'shift' | 'parts' | 'style' | 'mode';
+
+/**
+ * What a logic gate (AND, OR, XOR, NAND, NOR, XNOR) does with its bits:
+ *
+ * - `bitwise` (the default): `a | b`. Its inputs and its output are `width` bits each; bit k of the output is
+ *   the gate of bit k of every input. One gate with a `/3` bus mark is three gates side by side, as textbooks
+ *   draw it.
+ * - `reduce`: `|a`, Verilog's reduction operators (`&a`, `|a`, `^a`, `~&a`, `~|a`, `~^a`). One input of
+ *   `width` bits, one 1-bit output: the gate of all the bits of its input. Its `inputs` setting is kept for when
+ *   it is a bitwise gate again.
+ */
+export type GateMode = 'bitwise' | 'reduce';
+
+/** The gates that have a reduce mode (see GateMode). */
+export const GATE_SYMS: readonly SymKey[] = ['and', 'or', 'xor', 'nand', 'nor', 'xnor'];
+
+/** Whether a symbol is a logic gate that has a mode (see GateMode). */
+export function isGateSym(sym: SymKey): boolean {
+  return GATE_SYMS.includes(sym);
+}
+
+/** The mode a gate is drawn in: `reduce` only when its settings say so. */
+export function gateMode(params: Pick<SymParams, 'mode'>): GateMode {
+  return params.mode === 'reduce' ? 'reduce' : 'bitwise';
+}
 
 export interface SymParams {
   /** Bus width in bits (data width for operators and registers). */
@@ -66,6 +91,8 @@ export interface SymParams {
   shift?: number;
   /** How a pin is drawn: its name in a label outline (the default) or as text only (see PinStyle). */
   style?: PinStyle;
+  /** What a logic gate does with its bits: `a | b` (bitwise, the default) or `|a` (reduce). See GateMode. */
+  mode?: GateMode;
 }
 
 export interface UserNode {
@@ -126,18 +153,22 @@ export interface SymbolDef {
   named?: boolean;
 }
 
+/** Every gate starts bitwise, with 2 inputs of 1 bit; "mode" comes last in its JSON (after what it had before modes). */
+const GATE_DEFAULTS: SymParams = { inputs: 2, width: 1, mode: 'bitwise' };
+const GATE_PARAMS: ParamName[] = ['inputs', 'width', 'mode'];
+
 export const SYMBOLS: SymbolDef[] = [
   { key: 'input', title: 'Input', group: 'Ports & labels', hint: 'Module input pin', defaults: { width: 1, style: 'label' }, params: ['width', 'style'], named: true },
   { key: 'output', title: 'Output', group: 'Ports & labels', hint: 'Module output pin', defaults: { width: 1, style: 'label' }, params: ['width', 'style'], named: true },
   { key: 'inout', title: 'Inout', group: 'Ports & labels', hint: 'Bidirectional module pin', defaults: { width: 1, style: 'label' }, params: ['width', 'style'], named: true },
   { key: 'const', title: 'Constant', group: 'Ports & labels', hint: "Constant value such as 4'd2", defaults: { value: "1'b0" }, params: ['value'] },
   { key: 'text', title: 'Note', group: 'Ports & labels', hint: 'Free text (not connected)', defaults: {}, params: [], named: true },
-  { key: 'and', title: 'AND', group: 'Logic gates', hint: 'AND gate', defaults: { inputs: 2, width: 1 }, params: ['inputs', 'width'] },
-  { key: 'or', title: 'OR', group: 'Logic gates', hint: 'OR gate', defaults: { inputs: 2, width: 1 }, params: ['inputs', 'width'] },
-  { key: 'xor', title: 'XOR', group: 'Logic gates', hint: 'XOR gate', defaults: { inputs: 2, width: 1 }, params: ['inputs', 'width'] },
-  { key: 'nand', title: 'NAND', group: 'Logic gates', hint: 'NAND gate', defaults: { inputs: 2, width: 1 }, params: ['inputs', 'width'] },
-  { key: 'nor', title: 'NOR', group: 'Logic gates', hint: 'NOR gate', defaults: { inputs: 2, width: 1 }, params: ['inputs', 'width'] },
-  { key: 'xnor', title: 'XNOR', group: 'Logic gates', hint: 'XNOR gate', defaults: { inputs: 2, width: 1 }, params: ['inputs', 'width'] },
+  { key: 'and', title: 'AND', group: 'Logic gates', hint: 'AND gate: a & b, or &a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'or', title: 'OR', group: 'Logic gates', hint: 'OR gate: a | b, or |a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'xor', title: 'XOR', group: 'Logic gates', hint: 'XOR gate: a ^ b, or ^a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'nand', title: 'NAND', group: 'Logic gates', hint: 'NAND gate: ~(a & b), or ~&a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'nor', title: 'NOR', group: 'Logic gates', hint: 'NOR gate: ~(a | b), or ~|a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'xnor', title: 'XNOR', group: 'Logic gates', hint: 'XNOR gate: ~(a ^ b), or ~^a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
   { key: 'not', title: 'NOT', group: 'Logic gates', hint: 'Inverter', defaults: { width: 1 }, params: ['width'] },
   { key: 'buf', title: 'Buffer', group: 'Logic gates', hint: 'Buffer', defaults: { width: 1 }, params: ['width'] },
   { key: 'add', title: 'Adder', group: 'Arithmetic', hint: 'A + B', defaults: { width: 4 }, params: ['width'] },
@@ -210,6 +241,19 @@ const CELL_TYPE: Partial<Record<SymKey, string>> = {
   adff: '$adff',
 };
 
+/**
+ * The cell a gate in reduce mode is: Yosys' reduction cell where Yosys has one (`~&a` and `~|a` are a reduction
+ * and a NOT in Yosys; the rules draw that pair as one dc:reduce_nand or dc:reduce_nor, see rules.ts).
+ */
+export const REDUCE_CELL: Partial<Record<SymKey, string>> = {
+  and: '$reduce_and',
+  or: '$reduce_or',
+  xor: '$reduce_xor',
+  xnor: '$reduce_xnor',
+  nand: 'dc:reduce_nand',
+  nor: 'dc:reduce_nor',
+};
+
 const OP_LABEL: Record<string, string> = {
   $and: '&',
   $or: '|',
@@ -217,6 +261,12 @@ const OP_LABEL: Record<string, string> = {
   $xnor: '~^',
   'dc:nand': '&',
   'dc:nor': '|',
+  $reduce_and: '&',
+  $reduce_or: '|',
+  $reduce_xor: '^',
+  $reduce_xnor: '~^',
+  'dc:reduce_nand': '~&',
+  'dc:reduce_nor': '~|',
   $not: '~',
   'dc:buf': '',
   $add: '+',
@@ -392,6 +442,11 @@ function symbolShape(u: UserNode, iface: InterfaceOf): DNode {
         case 'nand':
         case 'nor':
         case 'xnor': {
+          if (gateMode(p) === 'reduce') {
+            // |a: all the bits of one input into one bit (see GateMode), drawn as Yosys' reduction cell.
+            const t = REDUCE_CELL[u.sym]!;
+            return { id, kind: 'cell', label: OP_LABEL[t], cellType: t, ports: [port(id, 'A', 'in', 'WEST', w), port(id, 'Y', 'out', 'EAST', 1)] };
+          }
           const n = clampParam('inputs', p.inputs, drawnWithout(u.sym, 'inputs'));
           const ins = Array.from({ length: n }, (_, k) => port(id, gateInputName(k), 'in', 'WEST', w));
           return cell([...ins, port(id, 'Y', 'out', 'EAST', w)]);

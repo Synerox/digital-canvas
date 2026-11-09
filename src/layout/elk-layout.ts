@@ -3,7 +3,7 @@
  * Signals flow left to right; inputs sit in the first layer, outputs in the last.
  */
 import type { ElkExtendedEdge, ElkNode, ElkPort } from 'elkjs/lib/elk-api';
-import type { DEdge, DNode, Diagram, Side } from '../core/diagram';
+import type { DEdge, DNode, DPort, Diagram, Side } from '../core/diagram';
 import { alignToGrid } from './grid-align';
 
 export interface Point {
@@ -119,12 +119,14 @@ export function gateShape(t: string | undefined): GateShape | undefined {
     case '$reduce_and':
     case 'dc:and':
     case 'dc:nand':
+    case 'dc:reduce_nand':
       return 'and';
     case '$or':
     case '$logic_or':
     case '$reduce_or':
     case '$reduce_bool':
     case 'dc:nor':
+    case 'dc:reduce_nor':
       return 'or';
     case '$xor':
     case '$xnor':
@@ -138,7 +140,37 @@ export function gateShape(t: string | undefined): GateShape | undefined {
 
 /** Gates with a bubble on their output. */
 export function invertsOutput(t: string | undefined): boolean {
-  return t === 'dc:nand' || t === 'dc:nor' || t === '$xnor' || t === '$reduce_xnor';
+  return t === 'dc:nand' || t === 'dc:nor' || t === '$xnor' || t === '$reduce_xnor' || t === 'dc:reduce_nand' || t === 'dc:reduce_nor';
+}
+
+/**
+ * Reduction gates (`&a`, `|a`, `^a`, `~&a`, `~|a`, `~^a`; `$reduce_bool` is the `|a` of a condition): all the bits of
+ * their one input into one bit. Drawn as the gate with that input in the middle of its back, fanned out into
+ * bits just before it (see the renderer).
+ */
+export function isReduceType(t: string | undefined): boolean {
+  return (
+    t === '$reduce_and' ||
+    t === '$reduce_or' ||
+    t === '$reduce_xor' ||
+    t === '$reduce_xnor' ||
+    t === '$reduce_bool' ||
+    t === 'dc:reduce_nand' ||
+    t === 'dc:reduce_nor'
+  );
+}
+
+/**
+ * How far before a reduction gate its bus input fans out into bits: one grid step, on the straight stub every wire
+ * ends with at a pin. The bus mark of its wire and the open-pin hint keep clear of it.
+ */
+export const REDUCE_FAN = GRID;
+
+/** The bus input of a reduction gate, which is drawn fanned out into bits (see REDUCE_FAN); undefined for any other symbol. */
+export function fannedInput<P extends DPort>(n: { kind: DNode['kind']; cellType?: string; ports: P[] }): P | undefined {
+  if (n.kind !== 'cell' || !isReduceType(n.cellType)) return undefined;
+  const ins = n.ports.filter((p) => p.side === 'WEST');
+  return ins.length === 1 && ins[0].width > 1 ? ins[0] : undefined;
 }
 
 /**

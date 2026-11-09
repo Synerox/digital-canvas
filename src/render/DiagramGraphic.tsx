@@ -5,7 +5,7 @@
 import type { JSX } from 'react';
 import { pinStyleOf } from '../core/diagram';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT, approxMeasure, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, muxInset } from '../layout/elk-layout';
+import { FONT, REDUCE_FAN, approxMeasure, fannedInput, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, muxInset } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -102,11 +102,12 @@ interface MarkSpot {
  * side of the wire, then the mark moves further along it (never onto a bend). When nothing is
  * clear, the usual spot.
  */
-function placeBusMark(points: Point[], fromEnd: boolean, text: string, texts: readonly Box[], solids: readonly Box[]): MarkSpot {
+function placeBusMark(points: Point[], fromEnd: boolean, text: string, texts: readonly Box[], solids: readonly Box[], clear = 0): MarkSpot {
   const pts = fromEnd ? [...points].reverse() : points;
   let total = 0;
   for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-  const usual = Math.min(12, firstSegmentLength(points, fromEnd) / 2);
+  // `clear`: a stretch at the start the slash keeps off (the fan of a reduction gate, where the wire ends).
+  const usual = clear ? clear + 10 : Math.min(12, firstSegmentLength(points, fromEnd) / 2);
   const spots = (at: Point, horizontal: boolean): MarkSpot[] => [
     { at, text: { x: at.x + 2, y: at.y - 7, anchor: 'start' } },
     horizontal ? { at, text: { x: at.x + 2, y: at.y + 14, anchor: 'start' } } : { at, text: { x: at.x - 6, y: at.y + 4, anchor: 'end' } },
@@ -118,7 +119,7 @@ function placeBusMark(points: Point[], fromEnd: boolean, text: string, texts: re
   const nearTexts = texts.filter(close);
   const nearAll = [...nearTexts, ...solids.filter(close)];
   const dists = [usual];
-  for (let d = 20; d <= Math.min(total - 6, 120); d += 8) dists.push(d);
+  for (let d = Math.max(20, usual + 8); d <= Math.min(total - 6, 120); d += 8) dists.push(d);
   for (const [k, d] of dists.entries()) {
     const p = pointAt(pts, d);
     if (k > 0 && p.nearBend) continue;
@@ -218,6 +219,24 @@ function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; 
     fill: sel ? p.theme.accentFill : n.kind === 'input' || n.kind === 'output' ? p.theme.pinFill : p.theme.fill,
     width: sel ? 2.2 : STROKE,
   };
+}
+
+/**
+ * The fan of a reduction gate (`|a`): its bus input `q` splits, REDUCE_FAN before the gate, into lines that run on
+ * side by side into the gate's back (`edgeX`, from the symbol's left edge, by height in it), as a bus split into
+ * its bits into one gate is drawn: all its bits go into this gate. Three lines for a bus of three bits or more,
+ * two for two (the number is on the wire's bus mark).
+ */
+function reduceFan(n: LNode, q: LNode['ports'][number], edgeX: (y: number) => number, theme: Theme): JSX.Element {
+  const spread = q.width === 2 ? [-4, 4] : [-6, 0, 6];
+  const split = q.x - REDUCE_FAN / 2;
+  return (
+    <g key="fan" fill="none" stroke={theme.wire} strokeWidth={STROKE} strokeLinejoin="round">
+      {spread.map((dy) => (
+        <polyline key={dy} points={`${q.x - REDUCE_FAN},${q.y} ${split},${q.y + dy} ${n.x + edgeX(q.y + dy - n.y)},${q.y + dy}`} />
+      ))}
+    </g>
+  );
 }
 
 /** Short stub lines from a port to the outline of a non-rectangular symbol. */
@@ -331,6 +350,8 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     const top = y + (h - hb) / 2;
     const bottom = top + hb;
     const inputs = n.ports.filter((q) => q.side === 'WEST');
+    // A reduction (|a) of a bus: its one input fans out into bits just before the gate (see reduceFan).
+    const fanned = fannedInput(n);
     const first = Math.min(...inputs.map((q) => q.y));
     const last = Math.max(...inputs.map((q) => q.y));
     const back = [
@@ -348,6 +369,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       return (
         <g>
           {back}
+          {fanned && reduceFan(n, fanned, () => 0, theme)}
           <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
           {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
           {outBubble}
@@ -365,7 +387,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     };
     return (
       <g>
-        {stubs(n, edgeX, theme)}
+        {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
         {back}
         <path d={body} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
         {gate === 'xor' && <path d={curve(-6)} fill="none" stroke={s.stroke} strokeWidth={s.width} />}
@@ -590,6 +612,7 @@ function Edges({
   interactive,
   texts,
   solids,
+  fanned,
 }: {
   edges: LEdge[];
   theme: Theme;
@@ -600,6 +623,8 @@ function Edges({
   texts: Box[];
   /** Symbols and wire segments the numbers of width marks must not cover. */
   solids: readonly Box[];
+  /** Inputs of reduction gates, whose wires fan out just before them (see reduceFan): their marks keep off the fan. */
+  fanned: ReadonlySet<string>;
 }) {
   const marks: JSX.Element[] = [];
   const doneSources = new Set<string>();
@@ -607,7 +632,7 @@ function Edges({
   const junctions: Point[] = [];
   const mark = (e: LEdge, fromEnd: boolean) => {
     const text = String(e.width);
-    const spot = placeBusMark(e.points, fromEnd, text, texts, solids);
+    const spot = placeBusMark(e.points, fromEnd, text, texts, solids, fromEnd && fanned.has(e.target.port) ? REDUCE_FAN : 0);
     texts.push(textBox(spot.text, text, MARK_FONT));
     marks.push(<BusMark key={`m${e.id}`} spot={spot} width={e.width} theme={theme} />);
   };
@@ -706,7 +731,16 @@ export function DiagramGraphic(props: GraphicProps) {
   ];
   return (
     <g>
-      <Edges edges={edges} theme={p.theme} selection={p.selection} flagged={p.flagged} interactive={p.interactive} texts={texts} solids={solids} />
+      <Edges
+        edges={edges}
+        theme={p.theme}
+        selection={p.selection}
+        flagged={p.flagged}
+        interactive={p.interactive}
+        texts={texts}
+        solids={solids}
+        fanned={new Set(nodes.flatMap((n) => fannedInput(n)?.id ?? []))}
+      />
       {nodes.map((n) => (
         <NodeShape key={n.id} n={n} p={p} names={names} />
       ))}

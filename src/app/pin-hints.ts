@@ -8,7 +8,7 @@
  *   wired (a wire then carries the mark).
  */
 import type { Side } from '../core/diagram';
-import type { LayoutResult, Point } from '../layout/elk-layout';
+import { type LayoutResult, type Point, REDUCE_FAN, fannedInput } from '../layout/elk-layout';
 
 /** Length of the stub drawn on an open bus pin: two grid steps, so that its end is on the grid. */
 export const OPEN_BUS_STUB = 20;
@@ -42,9 +42,12 @@ export function openBusHints(layout: Pick<LayoutResult, 'nodes' | 'edges'>): Ope
       // The slices of a split or a concatenation are named next to the bar already ([7:4]), where the number would go.
       if ((n.kind === 'split' && p.side === 'EAST') || (n.kind === 'join' && p.side === 'WEST')) continue;
       const d = OUT[p.side] ?? OUT.EAST;
+      // The input of a reduction gate fans out next to the gate (see REDUCE_FAN): the stub is longer, its slash past the fan.
+      const len = fannedInput(n)?.id === p.id ? OPEN_BUS_STUB + REDUCE_FAN : OPEN_BUS_STUB;
+      const at = len - OPEN_BUS_STUB / 2;
       const from = { x: p.x, y: p.y };
-      const to = { x: p.x + d.x * OPEN_BUS_STUB, y: p.y + d.y * OPEN_BUS_STUB };
-      const slash = { x: p.x + (d.x * OPEN_BUS_STUB) / 2, y: p.y + (d.y * OPEN_BUS_STUB) / 2 };
+      const to = { x: p.x + d.x * len, y: p.y + d.y * len };
+      const slash = { x: p.x + d.x * at, y: p.y + d.y * at };
       // Above a stub that runs across, right of one that runs up or down (as wires write their marks).
       const text = d.y === 0 ? { x: slash.x, y: slash.y - 7, anchor: 'middle' as const } : { x: slash.x + 6, y: slash.y + 4, anchor: 'start' as const };
       out.push({ port: p.id, width: p.width, from, to, slash, text });

@@ -58,7 +58,7 @@ describe('components in JSON', () => {
     expect(err('[{ "base": "and" }]')).toMatch(/^Component 1: "name"/);
     expect(err('[{ "name": "module", "base": "and" }]')).toMatch(/keyword/);
     expect(err('[{ "name": "g", "base": "nope" }]')).toMatch(/"base" is one of/);
-    expect(err('[{ "name": "g", "base": "and", "inptus": 3 }]')).toMatch(/AND has "inputs", "width", not "inptus"/);
+    expect(err('[{ "name": "g", "base": "and", "inptus": 3 }]')).toMatch(/AND has "inputs", "width", "mode", not "inptus"/);
     expect(err('[{ "name": "g", "base": "and", "inputs": 99 }]')).toMatch(/"inputs" is a whole number from 2 to 32/);
     expect(err('[{ "name": "g", "base": "const", "value": "abc" }]')).toMatch(/Verilog number/);
     expect(err('[{ "name": "p", "inputs": ["a b"] }]')).toMatch(/p input 1: "a b" is not a pin/);
@@ -90,7 +90,7 @@ describe('components in JSON', () => {
 
   it('reads the JSON of a placed symbol', () => {
     // One item to a line.
-    expect(symbolJson('and', { inputs: 3 })).toBe('{\n  "sym": "and",\n  "inputs": 3,\n  "width": 1\n}');
+    expect(symbolJson('and', { inputs: 3 })).toBe('{\n  "sym": "and",\n  "inputs": 3,\n  "width": 1,\n  "mode": "bitwise"\n}');
     expect(parseSymbolJson(symbolJson('mux', { inputs: 4, width: 8 }), 'mux')).toEqual({ params: { inputs: 4, width: 8 } });
     expect(parseSymbolJson('{ "sym": "and", "inputs": 5, "width": 1 }', 'and')).toEqual({ params: { inputs: 5, width: 1 } });
     expect(parseSymbolJson('{ "inputs": 5 }', 'and')).toEqual({ params: { inputs: 5 } });
@@ -112,10 +112,10 @@ describe('components in JSON', () => {
       expect(editComponent(defs, d.name, componentJson(d, true)).defs).toEqual(defs);
     }
     const r = editComponent(defs, 'alu', '{ "name": "alu", "inputs": ["a[7:0]"], "outputs": ["y[7:0]"] }');
-    expect(r.defs!.map((d) => d.name)).toEqual(['and5', 'mux4x8', 'alu', 'lut6']);
+    expect(r.defs!.map((d) => d.name)).toEqual(['and5', 'mux4x8', 'alu', 'lut6', 'any8']);
     expect(r.defs![2].pins!.map((p) => p.name)).toEqual(['a', 'y']);
     // Renamed in place; not to the name of another component, nor of a module.
-    expect(editComponent(defs, 'and5', '{ "name": "and6", "base": "and", "inputs": 6 }').defs!.map((d) => d.name)).toEqual(['and6', 'mux4x8', 'alu', 'lut6']);
+    expect(editComponent(defs, 'and5', '{ "name": "and6", "base": "and", "inputs": 6 }').defs!.map((d) => d.name)).toEqual(['and6', 'mux4x8', 'alu', 'lut6', 'any8']);
     expect(editComponent(defs, 'and5', '{ "name": "alu", "base": "and" }').error).toBe('Another component is named alu.');
     expect(editComponent(defs, 'alu', '{ "name": "top", "inputs": 1 }', (n) => (n === 'top' ? 'a module of your Verilog is named top.' : undefined)).error).toBe(
       'top: a module of your Verilog is named top.',
@@ -208,7 +208,7 @@ describe('components in JSON', () => {
   });
 
   it('says what the JSON of a symbol sets', () => {
-    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits');
+    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits, "mode" "bitwise" (a | b) or "reduce" (|a: one input, a 1-bit output)');
     expect(settingsHint('decoder')).toBe('"width" 1–8 select bits');
     expect(settingsHint('const')).toBe('"value" a Verilog number such as "4\'d2"');
     expect(settingsHint('shl')).toBe('"width" 1–256 bits, "shift" 1–16 bits of the shift amount');

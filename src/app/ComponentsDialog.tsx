@@ -60,8 +60,9 @@ export function ComponentsDialog({ onClose }: { onClose(): void }) {
           A list of components for the library, saved with your work. A <b>preset</b> is a library symbol with its settings, for example{' '}
           <code>{'{ "name": "and5", "base": "and", "inputs": 5 }'}</code>: <code>base</code> is <code>and</code>, <code>or</code>, <code>mux</code>,{' '}
           <code>add</code>… and the other fields are what Properties shows for it (<code>inputs</code>, <code>width</code>, <code>parts</code>,{' '}
-          <code>shift</code>, <code>value</code>, and for an input, output or inout pin <code>style</code>, <code>"label"</code> or{' '}
-          <code>"text"</code>, its Show as). A <b>part</b> has pins of its own and no logic:{' '}
+          <code>shift</code>, <code>value</code>, for an input, output or inout pin <code>style</code>, <code>"label"</code> or{' '}
+          <code>"text"</code>, its Show as, and for a gate <code>mode</code>, <code>"bitwise"</code> (<code>a | b</code>) or{' '}
+          <code>"reduce"</code> (<code>|a</code>: one input of <code>width</code> bits, a 1-bit output)). A <b>part</b> has pins of its own and no logic:{' '}
           <code>{'{ "name": "alu", "inputs": ["a[7:0]", "b[7:0]"], "outputs": ["y[7:0]"] }'}</code>, or numbers of pins such as{' '}
           <code>{'"inputs": 6'}</code> (named in0, in1…, with <code>width</code> bits each). A part is placed as a block. What is placed
           from a component changes with it (except a symbol changed on its own).

@@ -6,11 +6,11 @@
  * undo/redo can keep old versions as they are.
  */
 import { type DEdge, type DNode, type DPort, type Diagram, type PinStyle, isPinKind, pinStyleOf, withPinStyle } from '../core/diagram';
-import { GRID, type LayoutResult, type MeasureText, type Point, legacyCellSize, sizeNode } from '../layout/elk-layout';
+import { GRID, type LayoutResult, type MeasureText, type Point, isReduceType, legacyCellSize, sizeNode } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
 import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
-import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, symbolNode } from './symbols';
+import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, isGateSym, symbolNode } from './symbols';
 import { verilogIdent } from './verilog-ident';
 import { type ComponentDef, componentSymbol, followsPreset, fullSettings, isPart, sameSettings } from './components';
 
@@ -646,6 +646,14 @@ const CELL_TO_SYM: Record<string, SymKey> = {
   $adff: 'adff',
   $mux: 'mux',
   'dc:mux': 'mux',
+  // Reductions are gates in reduce mode (see GateMode); `$reduce_bool`, the `|a` of a condition, is an OR.
+  $reduce_and: 'and',
+  $reduce_or: 'or',
+  $reduce_bool: 'or',
+  $reduce_xor: 'xor',
+  $reduce_xnor: 'xnor',
+  'dc:reduce_nand': 'nand',
+  'dc:reduce_nor': 'nor',
 };
 
 function signature(n: DNode): string {
@@ -702,6 +710,12 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       if (!sym || n.attrs?.invertB || n.params) break;
       const ins = n.ports.filter((p) => p.dir === 'in' && p.side === 'WEST');
       const params: SymParams = {};
+      if (isReduceType(n.cellType)) {
+        // |a: its one input is as wide as the bus (and the 2 inputs of the library's gate wait for bitwise mode).
+        const u: UserNode = { id, sym, params: { inputs: 2, width: width('A'), mode: 'reduce' } };
+        if (signature(symbolNode(u, iface)) === signature(n)) return u;
+        break;
+      }
       if (sym === 'decoder') params.width = width('A');
       else if (sym === 'dff' || sym === 'dffe' || sym === 'adff') params.width = width('D');
       else if (sym === 'shl' || sym === 'shr') {
@@ -710,6 +724,7 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       } else if (['eq', 'ne', 'lt', 'le', 'gt', 'ge'].includes(sym)) params.width = width('A');
       else params.width = width('Y');
       if (['and', 'or', 'xor', 'nand', 'nor', 'xnor', 'mux'].includes(sym)) params.inputs = ins.length;
+      if (isGateSym(sym)) params.mode = 'bitwise';
       const u: UserNode = { id, sym, params };
       if (signature(symbolNode(u, iface)) === signature(n)) return u;
       break;

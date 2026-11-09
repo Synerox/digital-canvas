@@ -17,7 +17,7 @@ import {
   formatConst,
   sliceLabel,
 } from './ir';
-import { ARITHMETIC, applyRules } from './rules';
+import { ARITHMETIC, applyRules, combineReductions } from './rules';
 
 /** text: a free note (no ports); split: a bus split into slices (drawn by hand). */
 export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'inout' | 'const' | 'join' | 'split' | 'text';
@@ -189,6 +189,8 @@ const CELL_SYMBOL: Record<string, string> = {
   'dc:and': '&',
   'dc:nand': '&',
   'dc:nor': '|',
+  'dc:reduce_nand': '~&',
+  'dc:reduce_nor': '~|',
   'dc:buf': '',
   'dc:mux': 'MUX',
 };
@@ -301,7 +303,9 @@ function nameBits(nets: IRNet[], bits: Bit[]): { name: string; full: boolean } |
 export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
   const raw: IRModule | undefined = design.modules[moduleName];
   if (!raw) return { module: moduleName, nodes: [], edges: [] };
-  const m = applyRules(raw);
+  // What selects a case is named by the cells before combineReductions (see there).
+  const named = applyRules(raw);
+  const m = combineReductions(named);
 
   const nodes: DNode[] = [];
   const edges: DEdge[] = [];
@@ -329,7 +333,7 @@ export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
   const sinks: Sink[] = [];
 
   /** The cell that drives each bit, to read what selects a case of a $pmux. */
-  const cellOf = bitDrivers(m.cells);
+  const cellOf = bitDrivers(named.cells);
 
   const addDriver = (d: Driver, bit: number) => {
     const first = drivers.get(bit);
