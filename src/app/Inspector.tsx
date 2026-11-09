@@ -6,12 +6,11 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import type { Diagram } from '../core/diagram';
-import type { SrcRange } from '../core/ir';
 import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/check';
 import { PARAM_LIMITS, SYMBOL_BY_KEY, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-ident';
-import { moduleTitle, sameFile, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
+import { moduleTitle, sheetsUsing, staleSlices, useStore, viewModeOf } from './store';
 import { ui } from './ui-events';
 import { openSettings, partOfBlock, settingsOf } from './settings';
 
@@ -114,25 +113,6 @@ function parseSlice(text: string, srcWidth: number): { lo: number; width: number
   return { lo, width: hi - lo + 1 };
 }
 
-/**
- * The source lines Source highlights for a symbol, each once and in order (an automatic block
- * has many cells, often several per line). Only lines of open files count, so a range from a
- * damaged drawing file (lines 1 to 10⁹) costs no more than the file is long.
- */
-function srcLines(src: readonly SrcRange[], files: Record<string, string>): number[] {
-  const lines = new Set<number>();
-  /** Lines per file, numbered as Source numbers them. */
-  const count = new Map<string, number>();
-  for (const r of src) {
-    const file = Object.keys(files).find((f) => sameFile(r.file, f));
-    if (file === undefined) continue;
-    if (!count.has(file)) count.set(file, files[file].split('\n').length);
-    const last = Math.min(Math.max(r.startLine, r.endLine), count.get(file)!);
-    for (let l = Math.max(1, r.startLine); l <= last; l++) lines.add(l);
-  }
-  return [...lines].sort((a, b) => a - b);
-}
-
 /** Why the checks flag a wire (see checkSheet), which keeps one set of flagged wires for all reasons. */
 function wireTrouble(d: Diagram, id: string): string[] {
   const e = d.edges.find((x) => x.id === id);
@@ -144,18 +124,6 @@ function wireTrouble(d: Diagram, id: string): string[] {
   const others = d.edges.filter((x) => x.target.port === e.target.port).map((x) => ({ ...x, width: into.width, shift: undefined, label: undefined }));
   const doubled = checkSheet({ ...d, edges: others }).flagged.has(id);
   return [...(alone ? ['does not match the input it feeds'] : []), ...(doubled ? ['its input has another driver'] : [])];
-}
-
-/** Sorted line numbers, runs written as ranges: `31, 33, 35–48`. */
-function lineList(lines: number[]): string {
-  const out: string[] = [];
-  for (let i = 0; i < lines.length; ) {
-    let j = i;
-    while (j + 1 < lines.length && lines[j + 1] === lines[j] + 1) j++;
-    out.push(j > i ? `${lines[i]}–${lines[j]}` : String(lines[i]));
-    i = j + 1;
-  }
-  return out.join(', ');
 }
 
 /**
@@ -320,7 +288,6 @@ export function Inspector() {
         ? (node.subLabel ?? '')
         : node.label;
     const renamed = !user && edits?.labels[id] !== undefined;
-    const lines = srcLines(node.src, s.files);
     // A block of a part has nothing to open, unless a drawing or Verilog module of that name defines it now.
     const part = user ? partOfBlock(s, node) : undefined;
     const settings = settingsOf(s, id);
@@ -408,18 +375,10 @@ export function Inspector() {
             </dl>
           </details>
         )}
-        {/* One line: where it comes from, and the lines Source highlights (Source shows only with the sheets of Verilog). */}
-        {!user ? (
+        {!user && (
           <p className="small muted" title={`Change the Verilog to change what it is. You can ${renameable ? 'move, rename' : 'move'} or delete it here.`}>
-            From Verilog{lines.length > 0 && `, ${lines.length === 1 ? `line ${lines[0]}` : `lines ${lineList(lines)}`} (highlighted in Source)`}.
+            From Verilog.
           </p>
-        ) : (
-          !drawn &&
-          lines.length > 0 && (
-            <p className="small muted">
-              Verilog {lines.length === 1 ? `line ${lines[0]} is` : `lines ${lineList(lines)} are`} highlighted in Source.
-            </p>
-          )
         )}
         <div className="prop-actions">
           {settings && (

@@ -284,32 +284,31 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
   const name = u.name ?? '';
   switch (u.sym) {
     case 'input':
-      return { id, kind: 'input', label: name || 'in', ports: [port(id, 'out', 'out', 'EAST', w)], src: [] };
+      return { id, kind: 'input', label: name || 'in', ports: [port(id, 'out', 'out', 'EAST', w)] };
     case 'output':
-      return { id, kind: 'output', label: name || 'out', ports: [port(id, 'in', 'in', 'WEST', w)], src: [] };
+      return { id, kind: 'output', label: name || 'out', ports: [port(id, 'in', 'in', 'WEST', w)] };
     case 'inout':
       return {
         id,
         kind: 'inout',
         label: name || 'io',
         ports: [port(id, 'out', 'out', 'EAST', w), port(id, 'in', 'in', 'WEST', w)],
-        src: [],
       };
     case 'const': {
       const value = (p.value ?? "1'b0").trim() || "1'b0";
-      return { id, kind: 'const', label: value, ports: [port(id, 'out', 'out', 'EAST', literalWidth(value) ?? 32)], src: [] };
+      return { id, kind: 'const', label: value, ports: [port(id, 'out', 'out', 'EAST', literalWidth(value) ?? 32)] };
     }
     case 'text':
-      return { id, kind: 'text', label: name || 'Note', ports: [], src: [] };
+      return { id, kind: 'text', label: name || 'Note', ports: [] };
     case 'concat': {
       const parts = clampParam('parts', p.parts, drawnWithout(u.sym, 'parts'));
       const ports = sliceNames(parts, w).map((n) => port(id, n, 'in', 'WEST', w));
-      return { id, kind: 'join', label: '{ }', ports: [...ports, port(id, 'out', 'out', 'EAST', parts * w)], src: [] };
+      return { id, kind: 'join', label: '{ }', ports: [...ports, port(id, 'out', 'out', 'EAST', parts * w)] };
     }
     case 'split': {
       const parts = clampParam('parts', p.parts, drawnWithout(u.sym, 'parts'));
       const ports = sliceNames(parts, w).map((n) => port(id, n, 'out', 'EAST', w));
-      return { id, kind: 'split', label: '}{', ports: [port(id, 'in', 'in', 'WEST', parts * w), ...ports], src: [] };
+      return { id, kind: 'split', label: '}{', ports: [port(id, 'in', 'in', 'WEST', parts * w), ...ports] };
     }
     case 'block': {
       const module = p.module ?? '';
@@ -329,14 +328,13 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
         moduleName: module || undefined,
         instanceName: name || id,
         ports,
-        src: [],
         // The module was deleted or renamed away: the block keeps its place but has no pins.
         ...(module && !info ? { attrs: { missingModule: true } } : {}),
       };
     }
     case 'raw': {
       const r = u.raw;
-      if (!r) return { id, kind: 'text', label: '(missing symbol)', ports: [], src: [] };
+      if (!r) return { id, kind: 'text', label: '(missing symbol)', ports: [] };
       const label = r.kind === 'instance' ? r.label : r.kind === 'cell' || r.kind === 'const' || r.kind === 'join' || r.kind === 'split' ? r.label : name || r.label;
       return {
         ...r,
@@ -357,7 +355,6 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
           label: 'MUX',
           cellType: '$mux',
           ports: [port(id, 'A', 'in', 'WEST', w), port(id, 'B', 'in', 'WEST', w), port(id, 'S', 'in', 'SOUTH', 1), port(id, 'Y', 'out', 'EAST', w)],
-          src: [],
         };
       }
       const ins = Array.from({ length: n }, (_, k) => port(id, `I${k}`, 'in', 'WEST', w));
@@ -367,19 +364,17 @@ export function symbolNode(u: UserNode, iface: InterfaceOf): DNode {
         label: 'MUX',
         cellType: 'dc:mux',
         ports: [...ins, port(id, 'S', 'in', 'SOUTH', sw), port(id, 'Y', 'out', 'EAST', w)],
-        src: [],
       };
     }
     default: {
       const type = CELL_TYPE[u.sym];
-      if (!type) return { id, kind: 'text', label: `(unknown symbol ${u.sym})`, ports: [], src: [] };
+      if (!type) return { id, kind: 'text', label: `(unknown symbol ${u.sym})`, ports: [] };
       const cell = (ports: DPort[], attrs?: DNode['attrs']): DNode => ({
         id,
         kind: 'cell',
         label: OP_LABEL[type] ?? type,
         cellType: type,
         ports,
-        src: [],
         attrs,
       });
       switch (u.sym) {

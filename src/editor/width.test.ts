@@ -121,7 +121,6 @@ describe('widths that can be changed', () => {
         { id: 'join:x.[1:0]', name: '[1:0]', dir: 'in', side: 'WEST', width: 2 },
         { id: 'join:x.out', name: 'out', dir: 'out', side: 'EAST', width: 6 },
       ],
-      src: [],
     };
     expect(toUserNode(join, 'u:1', none)).toEqual({ id: 'u:1', sym: 'concat', params: { parts: 3, width: 2 } });
     const split = symbolNode(newUserNode('s', 'split', { params: { parts: 2, width: 4 } }), none);

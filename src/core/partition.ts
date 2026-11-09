@@ -20,8 +20,8 @@
  *
  * Block names come from a `//` comment written just above the block's first
  * statement when there is one, otherwise from its main output signal.
- * Cells keep their stable IDs inside the block, so saved positions and code
- * highlighting keep working; the block's own ID comes from its name.
+ * Cells keep their stable IDs inside the block, so saved positions keep
+ * working; the block's own ID comes from its name.
  */
 import type { Bit, IRCell, IRDesign, IRModule, IRNet, IRPort, SrcRange } from './ir';
 import { inputPortBits, sliceLabel } from './ir';
@@ -1059,7 +1059,7 @@ export function buildAutoModules(
     let name = autoModuleName(m.name, blk.label);
     for (let k = 2; taken.has(name) || chosen.has(name); k++) name = autoModuleName(m.name, `${blk.label}_${k}`);
     chosen.add(name);
-    // Port names need a net of the same name (pins look up their source location there).
+    // Port names need a net of the same name.
     // Bundles get a hidden net, so wires inside still carry the member names.
     const extraNets: IRNet[] = ports
       .filter((p) => !m.nets.some((n) => !n.hidden && n.name === p.name))

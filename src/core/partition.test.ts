@@ -88,8 +88,8 @@ describe('automatic blocks for a single module', () => {
     const workers = top.edges.filter((e) => e.source.node === 'in:workers_a');
     expect(workers.map((e) => e.target.node).sort()).toEqual(['cell:auto:field_owner', 'cell:auto:result_valid']);
     expect(workers.every((e) => e.width === 12)).toBe(true);
-    // Source mapping: the validator block points at the lines it came from.
-    const rv = blocks.find((b) => b.label === 'result_valid')!;
+    // The validator block keeps the source lines of the cells it took (in the netlist; nothing draws them).
+    const rv = d.modules.top.cells.find((c) => c.id === 'auto:result_valid')!;
     const lines = new Set(rv.src.map((r) => r.startLine));
     expect(lines.has(31)).toBe(true); // worker_total_a
     expect(lines.has(47)).toBe(true); // result_valid

@@ -200,7 +200,6 @@ function Ghost({ at }: { at: Point }) {
 export function EditorCanvas() {
   const layout = useStore((s) => s.layout);
   const selection = useStore((s) => s.selection);
-  const highlighted = useStore((s) => s.highlighted);
   const issues = useStore((s) => s.issues);
   const placing = useStore((s) => s.placing);
   const wrap = useRef<HTMLDivElement>(null);
@@ -591,7 +590,7 @@ export function EditorCanvas() {
       onPointerDown={(ev) => {
         const w = toWorld(ev.clientX, ev.clientY);
         (ev.currentTarget as HTMLElement).focus({ preventScroll: true });
-        // The canvas cannot be selected, so a press here would leave text selected in Source;
+        // The canvas cannot be selected, so a press here would leave text selected in a pane (the Yosys log);
         // drop it, so that Ctrl+C later copies symbols, not old text (see App's shortcuts).
         document.getSelection()?.removeAllRanges();
         if (ev.button === 1 || ev.button === 2 || (ev.button === 0 && spaceDown)) {
@@ -820,7 +819,7 @@ export function EditorCanvas() {
         </defs>
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
           <rect x={vx - gridStep} y={vy - gridStep} width={vw + 2 * gridStep} height={vh + 2 * gridStep} fill="url(#dc-grid)" pointerEvents="none" />
-          <Graphic layout={layout} theme={THEME} selection={selection} highlighted={highlighted} flagged={issues.flagged} interactive />
+          <Graphic layout={layout} theme={THEME} selection={selection} flagged={issues.flagged} interactive />
           {selectedNodes.map((n) => (
             <rect
               key={n.id}

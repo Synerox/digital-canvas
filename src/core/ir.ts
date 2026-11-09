@@ -978,7 +978,7 @@ function buildModule(
 
 /**
  * Convert Yosys JSON into the IR.
- * @param sources file name -> Verilog text, used for stable IDs and code highlighting.
+ * @param sources file name -> Verilog text, used for stable IDs.
  */
 export function buildDesign(json: YosysDesign, sources: Record<string, string> = {}): IRDesign {
   const names = new Set(Object.keys(json.modules));

@@ -34,7 +34,7 @@ export function wireShift(e: Pick<DEdge, 'shift'>): number {
   return e.shift !== undefined && Number.isInteger(e.shift) && e.shift > 0 && e.shift < 31 ? e.shift : 0;
 }
 
-/** The note the import's "scale" rule writes on a wire that appends `shift` zero bits (`×4` for 2). */
+/** The note the import writes on a wire into arithmetic that appends `shift` low-order zero bits (`×4` for 2; see core/rules). */
 export const scaleNote = (shift: number) => `×${2 ** shift}`;
 
 const list = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
@@ -108,8 +108,8 @@ export function checkSheet(d: Diagram, opts: { verilog?: boolean } = {}): SheetI
     const t = port.get(e.target.port);
     if (!t) continue;
     const width = e.width + wireShift(e);
-    // Arithmetic and compare operands are zero-extended (how Verilog widens them, and how
-    // the import's "Hide zero extension" rule draws them), so a narrower wire is fine there.
+    // Arithmetic and compare operands are zero-extended (how Verilog widens them, and how the
+    // import draws high-order zero padding: as a plain wire, see core/rules), so a narrower wire is fine there.
     const extended = width < t.width && t.cellType !== undefined && ARITHMETIC.has(t.cellType);
     if (t.width !== width && !extended) {
       flag(e.id, 'does not match the input it feeds');

@@ -11,14 +11,13 @@ import {
   type IRDesign,
   type IRModule,
   type IRNet,
-  type SrcRange,
   bitDrivers,
   caseNames,
   displayModuleName,
   formatConst,
   sliceLabel,
 } from './ir';
-import { ARITHMETIC, DEFAULT_RULES, type RuleId, applyRules } from './rules';
+import { ARITHMETIC, applyRules } from './rules';
 
 /** text: a free note (no ports); split: a bus split into slices (drawn by hand). */
 export type NodeKind = 'instance' | 'cell' | 'input' | 'output' | 'inout' | 'const' | 'join' | 'split' | 'text';
@@ -53,7 +52,6 @@ export interface DNode {
   /** Yosys instance name, used in the breadcrumb. */
   instanceName?: string;
   ports: DPort[];
-  src: SrcRange[];
   /** Semantic transform that produced this node, if any. */
   rule?: string;
   /** Drawing hints from semantic transforms (e.g. inverted inputs). */
@@ -92,7 +90,7 @@ export interface DEdge {
   bits?: { lo: number; width: number };
   /**
    * Low-order zero bits appended to what the edge carries (`{x, 2'b00}` is `x` with shift 2),
-   * set by the "scale" rule. The `×4` label only shows it, and the user may rename the label.
+   * set where low-order zeros pad an operand of arithmetic (see rules.ts). The `×4` label only shows it, and the user may rename the label.
    */
   shift?: number;
 }
@@ -272,14 +270,10 @@ function nameBits(nets: IRNet[], bits: Bit[]): { name: string; full: boolean } |
   return undefined;
 }
 
-export function buildDiagram(
-  design: IRDesign,
-  moduleName: string,
-  rules: ReadonlySet<RuleId> = DEFAULT_RULES,
-): Diagram {
+export function buildDiagram(design: IRDesign, moduleName: string): Diagram {
   const raw: IRModule | undefined = design.modules[moduleName];
   if (!raw) return { module: moduleName, nodes: [], edges: [] };
-  const m = applyRules(raw, rules);
+  const m = applyRules(raw);
 
   const nodes: DNode[] = [];
   const edges: DEdge[] = [];
@@ -336,8 +330,7 @@ export function buildDiagram(
       ports.push(inp);
       sinks.push({ node: id, port: inp.id, bits: p.bits, range: { offset: p.offset, upto: p.upto } });
     }
-    const net = m.nets.find((x) => x.name === p.name && !x.hidden);
-    pinNodes.push({ id, kind, label: p.name, ports, src: net?.src ?? [] });
+    pinNodes.push({ id, kind, label: p.name, ports });
   }
   nodes.push(...pinNodes);
 
@@ -386,7 +379,6 @@ export function buildDiagram(
             moduleName: c.type,
             instanceName: c.name,
             ports,
-            src: c.src,
           }
         : {
             id,
@@ -394,7 +386,6 @@ export function buildDiagram(
             label: cellSymbol(c.type),
             cellType: c.type,
             ports,
-            src: c.src,
             rule: c.rule,
             attrs: c.attrs,
             ...(params ? { params } : {}),
@@ -456,7 +447,7 @@ export function buildDiagram(
     if (r.kind === 'const') {
       const cid = constId ?? `const:${target.port}[${r.lo}]`;
       const cport: DPort = { id: `${cid}.out`, name: 'out', dir: 'out', side: 'EAST', width: r.bits.length };
-      nodes.push({ id: cid, kind: 'const', label: formatConst(r.bits), ports: [cport], src: [] });
+      nodes.push({ id: cid, kind: 'const', label: formatConst(r.bits), ports: [cport] });
       edges.push({
         id: '',
         source: { node: cid, port: cport.id },
@@ -520,7 +511,7 @@ export function buildDiagram(
     }
     let zeroExtended = false;
     const arithmetic = s.cellType !== undefined && ARITHMETIC.has(s.cellType);
-    if (arithmetic && runs.length > 1 && rules.has('zero-extend')) {
+    if (arithmetic && runs.length > 1) {
       // {2'b00, x}: high-order zero padding is just how Verilog widens operands.
       const last = runs[runs.length - 1];
       if (last.kind === 'const' && last.bits.every((b) => b === '0') && runs.some((r) => r.kind === 'net')) {
@@ -528,13 +519,12 @@ export function buildDiagram(
         zeroExtended = true;
       }
     }
-    if (arithmetic && rules.has('scale') && runs.length === 2 && runs[0].kind === 'const' && runs[1].kind === 'net') {
-      // {x, 2'b00}: low-order zeros multiply by a power of two.
-      const k = runs[0].bits.length;
-      if (runs[0].bits.every((b) => b === '0') && k < 31) {
-        connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`, k);
-        runs = [];
-      }
+    // {x, 2'b00}: low-order zeros multiply by a power of two. Other low-order constants ({x, 2'b01})
+    // are a concatenation like any other.
+    const low = runs[0];
+    if (arithmetic && runs.length === 2 && low.kind === 'const' && runs[1].kind === 'net' && low.bits.every((b) => b === '0') && low.bits.length < 31) {
+      const k = low.bits.length;
+      connectRun(runs[1], { node: s.node, port: s.port }, true, `×${2 ** k}`, k);
     } else if (runs.length <= 1) {
       for (const r of runs) {
         connectRun(r, { node: s.node, port: s.port }, r.lo === 0 && (zeroExtended || r.bits.length === s.bits.length), undefined, undefined, constId(r));
@@ -548,7 +538,7 @@ export function buildDiagram(
         return { id: `${jid}.${name}`, name, dir: 'in', side: 'WEST', width: r.bits.length };
       });
       const out: DPort = { id: `${jid}.out`, name: 'out', dir: 'out', side: 'EAST', width: s.bits.length };
-      nodes.push({ id: jid, kind: 'join', label: '{ }', ports: [...ports, out], src: [] });
+      nodes.push({ id: jid, kind: 'join', label: '{ }', ports: [...ports, out] });
       ordered.forEach((r, k) => connectRun(r, { node: jid, port: ports[k].id }, true, undefined, undefined, constId(r)));
       edges.push({
         id: '',

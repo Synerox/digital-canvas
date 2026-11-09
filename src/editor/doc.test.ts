@@ -14,7 +14,6 @@ function reopen(name: string, e: SheetEdits): SheetEdits {
     format: 'digital-canvas',
     version: 1,
     files: {},
-    rules: [],
     viewMode: 'blocks',
     doc: { drawn: [name], sheets: { [`d:${name}`]: e } },
     path: [{ instance: name, module: name, drawn: true }],
@@ -80,7 +79,7 @@ endmodule
       id: 'u:1',
       sym: 'raw',
       params: {},
-      raw: { kind: 'cell', label: 'DFF', cellType: '$adff', ports: [], src: [], params },
+      raw: { kind: 'cell', label: 'DFF', cellType: '$adff', ports: [], params },
     });
     const parse = (params: unknown) => parseEdits({ nodes: [raw(params)] }).nodes[0].raw?.params;
     expect(parse({ CLK_POLARITY: '0', ARST_VALUE: '0101', A_SIGNED: 1, B_SIGNED: true, SRST_VALUE: 'abc', EN_POLARITY: '', X: null })).toEqual({
@@ -93,26 +92,14 @@ endmodule
     expect(parse([['CLK_POLARITY', '0']])).toBeUndefined();
   });
 
-  it('bound their source ranges, so the Inspector and code panel never count through huge ones', () => {
-    const range = (startLine: number, endLine: number, startCol = 1, endCol = 5) => ({ file: 'a.v', startLine, startCol, endLine, endCol });
-    const src = [range(3, 4), range(7, 2), range(-5, 1.5, -3, 2.7), range(1e9, 1e9), range(1e300, 1e300 + 2), range(1e7, 1e9), range(1, 2e7), range(9, 9)];
-    const node = { id: 'u:1', sym: 'raw', params: {}, raw: { kind: 'cell', label: '&', cellType: '$and', ports: [], src } };
-    const out = parseEdits({ nodes: [node] }).nodes[0].raw!.src;
-    // A plain range is kept as it is.
-    expect(out[0]).toEqual(range(3, 4));
-    let lines = 0;
-    for (const r of out) {
-      for (const v of [r.startLine, r.endLine, r.startCol, r.endCol]) expect(Number.isInteger(v) && v >= 1).toBe(true);
-      expect(r.endLine).toBeGreaterThanOrEqual(r.startLine);
-      expect(r.endLine).toBeLessThanOrEqual(10_000_000);
-      lines += r.endLine - r.startLine + 1;
+  it('drop the Verilog lines older files kept (nothing maps symbols to lines any more), whatever their ranges', () => {
+    const range = (startLine: number, endLine: number) => ({ file: 'a.v', startLine, startCol: 1, endLine, endCol: 5 });
+    for (const src of [[range(3, 4)], [range(1, 2e7), range(1e300, 1e300 + 2)], 'a.v:1', null]) {
+      const node = { id: 'u:1', sym: 'raw', params: {}, raw: { kind: 'cell', label: '&', cellType: '$and', ports: [], src } };
+      const raw = parseEdits({ nodes: [node] }).nodes[0].raw!;
+      expect(raw).not.toHaveProperty('src');
+      expect(raw).toMatchObject({ id: 'u:1', kind: 'cell', label: '&', cellType: '$and', ports: [] });
     }
-    expect(lines).toBeLessThanOrEqual(100_000);
-    // A range that ends before it starts marks its first line; a line before 1 is line 1.
-    expect(out).toContainEqual(range(7, 7));
-    expect(out).toContainEqual(range(1, 1, 1, 2));
-    // Nothing points past the last line any file could have.
-    expect(out.some((r) => r.startLine >= 1e9)).toBe(false);
   });
 });
 

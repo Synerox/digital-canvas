@@ -20,7 +20,6 @@ vi.mock('../yosys/client', async () => {
 });
 
 import type { DNode } from '../core/diagram';
-import { DEFAULT_RULES, RULES } from '../core/rules';
 import type { EditDoc, SavedFile, SheetEdits } from '../editor/doc';
 import type { ComponentDef } from '../editor/components';
 import { OUTLINES, emptyEdits, parseSavedFile } from '../editor/doc';
@@ -64,7 +63,6 @@ async function open(files: Record<string, string>, extra: Partial<SavedFile> = {
     version: 1,
     outlines: OUTLINES,
     files,
-    rules: [...DEFAULT_RULES],
     viewMode: 'blocks',
     doc: { sheets: {}, drawn: [] },
     path: [],
@@ -214,7 +212,7 @@ describe('drawing interfaces (pins → block ports)', () => {
       id,
       sym: 'raw',
       params: {},
-      raw: { id, kind, label: name, ports: [{ id: `${id}.${kind === 'input' ? 'out' : 'in'}`, name: kind === 'input' ? 'out' : 'in', dir: kind === 'input' ? 'out' : 'in', side: kind === 'input' ? 'EAST' : 'WEST', width }], src: [] },
+      raw: { id, kind, label: name, ports: [{ id: `${id}.${kind === 'input' ? 'out' : 'in'}`, name: kind === 'input' ? 'out' : 'in', dir: kind === 'input' ? 'out' : 'in', side: kind === 'input' ? 'EAST' : 'WEST', width }] },
     });
     const leaf = drawing([wide('a', 'input', 'a', 300), pin('b', 'input', 'b'), wide('y', 'output', 'y', 300), pin('z', 'output', 'z')]);
     expect(drawingPorts(leaf).map((p) => [p.name, p.dir, p.width])).toEqual([
@@ -496,25 +494,12 @@ describe('store', () => {
     expect(st().notice).toMatch(/Instances of .*bid_check.* still use those modules from your Verilog files/);
   }, 60_000);
 
-  it('lays out a sheet again when undo unpins it after a rule change (C2)', async () => {
+  it('lays out a sheet again when undo unpins it (C2)', async () => {
     await open({ [AUCTION_FILE]: AUCTION_SOURCE });
     const key = st().sheet;
     const y0 = input('clk').y;
     st().moveSelection(new Set([input('clk').id]), 0, 150);
     expect(input('clk').y).toBe(y0 + 150);
-    // Every symbol has a position: the new rules' layout is not computed.
-    const rules = st().rules;
-    await st().toggleRule(RULES[0].id);
-    // The rule change is an undo step of its own (G12h), and so is the move before it.
-    st().undo();
-    await settle();
-    expect([...st().rules].sort()).toEqual([...rules].sort());
-    expect(input('clk').y).toBe(y0 + 150);
-    st().redo();
-    await settle();
-    expect(st().rules.has(RULES[0].id)).toBe(!rules.has(RULES[0].id));
-    st().undo();
-    await settle();
     st().undo();
     await settle();
     expect(st().doc.sheets[key]).toBeUndefined();
@@ -522,6 +507,25 @@ describe('store', () => {
     // Edits work again.
     st().moveSelection(new Set([input('clk').id]), 0, 50);
     expect(input('clk').y).toBe(y0 + 50);
+  }, 60_000);
+
+  it('draws a file saved with the drawing rules switched off as the equivalent structure, and saves it without rules', async () => {
+    const path = [
+      { instance: 'auction_top', module: 'auction_top' },
+      { instance: 'u_result', module: 'result_decode' },
+    ];
+    for (const rules of [[], ['zero-extend']]) {
+      const old = { format: 'digital-canvas', version: 1, outlines: OUTLINES, files: { [AUCTION_FILE]: AUCTION_SOURCE }, rules, viewMode: 'blocks', doc: { sheets: {}, drawn: [] }, path };
+      await st().loadSaved(JSON.stringify(old));
+      await settle();
+      expect(st().path.map((p) => p.module)).toEqual(['auction_top', 'result_decode']);
+      // 2'd1 << winner is a decoder, and any_valid ? … : 2'd0 an AND gate, whatever the file said.
+      const types = st().layout!.nodes.map((n) => n.cellType);
+      expect(types).toEqual(expect.arrayContaining(['dc:decoder', 'dc:and']));
+      expect(types.some((t) => t === '$shl' || t === '$sshl' || t === '$mux')).toBe(false);
+      expect(st().savedFile()).not.toHaveProperty('rules');
+      expect(st()).not.toHaveProperty('rules');
+    }
   }, 60_000);
 
   it('does not edit a sheet while it is still being opened (C3, C44)', async () => {

@@ -46,8 +46,7 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .tree-item { border: none; background: none; padding: 3px 6px; text-align: left; width: 100%; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tree-item.active { background: #fbe9e1; color: var(--accent); }
 .files li { display: flex; align-items: center; border-radius: 4px; }
-.files li.active { background: #f1f0eb; }
-.file-name { flex: 1; border: none; background: none; text-align: left; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name { flex: 1; min-width: 0; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .center { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .center-head { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); min-height: 34px; }
@@ -72,15 +71,8 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .log pre { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; font-size: 11px; }
 .log .error { padding: 6px 10px; color: #c92a2a; font-weight: 600; }
 
-.code-pane { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
-.code-pane h3 { padding: 10px 10px 4px; text-transform: none; letter-spacing: 0; font-size: 12px; }
-.code { flex: 1; overflow: auto; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; line-height: 1.55; padding-bottom: 20px; }
-.code.empty { padding: 10px; font-family: inherit; }
-.code-line { display: flex; cursor: pointer; white-space: pre; }
-.code-line:hover { background: #f6f5f1; }
-.code-line.marked { background: #fde3d6; }
-.code-line .ln { width: 38px; flex: none; text-align: right; padding-right: 10px; color: #aaa69b; user-select: none; }
-.code:focus, .log pre:focus, .modal:focus { outline: none; }
+.props-pane { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.log pre:focus, .modal:focus { outline: none; }
 
 .drop-overlay { position: fixed; inset: 0; background: rgba(217,72,15,.08); border: 3px dashed var(--accent); display: flex; align-items: center; justify-content: center; font-size: 18px; color: var(--accent); pointer-events: none; }
 
@@ -93,8 +85,6 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .preview img { max-width: 100%; height: auto; }
 .modal textarea { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .modal p { margin: 0; }
-.rules li { margin: 2px 0; }
-.rules label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
 .error-banner { padding: 6px 10px; background: #fff5f5; border-bottom: 1px solid #f1c0c0; color: #8a1f1f; font-size: 12px; }
 .view-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; flex: none; }
 .view-toggle button { border: none; border-radius: 0; background: none; padding: 3px 10px; color: var(--muted); }
@@ -136,10 +126,8 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .palette-icon { width: 100%; height: 34px; pointer-events: none; }
 .palette-tip { margin: 8px 2px; }
 
-.code-pane .inspector { padding: 10px; border-bottom: 1px solid var(--line); max-height: 55%; overflow: auto; flex: none; }
-/* With no Source below it (a drawing), Properties has the pane. */
-.code-pane .inspector:last-child { max-height: none; flex: 1; border-bottom: none; }
-.inspector h3 { padding: 0; margin-bottom: 8px; }
+.props-pane .inspector { padding: 10px; overflow: auto; flex: 1; }
+.inspector h3 { padding: 0; margin-bottom: 8px; text-transform: none; letter-spacing: 0; font-size: 12px; }
 .prop { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
 .prop input, .prop select { width: 100%; margin: 0; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; color: var(--ink); }
 .prop input.invalid { border-color: #e03131; }

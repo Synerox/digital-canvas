@@ -1,8 +1,6 @@
-import { useEffect, useMemo, useRef } from 'react';
 import type { HierarchyNode, IRDesign } from '../core/ir';
-import { RULES } from '../core/rules';
 import { type EditDoc, type ViewMode, sheetKey } from '../editor/doc';
-import { type PathEntry, moduleTitle, sameFile, useStore } from './store';
+import { type PathEntry, moduleTitle, useStore } from './store';
 
 /**
  * The name an instance has on its parent's sheet in this view: as it was renamed there (the
@@ -52,18 +50,16 @@ export function HierarchyTree() {
 
 export function FileList() {
   const files = useStore((s) => s.files);
-  const codeFile = useStore((s) => s.codeFile);
-  const setCodeFile = useStore((s) => s.setCodeFile);
   const removeFile = useStore((s) => s.removeFile);
   const names = Object.keys(files);
   if (names.length === 0) return <p className="muted small">Drop .v / .sv files here or use Open.</p>;
   return (
     <ul className="files">
       {names.map((n) => (
-        <li key={n} className={n === codeFile ? 'active' : ''}>
-          <button className="file-name" onClick={() => setCodeFile(n)} title={n}>
+        <li key={n}>
+          <span className="file-name" title={n}>
             {n}
-          </button>
+          </span>
           <button className="icon" title={`Remove ${n}`} onClick={() => removeFile(n)}>
             ×
           </button>
@@ -156,53 +152,6 @@ export function Drawings() {
   );
 }
 
-export function CodePanel() {
-  const files = useStore((s) => s.files);
-  const codeFile = useStore((s) => s.codeFile);
-  const ranges = useStore((s) => s.codeRanges);
-  const selectLine = useStore((s) => s.selectLine);
-  const box = useRef<HTMLDivElement>(null);
-  const text = codeFile ? files[codeFile] : undefined;
-  const lines = useMemo(() => (text ?? '').split('\n'), [text]);
-
-  const marked = useMemo(() => {
-    const set = new Set<number>();
-    for (const r of ranges) {
-      if (!codeFile) continue;
-      if (!sameFile(r.file, codeFile)) continue;
-      // Only the file's own lines: a damaged drawing file can give any range (lines 1 to 10⁹).
-      for (let l = Math.max(1, r.startLine); l <= Math.min(r.endLine, lines.length); l++) set.add(l);
-    }
-    return set;
-  }, [ranges, codeFile, lines]);
-
-  useEffect(() => {
-    let first = Infinity;
-    for (const l of marked) first = Math.min(first, l);
-    if (!Number.isFinite(first) || !box.current) return;
-    const el = box.current.querySelector(`[data-line="${first}"]`) as HTMLElement | null;
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [marked]);
-
-  if (!codeFile || text === undefined) return <div className="code empty muted small">No source file.</div>;
-  return (
-    // Focusable, so that copy and select all act on the code while the user works in it (see App).
-    <div className="code" ref={box} tabIndex={-1}>
-      {lines.map((l, i) => (
-        <div
-          key={i}
-          data-line={i + 1}
-          className={`code-line ${marked.has(i + 1) ? 'marked' : ''}`}
-          onClick={() => selectLine(codeFile, i + 1)}
-        >
-          <span className="ln">{i + 1}</span>
-          <span className="src">{l || ' '}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export function LogPanel({ onClose }: { onClose(): void }) {
   const log = useStore((s) => s.log);
   const error = useStore((s) => s.error);
@@ -238,21 +187,5 @@ export function TopSelector() {
         ))}
       </select>
     </label>
-  );
-}
-
-export function RulePanel() {
-  const rules = useStore((s) => s.rules);
-  const toggleRule = useStore((s) => s.toggleRule);
-  return (
-    <ul className="rules">
-      {RULES.map((r) => (
-        <li key={r.id}>
-          <label title={r.description}>
-            <input type="checkbox" checked={rules.has(r.id)} onChange={() => toggleRule(r.id)} /> {r.title}
-          </label>
-        </li>
-      ))}
-    </ul>
   );
 }

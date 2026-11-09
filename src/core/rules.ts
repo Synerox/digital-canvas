@@ -1,37 +1,15 @@
 /**
  * Semantic transforms: rewrite the structure Yosys produces into the shapes
- * designers draw by hand. Each rule matches cells in one module and replaces
- * them with a `dc:*` cell that keeps the original stable ID and source location,
- * so code highlighting and saved positions still work.
+ * designers draw by hand. They always apply (there is no switch to draw the
+ * structure as Yosys gives it): a left shift of the constant 1 is a decoder, a
+ * MUX that selects a constant 0 is an AND gate, and (while building edges, see
+ * buildDiagram) high-order zero padding into arithmetic is a plain wire and
+ * low-order zero padding is labelled ×2ⁿ. A rewritten cell becomes a `dc:*`
+ * cell that keeps the original stable ID, so saved positions still apply.
  *
  * Rules run on a copy of the module; the IR itself is never modified.
  */
 import type { Bit, IRCell, IRModule } from './ir';
-
-export type RuleId = 'decoder' | 'mux-to-and' | 'zero-extend' | 'scale';
-
-export interface RuleInfo {
-  id: RuleId;
-  title: string;
-  description: string;
-}
-
-export const RULES: RuleInfo[] = [
-  { id: 'decoder', title: '1 << x → Decoder', description: 'A left shift of the constant 1 is drawn as a decoder.' },
-  {
-    id: 'mux-to-and',
-    title: 'MUX with 0 → AND',
-    description: 'A MUX that selects a constant 0 on one input is drawn as an AND gate (with a bubble when inverted).',
-  },
-  {
-    id: 'zero-extend',
-    title: 'Hide zero extension',
-    description: 'High-order zero padding such as {2\'b00, x} is drawn as a plain wire.',
-  },
-  { id: 'scale', title: '{x, 2\'b00} → ×4', description: 'Low-order zero padding into arithmetic is labelled ×2ⁿ.' },
-];
-
-export const DEFAULT_RULES: ReadonlySet<RuleId> = new Set(RULES.map((r) => r.id));
 
 const isConst = (b: Bit) => typeof b !== 'number';
 const allConst = (bits: Bit[]) => bits.every(isConst);
@@ -113,22 +91,10 @@ function rewriteMuxToAnd(c: IRCell): IRCell | undefined {
   };
 }
 
-/** Apply cell-level rules. Wiring rules (zero-extend, scale) are applied while building edges. */
-export function applyRules(m: IRModule, enabled: ReadonlySet<RuleId>): IRModule {
-  if (!enabled.has('decoder') && !enabled.has('mux-to-and')) return m;
+/** Apply the cell-level rules. The wiring rules (zero extension, ×2ⁿ) are applied while building edges. */
+export function applyRules(m: IRModule): IRModule {
   const used = usedBits(m);
-  const cells = m.cells.map((c) => {
-    if (c.isInstance) return c;
-    if (enabled.has('decoder')) {
-      const r = rewriteDecoder(c, used);
-      if (r) return r;
-    }
-    if (enabled.has('mux-to-and')) {
-      const r = rewriteMuxToAnd(c);
-      if (r) return r;
-    }
-    return c;
-  });
+  const cells = m.cells.map((c) => (c.isInstance ? c : (rewriteDecoder(c, used) ?? rewriteMuxToAnd(c) ?? c)));
   return { ...m, cells };
 }
 

@@ -1,16 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { CodePanel } from './Panels';
+import { FileList } from './Panels';
 import { useStore } from './store';
 
-describe('CodePanel', () => {
-  it('marks only lines the file has, whatever range a damaged drawing file gives', () => {
-    const text = Array.from({ length: 30 }, (_, i) => `// line ${i + 1}`).join('\n');
-    const range = (startLine: number, endLine: number) => ({ file: 'a.v', startLine, startCol: 1, endLine, endCol: 1 });
-    // On the server the panel reads the store's initial state (the server snapshot of useSyncExternalStore).
-    Object.assign(useStore.getInitialState(), { files: { 'a.v': text }, codeFile: 'a.v', codeRanges: [range(25, 2e9), range(-3, 2)] });
-    const html = renderToStaticMarkup(<CodePanel />);
-    const marked = [...html.matchAll(/data-line="(\d+)" class="code-line marked"/g)].map((m) => Number(m[1]));
-    expect(marked).toEqual([1, 2, 25, 26, 27, 28, 29, 30]);
+describe('FileList', () => {
+  it('lists the open files by name, each with a Remove button (no file is shown as source)', () => {
+    // On the server the list reads the store's initial state (the server snapshot of useSyncExternalStore).
+    Object.assign(useStore.getInitialState(), { files: { 'a.v': 'module a; endmodule', 'b.v': 'module b; endmodule' } });
+    const html = renderToStaticMarkup(<FileList />);
+    expect([...html.matchAll(/<span class="file-name" title="([^"]+)">/g)].map((m) => m[1])).toEqual(['a.v', 'b.v']);
+    expect([...html.matchAll(/title="Remove ([^"]+)"/g)].map((m) => m[1])).toEqual(['a.v', 'b.v']);
+    expect(html).not.toContain('active');
   });
 });
