@@ -6,11 +6,11 @@
  * undo/redo can keep old versions as they are.
  */
 import { type DEdge, type DNode, type DPort, type Diagram, type PinStyle, isPinKind, pinStyleOf, withPinStyle } from '../core/diagram';
-import { GRID, type LayoutResult, type MeasureText, type Point, legacyCellSize, sizeNode } from '../layout/elk-layout';
+import { GRID, type LayoutResult, type MeasureText, type Point, isReduceType, legacyCellSize, sizeNode } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
-import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
+import { type Box, OUTLINES, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
-import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, symbolNode } from './symbols';
+import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, isGateSym, symbolNode } from './symbols';
 import { verilogIdent } from './verilog-ident';
 import { type ComponentDef, componentSymbol, followsPreset, fullSettings, isPart, sameSettings } from './components';
 
@@ -646,6 +646,14 @@ const CELL_TO_SYM: Record<string, SymKey> = {
   $adff: 'adff',
   $mux: 'mux',
   'dc:mux': 'mux',
+  // Reductions are gates in reduce mode (see GateMode); `$reduce_bool`, the `|a` of a condition, is an OR.
+  $reduce_and: 'and',
+  $reduce_or: 'or',
+  $reduce_bool: 'or',
+  $reduce_xor: 'xor',
+  $reduce_xnor: 'xnor',
+  'dc:reduce_nand': 'nand',
+  'dc:reduce_nor': 'nor',
 };
 
 function signature(n: DNode): string {
@@ -702,6 +710,12 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       if (!sym || n.attrs?.invertB || n.params) break;
       const ins = n.ports.filter((p) => p.dir === 'in' && p.side === 'WEST');
       const params: SymParams = {};
+      if (isReduceType(n.cellType)) {
+        // |a: its one input is as wide as the bus (and the 2 inputs of the library's gate wait for bitwise mode).
+        const u: UserNode = { id, sym, params: { inputs: 2, width: width('A'), mode: 'reduce' } };
+        if (signature(symbolNode(u, iface)) === signature(n)) return u;
+        break;
+      }
       if (sym === 'decoder') params.width = width('A');
       else if (sym === 'dff' || sym === 'dffe' || sym === 'adff') params.width = width('D');
       else if (sym === 'shl' || sym === 'shr') {
@@ -710,6 +724,7 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       } else if (['eq', 'ne', 'lt', 'le', 'gt', 'ge'].includes(sym)) params.width = width('A');
       else params.width = width('Y');
       if (['and', 'or', 'xor', 'nand', 'nor', 'xnor', 'mux'].includes(sym)) params.inputs = ins.length;
+      if (isGateSym(sym)) params.mode = 'bitwise';
       const u: UserNode = { id, sym, params };
       if (signature(symbolNode(u, iface)) === signature(n)) return u;
       break;
@@ -945,23 +960,82 @@ function growFrom(e: SheetEdits, d: Diagram, measure: MeasureText, oldSize: (n: 
 /**
  * A sheet saved with the symbol outlines of before (oldOutlines, see OUTLINES), drawn with today's: the symbols
  * that grew get room as a block that grew does (makeRoom), so none covers a neighbour, a pin or a wire. An adder
- * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right. Wires a grown
+ * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right, a reduction gate
+ * 10 px right. Wires a grown
  * symbol covers are routed again; so are those to its pins that moved (their ends no longer meet them).
  * `d` is the sheet's netlist with its hidden symbols (see growFrom).
  */
 export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText): SheetEdits {
-  const out = { ...growFrom(e, d, measure, (n, now) => legacyCellSize(n, measure) ?? now) };
+  const out = { ...growFrom(e, d, measure, (n, now) => legacyCellSize(n, measure, e.oldOutlines ?? OUTLINES) ?? now) };
   delete out.oldOutlines;
   return out;
 }
 
 /**
- * Room right of symbols that got wider when their settings changed (a gate with more inputs; `widths`: how wide
- * each was before): what is right of one moves right as far, wires too (makeRoom), rather than being covered.
+ * Room right of symbols that got wider when their settings changed (a gate with more inputs, or switched to Reduce;
+ * `was`: the size each had before). When each has free room right of it (see growInPlace), it grows into that room
+ * and nothing else moves, so changing a setting there and back leaves the sheet as it was. Else, as for any symbol
+ * that grew, what is right of them moves right as far, wires too (makeRoom), rather than being covered.
  * `d` is the sheet's netlist after the change, with its hidden symbols (see growFrom).
  */
-export function fitWider(e: SheetEdits, d: Diagram, widths: ReadonlyMap<string, number>, measure: MeasureText): SheetEdits {
-  return growFrom(e, d, measure, (n, now) => (widths.has(n.id) ? { width: Math.min(widths.get(n.id)!, now.width), height: now.height } : now));
+export function fitWider(e: SheetEdits, d: Diagram, was: ReadonlyMap<string, Size>, measure: MeasureText): SheetEdits {
+  let out: SheetEdits | undefined = e;
+  for (const [id, size] of was) out = out && growInPlace(out, d, id, size, measure);
+  return (
+    out ??
+    growFrom(e, d, measure, (n, now) => {
+      const w = was.get(n.id);
+      return w ? { width: Math.min(w.width, now.width), height: now.height } : now;
+    })
+  );
+}
+
+/**
+ * Symbol `id` (`was` big before; as tall now) grown right into free room: no symbol in the band it grows into, nor
+ * within the room a wire's stub takes beside it (as makeRoom keeps). A block whose pins are not known yet may reach
+ * anywhere right of and below its corner: one with its corner in the band, or above it, would have moved right with
+ * a push, so it counts (one left of the band would not have, so it changes nothing). Its own output wires that run
+ * straight on out of that band start at its right edge now; other wires through the band are routed again, unless
+ * the user drew them (manual): those are kept as they are, so the room is not free. Wire labels in the band are
+ * placed again. Wires not drawn now (their pin is gone, see setParams) are left as they are. Undefined when the room
+ * is not free.
+ */
+function growInPlace(e: SheetEdits, d: Diagram, id: string, was: Size, measure: MeasureText): SheetEdits | undefined {
+  const at = e.pos[id];
+  const n = d.nodes.find((x) => x.id === id);
+  if (!at || !n) return e;
+  const now = sizeNode(n, measure);
+  if (now.width <= was.width) return e;
+  // Taller too: its output pins move down, and its wires with them (makeRoom).
+  if (now.height !== was.height) return undefined;
+  const right = at.x + now.width;
+  const band = { x: at.x + was.width, y: at.y - 5, width: now.width - was.width + 2 * GRID, height: now.height + 10 };
+  const hits = (b: Box) => b.x < band.x + band.width && band.x < b.x + b.width && b.y < band.y + band.height && band.y < b.y + b.height;
+  for (const m of d.nodes) {
+    const p = e.pos[m.id];
+    if (m.id === id || !p) continue;
+    const unsized = !!m.attrs?.missingModule;
+    if (unsized ? p.x >= band.x - 0.5 && hits({ ...p, width: Infinity, height: Infinity }) : hits({ ...p, ...sizeNode(m, measure) })) return undefined;
+  }
+  const drawn = new Set(d.edges.map((x) => x.id));
+  const own = new Set(d.edges.filter((x) => x.source.node === id).map((x) => x.id));
+  const routes: Record<string, RouteRec> = { ...e.routes };
+  for (const [k, route] of Object.entries(e.routes)) {
+    if (!drawn.has(k)) continue;
+    let r = route;
+    if (r.label && hits(r.label)) {
+      const { label: _, ...rest } = r;
+      r = routes[k] = rest;
+    }
+    const [a, b, ...rest] = r.points;
+    const straightOut = own.has(k) && !!b && Math.abs(a.x - band.x) <= 0.5 && b.y === a.y && b.x >= band.x + band.width && !polylineHitsRect([b, ...rest], band);
+    if (straightOut) routes[k] = { ...r, points: [{ x: right, y: a.y }, b, ...rest] };
+    else if (own.has(k) || polylineHitsRect(r.points, band)) {
+      if (r.manual) return undefined;
+      delete routes[k];
+    }
+  }
+  return { ...e, routes };
 }
 
 /**

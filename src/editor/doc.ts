@@ -14,7 +14,7 @@
 import { type DNode, type DPort, type NodeKind, type PinStyle, type Side, isPinKind } from '../core/diagram';
 import { GRID, type Point } from '../layout/elk-layout';
 import { type ComponentDef, followsPreset, loadComponents } from './components';
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam, drawnWithout } from './symbols';
+import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam, drawnWithout, isGateSym } from './symbols';
 
 export interface Box {
   x: number;
@@ -57,23 +57,25 @@ export interface SheetEdits {
   /** Counter for new IDs (u:<n>, w:<n>). */
   next: number;
   /**
-   * Positions and wires saved with the symbol outlines of before OUTLINES: the symbols that grew since get
-   * room when the sheet is next drawn (fitNewOutlines), and this goes. Kept in saved files until then.
+   * Positions and wires saved with the symbol outlines of this older version (see OUTLINES): the symbols that grew
+   * since get room when the sheet is next drawn (fitNewOutlines), and this goes. Kept in saved files until then.
    */
-  oldOutlines?: true;
+  oldOutlines?: number;
 }
 
 /**
  * Version of the symbol outlines, written in saved files. 2 (2026-11): adders 40x60 (were 40x40), MUX 40 wide
- * (were 60), gates with three or more inputs 50 or 60 wide (were 40). The pinned sheets of a file without it
- * are marked oldOutlines when it is read.
+ * (were 60), gates with three or more inputs 50 or 60 wide (were 40). 3 (2026-11): reduction gates (`|a`) 10 px
+ * wider, for the lead their bus fans out in (were as wide as other gates). The pinned sheets of a file without it,
+ * or with an older one, are marked oldOutlines with that version (1 for none) when it is read.
  */
-export const OUTLINES = 2;
+export const OUTLINES = 3;
 
 /** Mark the pinned sheets of a file saved with older symbol outlines (whose `outlines` is missing or older). */
 export function markOldOutlines(sheets: Record<string, SheetEdits>, outlines: unknown): void {
-  if (typeof outlines === 'number' && outlines >= OUTLINES) return;
-  for (const e of Object.values(sheets)) if (isPinned(e)) e.oldOutlines = true;
+  const saved = typeof outlines === 'number' && outlines >= 1 ? Math.floor(outlines) : 1;
+  if (saved >= OUTLINES) return;
+  for (const e of Object.values(sheets)) if (isPinned(e)) e.oldOutlines = Math.min(e.oldOutlines ?? saved, saved);
 }
 
 export interface EditDoc {
@@ -199,6 +201,8 @@ function userNode(v: unknown): UserNode | undefined {
   // Only a pin has a style (a frozen copy of a pin too: see symbolNode).
   const pin = sym === 'raw' ? isObj(v.raw) && isKind(v.raw.kind) && isPinKind(v.raw.kind) : !!SYMBOL_BY_KEY[sym]?.params.includes('style');
   if (pin && (p.style === 'label' || p.style === 'text')) params.style = p.style;
+  // Only a logic gate has a mode; a file from before modes has none: the gate is bitwise (see GateMode).
+  if (isGateSym(sym) && (p.mode === 'bitwise' || p.mode === 'reduce')) params.mode = p.mode;
   const out: UserNode = { id: v.id, sym, params };
   if (isStr(v.name)) out.name = v.name;
   if (isStr(v.component) && sym !== 'raw' && sym !== 'block') out.component = v.component;
@@ -293,7 +297,9 @@ export function parseEdits(v: unknown): SheetEdits {
   e.next = isNum(v.next) && v.next >= 1 ? Math.floor(v.next) : 1;
   // Never hand out an ID that is already used.
   e.next = freeIdFloor(e);
-  if (v.oldOutlines === true && isPinned(e)) e.oldOutlines = true;
+  // `true` in files saved before version 3: older than version 2 then.
+  const old = v.oldOutlines === true ? 1 : isNum(v.oldOutlines) && v.oldOutlines >= 1 ? Math.floor(v.oldOutlines) : undefined;
+  if (old !== undefined && old < OUTLINES && isPinned(e)) e.oldOutlines = old;
   return e;
 }
 

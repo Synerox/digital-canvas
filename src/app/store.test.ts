@@ -988,6 +988,96 @@ describe('store', () => {
     expect([box('u:1').width, box('u:2').x]).toEqual([40, 160]);
   });
 
+  it('grows a gate into free room right of it without moving anything, so a setting changed there and back leaves the sheet as it was', async () => {
+    const d: SheetEdits = {
+      ...drawing([newUserNode('u:1', 'or', { params: { inputs: 2, width: 8, mode: 'bitwise' } }), newUserNode('u:2', 'not'), newUserNode('u:3', 'not')], [
+        { id: 'w:1', source: { node: 'u:1', port: 'u:1.Y' }, target: { node: 'u:2', port: 'u:2.A' } },
+      ]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 220, y: 100 }, 'u:3': { x: 300, y: 300 } },
+      routes: { 'w:1': { points: [{ x: 140, y: 120 }, { x: 220, y: 120 }], manual: true } },
+    };
+    await open({}, { doc: { drawn: ['g'], sheets: { 'd:g': d } }, path: [{ instance: 'g', module: 'g', drawn: true }] });
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    const route = () => st().doc.sheets['d:g'].routes['w:1']?.points;
+    for (let k = 0; k < 2; k++) {
+      st().setNodeParams('u:1', { mode: 'reduce' });
+      expect([box('u:1').x, box('u:1').width, box('u:2').x, box('u:3').x]).toEqual([100, 50, 220, 300]);
+      // Its output wire starts at its right edge, as straight as it was.
+      expect(route()).toEqual([{ x: 150, y: 120 }, { x: 220, y: 120 }]);
+      st().setNodeParams('u:1', { mode: 'bitwise' });
+      expect([box('u:1').width, box('u:2').x, box('u:3').x]).toEqual([40, 220, 300]);
+      expect(route()).toEqual([{ x: 140, y: 120 }, { x: 220, y: 120 }]);
+    }
+  });
+
+  it('switches a gate there and back without moving anything, its output wire routed by the app', async () => {
+    const d: SheetEdits = {
+      ...drawing([newUserNode('u:1', 'or', { params: { inputs: 2, width: 8, mode: 'bitwise' } }), newUserNode('u:2', 'not'), newUserNode('u:3', 'not')], [
+        { id: 'w:1', source: { node: 'u:1', port: 'u:1.Y' }, target: { node: 'u:2', port: 'u:2.A' } },
+      ]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 300, y: 40 }, 'u:3': { x: 300, y: 300 } },
+      routes: { 'w:1': { points: [{ x: 140, y: 120 }, { x: 260, y: 120 }, { x: 260, y: 60 }, { x: 300, y: 60 }] } },
+    };
+    await open({}, { doc: { drawn: ['g'], sheets: { 'd:g': d } }, path: [{ instance: 'g', module: 'g', drawn: true }] });
+    const xs = () => ['u:2', 'u:3'].map((id) => st().layout!.nodes.find((n) => n.id === id)!.x);
+    for (let k = 0; k < 3; k++) {
+      st().setNodeParams('u:1', { mode: 'reduce' });
+      expect(xs()).toEqual([300, 300]);
+      st().setNodeParams('u:1', { mode: 'bitwise' });
+      expect(xs()).toEqual([300, 300]);
+    }
+    // Its wire still runs from its output to the inverter.
+    const w = st().layout!.edges.find((x) => x.id === 'w:1')!;
+    expect([w.points[0], w.points.at(-1)]).toEqual([
+      { x: 140, y: 120 },
+      { x: 300, y: 60 },
+    ]);
+  });
+
+  it('makes room once on a drawing not opened since a file with older outlines was read, when a preset changes', async () => {
+    const gate: ComponentDef = { name: 'gate', base: 'or', params: { inputs: 2, width: 8, mode: 'bitwise' } };
+    const g: SheetEdits = {
+      ...drawing([{ ...newUserNode('u:1', 'or', { params: { inputs: 2, width: 8, mode: 'bitwise' } }), component: 'gate' }, newUserNode('u:2', 'not')]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 160, y: 100 } },
+    };
+    const f: SheetEdits = { ...drawing([newUserNode('u:1', 'not')]), pos: { 'u:1': { x: 0, y: 0 } } };
+    await open({}, { outlines: 2, doc: { drawn: ['f', 'g'], sheets: { 'd:f': f, 'd:g': g }, components: [gate] }, path: [{ instance: 'f', module: 'f', drawn: true }] });
+    expect(st().doc.sheets['d:g'].oldOutlines).toBe(2);
+    st().setComponents([{ ...gate, params: { ...gate.params, mode: 'reduce' } }]);
+    expect(st().doc.sheets['d:g'].oldOutlines).toBeUndefined();
+    await st().openPath([{ instance: 'g', module: 'g', drawn: true }]);
+    await settle();
+    // 10 px for the lead of the gate, not twice that.
+    expect(st().layout!.nodes.find((n) => n.id === 'u:2')!.x).toBe(170);
+  });
+
+  it('keeps no route of a wire a preset change drops on a drawing with older outlines', async () => {
+    // Two wires into I2 of a 2-input MUX (not drawn until it has a third input); one is drawn by the user. With four
+    // inputs the second is a second driver of I2, and goes.
+    const m: ComponentDef = { name: 'm', base: 'mux', params: { inputs: 2, width: 4 } };
+    const g: SheetEdits = {
+      ...drawing(
+        [
+          { ...newUserNode('u:1', 'mux', { params: { inputs: 2, width: 4 } }), component: 'm' },
+          newUserNode('u:4', 'input', { name: 'a', params: { width: 4, style: 'label' } }),
+          newUserNode('u:5', 'input', { name: 'b', params: { width: 4, style: 'label' } }),
+        ],
+        [
+          { id: 'w:6', source: { node: 'u:4', port: 'u:4.out' }, target: { node: 'u:1', port: 'u:1.I2' } },
+          { id: 'w:7', source: { node: 'u:5', port: 'u:5.out' }, target: { node: 'u:1', port: 'u:1.I2' } },
+        ],
+      ),
+      pos: { 'u:1': { x: 200, y: 100 }, 'u:4': { x: 0, y: 200 }, 'u:5': { x: 0, y: 300 } },
+      routes: { 'w:7': { points: [{ x: 40, y: 310 }, { x: 120, y: 310 }, { x: 120, y: 150 }, { x: 200, y: 150 }], manual: true } },
+    };
+    const f: SheetEdits = { ...drawing([newUserNode('u:1', 'not')]), pos: { 'u:1': { x: 0, y: 0 } } };
+    await open({}, { outlines: 2, doc: { drawn: ['f', 'g'], sheets: { 'd:f': f, 'd:g': g }, components: [m] }, path: [{ instance: 'f', module: 'f', drawn: true }] });
+    st().setComponents([{ ...m, params: { inputs: 4, width: 4 } }]);
+    const after = st().doc.sheets['d:g'];
+    expect(after.edges.map((x) => x.id)).toEqual(['w:6']);
+    expect(Object.keys(after.routes).filter((k) => !after.edges.some((x) => x.id === k))).toEqual([]);
+  });
+
   it('moves what is right of gates placed from a preset that got more inputs', async () => {
     const gate: ComponentDef = { name: 'gate', base: 'and', params: { inputs: 2 } };
     const d: SheetEdits = {

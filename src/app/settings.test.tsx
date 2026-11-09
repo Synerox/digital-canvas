@@ -63,7 +63,7 @@ describe('what double-clicking a symbol edits', () => {
   it('shows the JSON it edits', () => {
     const s = state();
     // One item to a line.
-    expect(subjectOf(s, { node: 'u:1' })).toEqual({ kind: 'node', id: 'u:1', sym: 'and', text: '{\n  "sym": "and",\n  "inputs": 2,\n  "width": 1\n}' });
+    expect(subjectOf(s, { node: 'u:1' })).toEqual({ kind: 'node', id: 'u:1', sym: 'and', text: '{\n  "sym": "and",\n  "inputs": 2,\n  "width": 1,\n  "mode": "bitwise"\n}' });
     expect(subjectOf(s, { component: 'and5' })?.text).toBe('{\n  "name": "and5",\n  "base": "and",\n  "inputs": 5\n}');
     expect(subjectOf(s, { node: 'u:3' })).toBeUndefined();
     expect(subjectOf(s, { component: 'gone' })).toBeUndefined();
@@ -77,9 +77,9 @@ describe('the JSON window', () => {
   it("edits a symbol's settings, says what they are, and saves them as a component", () => {
     const html = show({ node: 'u:1' });
     expect(html).toContain('<b>AND</b>');
-    expect(html).toContain('rows="5"');
-    expect(html).toContain('{\n  &quot;sym&quot;: &quot;and&quot;,\n  &quot;inputs&quot;: 2,\n  &quot;width&quot;: 1\n}</textarea>');
-    expect(html).toContain('Sets &quot;inputs&quot; 2–32, &quot;width&quot; 1–256 bits.');
+    expect(html).toContain('rows="6"');
+    expect(html).toContain('{\n  &quot;sym&quot;: &quot;and&quot;,\n  &quot;inputs&quot;: 2,\n  &quot;width&quot;: 1,\n  &quot;mode&quot;: &quot;bitwise&quot;\n}</textarea>');
+    expect(html).toContain('Sets &quot;inputs&quot; 2–32, &quot;width&quot; 1–256 bits, &quot;mode&quot; &quot;bitwise&quot; (a &amp; b) or &quot;reduce&quot; (&amp;a: one input, a 1-bit output).');
     expect(html).toContain('Save as a component');
   });
 

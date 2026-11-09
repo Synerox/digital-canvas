@@ -1009,29 +1009,44 @@ export const useStore = create<State>((set, get) => {
 
   /**
    * The sheets after symbols on them took other settings (`before` → `after`, as when a preset changes): those
-   * that got wider (a gate with more inputs) make room, as in Properties (see setNodeParams). A Verilog sheet whose
-   * netlist cannot be had now (see baseOf) is left as it is.
+   * that got wider (a gate with more inputs) make room, as in Properties (see setNodeParams). A sheet not drawn
+   * since a file with older symbol outlines was read first gets its room for those, from the settings it was saved
+   * with (see fitNewOutlines), or that room would be counted again for the new ones. A Verilog sheet whose netlist
+   * cannot be had now (see baseOf) is left as it is.
    */
   const roomForWider = (before: EditDoc['sheets'], after: EditDoc['sheets']): EditDoc['sheets'] => {
     if (after === before) return after;
     const measure = textMeasure();
-    const width = (u: UserNode) => sizeNode(symbolNode(u, interfaceOf), measure).width;
+    const size = (u: UserNode) => {
+      const s = sizeNode(symbolNode(u, interfaceOf), measure);
+      return { width: s.width, height: s.height };
+    };
     let out = after;
-    for (const [key, e] of Object.entries(after)) {
+    for (const [key, changed] of Object.entries(after)) {
       const old = before[key];
-      if (!old || old === e) continue;
-      const widths = new Map<string, number>();
-      for (const u of e.nodes) {
-        const was = old.nodes.find((x) => x.id === u.id);
-        if (was && was !== u && e.pos[u.id] && width(u) > width(was)) widths.set(u.id, width(was));
+      if (!old || old === changed) continue;
+      const was = new Map<string, { width: number; height: number }>();
+      for (const u of changed.nodes) {
+        const prev = old.nodes.find((x) => x.id === u.id);
+        if (prev && prev !== u && changed.pos[u.id] && size(u).width > size(prev).width) was.set(u.id, size(prev));
       }
-      if (!widths.size) continue;
+      if (!was.size && !old.oldOutlines) continue;
       const mode = viewModeOf(key);
       const module = mode ? key.slice(`v:${mode}:`.length) : key.slice(2);
       const base = mode ? baseOf(mode, module) : undefined;
       if (mode && !base) continue;
+      let e = changed;
+      if (old.oldOutlines) {
+        const settled = fitNewOutlines(old, withHidden(module, base, old), measure);
+        // The symbols and the routes of the wires the change kept (it may drop a wire), where the refit put them (it
+        // may drop a route).
+        const routes = Object.entries(changed.routes).flatMap(([k, r]) => (!(k in old.routes) ? [[k, r] as const] : settled.routes[k] ? [[k, settled.routes[k]] as const] : []));
+        const pos = Object.fromEntries(Object.entries(changed.pos).map(([k, p]) => [k, settled.pos[k] ?? p]));
+        e = { ...changed, pos, routes: Object.fromEntries(routes) };
+        delete e.oldOutlines;
+      }
       if (out === after) out = { ...after };
-      out[key] = fitWider(e, withHidden(module, base, e), widths, measure);
+      out[key] = was.size ? fitWider(e, withHidden(module, base, e), was, measure) : e;
     }
     return out;
   };
@@ -1974,7 +1989,7 @@ export const useStore = create<State>((set, get) => {
         if (next === e || !was || !next.pos[id]) return next;
         const s = get();
         const d = withHidden(currentModule(), isDrawnKey(s.sheet) ? undefined : s.base, next);
-        return fitWider(next, d, new Map([[id, was.width]]), textMeasure());
+        return fitWider(next, d, new Map([[id, { width: was.width, height: was.height }]]), textMeasure());
       });
       // A narrower symbol can leave a wire with a bit range it no longer has: say so at once (the sheet lists it too).
       const s = get();

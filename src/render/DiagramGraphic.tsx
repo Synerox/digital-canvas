@@ -5,7 +5,7 @@
 import type { JSX } from 'react';
 import { pinStyleOf } from '../core/diagram';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT, approxMeasure, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, muxInset } from '../layout/elk-layout';
+import { FONT, REDUCE_LEAD, approxMeasure, fannedInput, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, isReduceType, muxInset } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -220,6 +220,24 @@ function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; 
   };
 }
 
+/**
+ * The fan of a reduction gate (`|a`): its bus input `q` splits, in the lead the symbol has for it (REDUCE_LEAD), into
+ * lines that run on side by side into the gate's back (`edgeX`, from the symbol's left edge, by height in it), as a
+ * bus split into its bits into one gate is drawn: all its bits go into this gate. Three lines for a bus of three
+ * bits or more, two for two (the number is on the wire's bus mark).
+ */
+function reduceFan(n: LNode, q: LNode['ports'][number], edgeX: (y: number) => number, theme: Theme): JSX.Element {
+  const spread = q.width === 2 ? [-4, 4] : [-6, 0, 6];
+  const split = q.x + REDUCE_LEAD / 2;
+  return (
+    <g key="fan" fill="none" stroke={theme.wire} strokeWidth={STROKE} strokeLinejoin="round">
+      {spread.map((dy) => (
+        <polyline key={dy} points={`${q.x},${q.y} ${split},${q.y + dy} ${n.x + edgeX(q.y + dy - n.y)},${q.y + dy}`} />
+      ))}
+    </g>
+  );
+}
+
 /** Short stub lines from a port to the outline of a non-rectangular symbol. */
 function stubs(n: LNode, edgeX: (y: number) => number, theme: Theme): JSX.Element[] {
   return n.ports
@@ -324,30 +342,37 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   const gate = gateShape(t);
   if (gate) {
     // The body is at most four inputs tall (gateBodyHeight), centred; with more inputs the back edge runs
-    // on, straight, to the outer ones. A bubble on the output (NAND, NOR, XNOR) shortens the body.
+    // on, straight, to the outer ones. A bubble on the output (NAND, NOR, XNOR) shortens the body. A reduction
+    // (|a) has a lead before its body (REDUCE_LEAD), where its bus input fans out into bits (see reduceFan).
+    const lead = isReduceType(t) ? REDUCE_LEAD : 0;
+    const gx = x + lead;
+    const gw = w - lead;
     const bubble = invertsOutput(t);
-    const bw = bubble ? w - 8 : w;
+    const bw = bubble ? gw - 8 : gw;
     const hb = gateBodyHeight(h);
     const top = y + (h - hb) / 2;
     const bottom = top + hb;
     const inputs = n.ports.filter((q) => q.side === 'WEST');
+    const fanned = fannedInput(n);
     const first = Math.min(...inputs.map((q) => q.y));
     const last = Math.max(...inputs.map((q) => q.y));
     const back = [
       // In the editor the whole symbol is picked by a click, not only its body (what is under the pointer is what is hit).
-      p.interactive && hb < h && <rect key="hit" x={x} y={y} width={w} height={h} fill="transparent" />,
-      first < top && <line key="up" x1={x} y1={first} x2={x} y2={top} stroke={s.stroke} strokeWidth={s.width} />,
-      last > bottom && <line key="down" x1={x} y1={bottom} x2={x} y2={last} stroke={s.stroke} strokeWidth={s.width} />,
+      p.interactive && (hb < h || lead > 0) && <rect key="hit" x={x} y={y} width={w} height={h} fill="transparent" />,
+      first < top && <line key="up" x1={gx} y1={first} x2={gx} y2={top} stroke={s.stroke} strokeWidth={s.width} />,
+      last > bottom && <line key="down" x1={gx} y1={bottom} x2={gx} y2={last} stroke={s.stroke} strokeWidth={s.width} />,
     ];
     const outBubble = bubble && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />;
     if (gate === 'and') {
       // Flat back, then a half ellipse (a half circle when the gate is as wide as it is tall).
       const rx = Math.min(hb / 2, bw / 2);
-      const d = `M${x},${top} H${x + bw - rx} A${rx},${hb / 2} 0 0 1 ${x + bw - rx},${bottom} H${x} Z`;
+      const d = `M${gx},${top} H${gx + bw - rx} A${rx},${hb / 2} 0 0 1 ${gx + bw - rx},${bottom} H${gx} Z`;
       const inverted = n.attrs?.invertB ? n.ports.find((q) => q.name === 'B') : undefined;
+      const edgeX = () => lead;
       return (
         <g>
           {back}
+          {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
           <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
           {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
           {outBubble}
@@ -355,17 +380,17 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       );
     }
     // OR and XOR: a curved back, and two curves meeting in a point at the output.
-    const depth = Math.min(hb, w) * 0.25;
-    const curve = (dx: number) => `M${x + dx},${top} Q${x + dx + depth},${top + hb / 2} ${x + dx},${bottom}`;
-    const body = `M${x},${top} Q${x + bw * 0.6},${top} ${x + bw},${top + hb / 2} Q${x + bw * 0.6},${bottom} ${x},${bottom} Q${x + depth},${top + hb / 2} ${x},${top} Z`;
+    const depth = Math.min(hb, gw) * 0.25;
+    const curve = (dx: number) => `M${gx + dx},${top} Q${gx + dx + depth},${top + hb / 2} ${gx + dx},${bottom}`;
+    const body = `M${gx},${top} Q${gx + bw * 0.6},${top} ${gx + bw},${top + hb / 2} Q${gx + bw * 0.6},${bottom} ${gx},${bottom} Q${gx + depth},${top + hb / 2} ${gx},${top} Z`;
     // Inputs reach the curved back (those beyond the body end on its straight continuation).
     const edgeX = (py: number) => {
       const tt = (py - (top - y)) / hb;
-      return tt <= 0 || tt >= 1 ? 0 : 2 * (1 - tt) * tt * depth;
+      return lead + (tt <= 0 || tt >= 1 ? 0 : 2 * (1 - tt) * tt * depth);
     };
     return (
       <g>
-        {stubs(n, edgeX, theme)}
+        {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
         {back}
         <path d={body} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
         {gate === 'xor' && <path d={curve(-6)} fill="none" stroke={s.stroke} strokeWidth={s.width} />}
