@@ -988,6 +988,28 @@ describe('store', () => {
     expect([box('u:1').width, box('u:2').x]).toEqual([40, 160]);
   });
 
+  it('grows a gate into free room right of it without moving anything, so a setting changed there and back leaves the sheet as it was', async () => {
+    const d: SheetEdits = {
+      ...drawing([newUserNode('u:1', 'or', { params: { inputs: 2, width: 8, mode: 'bitwise' } }), newUserNode('u:2', 'not'), newUserNode('u:3', 'not')], [
+        { id: 'w:1', source: { node: 'u:1', port: 'u:1.Y' }, target: { node: 'u:2', port: 'u:2.A' } },
+      ]),
+      pos: { 'u:1': { x: 100, y: 100 }, 'u:2': { x: 220, y: 100 }, 'u:3': { x: 300, y: 300 } },
+      routes: { 'w:1': { points: [{ x: 140, y: 120 }, { x: 220, y: 120 }], manual: true } },
+    };
+    await open({}, { doc: { drawn: ['g'], sheets: { 'd:g': d } }, path: [{ instance: 'g', module: 'g', drawn: true }] });
+    const box = (id: string) => st().layout!.nodes.find((n) => n.id === id)!;
+    const route = () => st().doc.sheets['d:g'].routes['w:1']?.points;
+    for (let k = 0; k < 2; k++) {
+      st().setNodeParams('u:1', { mode: 'reduce' });
+      expect([box('u:1').x, box('u:1').width, box('u:2').x, box('u:3').x]).toEqual([100, 50, 220, 300]);
+      // Its output wire starts at its right edge, as straight as it was.
+      expect(route()).toEqual([{ x: 150, y: 120 }, { x: 220, y: 120 }]);
+      st().setNodeParams('u:1', { mode: 'bitwise' });
+      expect([box('u:1').width, box('u:2').x, box('u:3').x]).toEqual([40, 220, 300]);
+      expect(route()).toEqual([{ x: 140, y: 120 }, { x: 220, y: 120 }]);
+    }
+  });
+
   it('moves what is right of gates placed from a preset that got more inputs', async () => {
     const gate: ComponentDef = { name: 'gate', base: 'and', params: { inputs: 2 } };
     const d: SheetEdits = {

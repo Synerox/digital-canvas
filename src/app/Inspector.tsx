@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { type Diagram, type PinStyle, isPinKind, pinStyleOf } from '../core/diagram';
 import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/check';
-import { type GateMode, PARAM_LIMITS, SYMBOL_BY_KEY, gateMode, literalWidth, type ParamName } from '../editor/symbols';
+import { type GateMode, PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, gateMode, gateNotation, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-ident';
 import { deleteQuestion } from './drawing-list';
@@ -103,19 +103,23 @@ const PARAM_TITLE: Record<ParamName, string> = {
   mode: 'Mode',
 };
 
-const GATE_MODES: { mode: GateMode; text: string; title: string }[] = [
-  { mode: 'bitwise', text: 'Bitwise', title: 'a | b: every input and the output are Width bits; one gate with /N is N gates side by side' },
-  { mode: 'reduce', text: 'Reduce', title: '|a: one input of Width bits, a 1-bit output (all its bits into one)' },
-];
+/** The modes of a gate, with what each does, as the gate `sym` writes it (an AND: a & b, &a). */
+const gateModes = (sym: SymKey): { mode: GateMode; text: string; title: string }[] => {
+  const w = gateNotation(sym);
+  return [
+    { mode: 'bitwise', text: 'Bitwise', title: `${w.bitwise}: every input and the output are Width bits; one gate with /N is N gates side by side` },
+    { mode: 'reduce', text: 'Reduce', title: `${w.reduce}: one input of Width bits, a 1-bit output (all its bits into one)` },
+  ];
+};
 
 /** What a gate does with its bits (see GateMode): Bitwise (a | b) or Reduce (|a). The mode it has is marked. */
-function GateModeField({ id, mode }: { id: string; mode: GateMode }) {
+function GateModeField({ id, sym, mode }: { id: string; sym: SymKey; mode: GateMode }) {
   const setNodeParams = useStore((s) => s.setNodeParams);
   return (
     <div className="prop">
       <span>{PARAM_TITLE.mode}</span>
       <div className="view-toggle gate-mode" role="group" aria-label={PARAM_TITLE.mode}>
-        {GATE_MODES.map((o) => (
+        {gateModes(sym).map((o) => (
           <button key={o.mode} className={mode === o.mode ? 'on' : ''} aria-pressed={mode === o.mode} title={o.title} onClick={() => mode !== o.mode && setNodeParams(id, { mode: o.mode })}>
             {o.text}
           </button>
@@ -376,7 +380,7 @@ export function Inspector() {
           [...def.params].sort((a, b) => Number(b === 'mode') - Number(a === 'mode')).map((p) => {
             // Below, for every pin (an imported one too).
             if (p === 'style') return null;
-            if (p === 'mode') return <GateModeField key={p} id={id} mode={gateMode(user.params)} />;
+            if (p === 'mode') return <GateModeField key={p} id={id} sym={user.sym} mode={gateMode(user.params)} />;
             // A gate in reduce mode has one input (its count waits for bitwise mode).
             if (p === 'inputs' && gateMode(user.params) === 'reduce') return null;
             if (p === 'module') {

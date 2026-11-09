@@ -8,7 +8,7 @@
 import { type DEdge, type DNode, type DPort, type Diagram, type PinStyle, isPinKind, pinStyleOf, withPinStyle } from '../core/diagram';
 import { GRID, type LayoutResult, type MeasureText, type Point, isReduceType, legacyCellSize, sizeNode } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
-import { type Box, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
+import { type Box, OUTLINES, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
 import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, isGateSym, symbolNode } from './symbols';
 import { verilogIdent } from './verilog-ident';
@@ -960,23 +960,68 @@ function growFrom(e: SheetEdits, d: Diagram, measure: MeasureText, oldSize: (n: 
 /**
  * A sheet saved with the symbol outlines of before (oldOutlines, see OUTLINES), drawn with today's: the symbols
  * that grew get room as a block that grew does (makeRoom), so none covers a neighbour, a pin or a wire. An adder
- * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right. Wires a grown
+ * grew 20 px down (or up, where that is free), a gate with three or more inputs 10 or 20 px right, a reduction gate
+ * 10 px right. Wires a grown
  * symbol covers are routed again; so are those to its pins that moved (their ends no longer meet them).
  * `d` is the sheet's netlist with its hidden symbols (see growFrom).
  */
 export function fitNewOutlines(e: SheetEdits, d: Diagram, measure: MeasureText): SheetEdits {
-  const out = { ...growFrom(e, d, measure, (n, now) => legacyCellSize(n, measure) ?? now) };
+  const out = { ...growFrom(e, d, measure, (n, now) => legacyCellSize(n, measure, e.oldOutlines ?? OUTLINES) ?? now) };
   delete out.oldOutlines;
   return out;
 }
 
 /**
  * Room right of symbols that got wider when their settings changed (a gate with more inputs; `widths`: how wide
- * each was before): what is right of one moves right as far, wires too (makeRoom), rather than being covered.
+ * each was before): one with nothing right of it that it would come close to (but its own output wires, which run
+ * straight on from it) grows into that room, and nothing else moves, so changing a setting there and back leaves
+ * the sheet as it was. Else what is right of it moves right as far, wires too (makeRoom), rather than being covered.
  * `d` is the sheet's netlist after the change, with its hidden symbols (see growFrom).
  */
 export function fitWider(e: SheetEdits, d: Diagram, widths: ReadonlyMap<string, number>, measure: MeasureText): SheetEdits {
-  return growFrom(e, d, measure, (n, now) => (widths.has(n.id) ? { width: Math.min(widths.get(n.id)!, now.width), height: now.height } : now));
+  const pushing = new Map(widths);
+  let out = e;
+  for (const [id, was] of widths) {
+    const grown = growInPlace(out, d, id, was, measure);
+    if (grown) {
+      out = grown;
+      pushing.delete(id);
+    }
+  }
+  return pushing.size ? growFrom(out, d, measure, (n, now) => (pushing.has(n.id) ? { width: Math.min(pushing.get(n.id)!, now.width), height: now.height } : now)) : out;
+}
+
+/**
+ * Symbol `id`, `was` wide before, grown right into free room: no symbol, wire or wire label in the band it grows
+ * into, nor within the room a wire's stub takes beside it (as makeRoom keeps), but its own output wires, whose first
+ * stretch runs on straight out of that band: they start at its right edge now. Undefined when that room is not free.
+ */
+function growInPlace(e: SheetEdits, d: Diagram, id: string, was: number, measure: MeasureText): SheetEdits | undefined {
+  const at = e.pos[id];
+  const n = d.nodes.find((x) => x.id === id);
+  if (!at || !n) return undefined;
+  const now = sizeNode(n, measure);
+  if (now.width <= was) return e;
+  const right = at.x + now.width;
+  const band = { x: at.x + was, y: at.y - 5, width: now.width - was + 2 * GRID, height: now.height + 10 };
+  const hits = (b: Box) => b.x < band.x + band.width && band.x < b.x + b.width && b.y < band.y + band.height && band.y < b.y + b.height;
+  for (const m of d.nodes) {
+    const p = e.pos[m.id];
+    if (m.id !== id && p && hits({ ...p, ...sizeNode(m, measure) })) return undefined;
+  }
+  const own = new Set(d.edges.filter((x) => x.source.node === id).map((x) => x.id));
+  const routes: Record<string, RouteRec> = { ...e.routes };
+  for (const [k, r] of Object.entries(e.routes)) {
+    if (r.label && hits(r.label)) return undefined;
+    if (!own.has(k)) {
+      if (polylineHitsRect(r.points, band)) return undefined;
+      continue;
+    }
+    const [a, b, ...rest] = r.points;
+    if (!b || Math.abs(a.x - band.x) > 0.5 || b.y !== a.y || b.x < band.x + band.width || polylineHitsRect([b, ...rest], band)) return undefined;
+    routes[k] = { ...r, points: [{ x: right, y: a.y }, b, ...rest] };
+  }
+  return { ...e, routes };
 }
 
 /**

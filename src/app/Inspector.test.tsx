@@ -104,6 +104,10 @@ describe('Inspector', () => {
     expect(marked(show('u:2'))).toEqual(['Bitwise:false', 'Reduce:true']);
     expect(fields(show('u:2'))).toEqual(['Mode', 'Input width (bits)']);
     expect(marked(show('u:3'))).toEqual(['Bitwise:true', 'Reduce:false']);
+    // Each gate says what its modes do as it is written.
+    const titles = (html: string) => [...html.matchAll(/title="([^"]*)">(?:Bitwise|Reduce)<\/button>/g)].map((m) => m[1].split(':')[0]);
+    expect(titles(show('u:1'))).toEqual(['a | b', '|a']);
+    expect(titles(show('u:3'))).toEqual(['~(a &amp; b)', '~&amp;a']);
     expect(show('u:4')).not.toContain('Mode');
   });
 

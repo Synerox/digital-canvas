@@ -159,7 +159,7 @@ describe('makeRoom', () => {
 describe('fitNewOutlines', () => {
   const none: InterfaceOf = () => undefined;
   /** A drawing saved with the old outlines: symbols at these corners, wires with these saved routes. */
-  const sheet = (items: [string, SymKey, number, number, SymParams?][], routes: Record<string, Point[]> = {}) => {
+  const sheet = (items: [string, SymKey, number, number, SymParams?][], routes: Record<string, Point[]> = {}, outlines = 1) => {
     let e = addNodes(
       emptyEdits(),
       items.map(([id, sym, x, y, params]) => {
@@ -176,7 +176,7 @@ describe('fitNewOutlines', () => {
       [id, e] = connect(e, c);
       e = { ...e, routes: { ...e.routes, [id]: { points: routes[k] } } };
     }
-    return { ...e, oldOutlines: true as const };
+    return { ...e, oldOutlines: outlines };
   };
   const boxes = (e: SheetEdits) => {
     const d = effectiveDiagram('m', undefined, e, none);
@@ -262,6 +262,27 @@ describe('fitNewOutlines', () => {
     expect(out.routes[w].points.map((p) => p.x)).toEqual([40, 270, 270, 400, 400, 420]);
   });
 
+  it('gives a reduction gate saved with the outlines of version 2 its lead, and leaves what had its size then', () => {
+    // A reduce OR of 8 bits (40 wide then, 50 now) and a 4-input AND (60 wide since version 2), inverters right of each.
+    const e = sheet(
+      [
+        ['u:1', 'or', 200, 100, { mode: 'reduce', width: 8 }],
+        ['u:2', 'not', 260, 100],
+        ['u:3', 'and', 200, 300, { inputs: 4 }],
+        ['u:4', 'not', 280, 310],
+      ],
+      {},
+      2,
+    );
+    const out = fitNewOutlines(e, effectiveDiagram('m', undefined, e, none), approxMeasure);
+    // Everything right of the gate's old right edge moves 10 px right (as a wider gate's neighbours do).
+    expect(out.pos).toEqual({ 'u:1': { x: 200, y: 100 }, 'u:2': { x: 270, y: 100 }, 'u:3': { x: 200, y: 300 }, 'u:4': { x: 290, y: 310 } });
+    expect(touchingBoxes(out)).toEqual([]);
+    expect(out.oldOutlines).toBeUndefined();
+    // Saved before version 2, the AND grew too.
+    expect(fitNewOutlines({ ...e, oldOutlines: 1 }, effectiveDiagram('m', undefined, e, none), approxMeasure).pos['u:4']).toEqual({ x: 300, y: 310 });
+  });
+
   it('changes nothing but the mark where no symbol grew', () => {
     // A MUX got narrower: nothing moves for it.
     const e = sheet([
@@ -302,10 +323,14 @@ describe('outline version in saved files', () => {
 
   it('marks the pinned sheets of a file saved before, and keeps the mark of a sheet not drawn since', () => {
     const old = parseSavedFile(file(undefined, { 'd:d': pinned, 'v:blocks:top': { labels: { a: 'b' } } })).doc.sheets;
-    expect(old['d:d'].oldOutlines).toBe(true);
+    expect(old['d:d'].oldOutlines).toBe(1);
     // A sheet ELK lays out each time has no positions saved: nothing to move.
     expect(old['v:blocks:top'].oldOutlines).toBeUndefined();
     expect(parseSavedFile(file(OUTLINES, { 'd:d': pinned })).doc.sheets['d:d'].oldOutlines).toBeUndefined();
-    expect(parseSavedFile(file(OUTLINES, { 'd:d': { ...pinned, oldOutlines: true } })).doc.sheets['d:d'].oldOutlines).toBe(true);
+    // Marked `true` by a version before 3 (older than version 2 then), or by the version.
+    expect(parseSavedFile(file(OUTLINES, { 'd:d': { ...pinned, oldOutlines: true } })).doc.sheets['d:d'].oldOutlines).toBe(1);
+    expect(parseSavedFile(file(OUTLINES, { 'd:d': { ...pinned, oldOutlines: 2 } })).doc.sheets['d:d'].oldOutlines).toBe(2);
+    expect(parseSavedFile(file(2, { 'd:d': { ...pinned, oldOutlines: true } })).doc.sheets['d:d'].oldOutlines).toBe(1);
+    expect(parseSavedFile(file(2, { 'd:d': pinned })).doc.sheets['d:d'].oldOutlines).toBe(2);
   });
 });

@@ -5,7 +5,7 @@
 import type { JSX } from 'react';
 import { pinStyleOf } from '../core/diagram';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT, REDUCE_FAN, approxMeasure, fannedInput, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, muxInset } from '../layout/elk-layout';
+import { FONT, REDUCE_LEAD, approxMeasure, fannedInput, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, isReduceType, muxInset } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -102,12 +102,11 @@ interface MarkSpot {
  * side of the wire, then the mark moves further along it (never onto a bend). When nothing is
  * clear, the usual spot.
  */
-function placeBusMark(points: Point[], fromEnd: boolean, text: string, texts: readonly Box[], solids: readonly Box[], clear = 0): MarkSpot {
+function placeBusMark(points: Point[], fromEnd: boolean, text: string, texts: readonly Box[], solids: readonly Box[]): MarkSpot {
   const pts = fromEnd ? [...points].reverse() : points;
   let total = 0;
   for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-  // `clear`: a stretch at the start the slash keeps off (the fan of a reduction gate, where the wire ends).
-  const usual = clear ? clear + 10 : Math.min(12, firstSegmentLength(points, fromEnd) / 2);
+  const usual = Math.min(12, firstSegmentLength(points, fromEnd) / 2);
   const spots = (at: Point, horizontal: boolean): MarkSpot[] => [
     { at, text: { x: at.x + 2, y: at.y - 7, anchor: 'start' } },
     horizontal ? { at, text: { x: at.x + 2, y: at.y + 14, anchor: 'start' } } : { at, text: { x: at.x - 6, y: at.y + 4, anchor: 'end' } },
@@ -119,7 +118,7 @@ function placeBusMark(points: Point[], fromEnd: boolean, text: string, texts: re
   const nearTexts = texts.filter(close);
   const nearAll = [...nearTexts, ...solids.filter(close)];
   const dists = [usual];
-  for (let d = Math.max(20, usual + 8); d <= Math.min(total - 6, 120); d += 8) dists.push(d);
+  for (let d = 20; d <= Math.min(total - 6, 120); d += 8) dists.push(d);
   for (const [k, d] of dists.entries()) {
     const p = pointAt(pts, d);
     if (k > 0 && p.nearBend) continue;
@@ -222,18 +221,18 @@ function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; 
 }
 
 /**
- * The fan of a reduction gate (`|a`): its bus input `q` splits, REDUCE_FAN before the gate, into lines that run on
- * side by side into the gate's back (`edgeX`, from the symbol's left edge, by height in it), as a bus split into
- * its bits into one gate is drawn: all its bits go into this gate. Three lines for a bus of three bits or more,
- * two for two (the number is on the wire's bus mark).
+ * The fan of a reduction gate (`|a`): its bus input `q` splits, in the lead the symbol has for it (REDUCE_LEAD), into
+ * lines that run on side by side into the gate's back (`edgeX`, from the symbol's left edge, by height in it), as a
+ * bus split into its bits into one gate is drawn: all its bits go into this gate. Three lines for a bus of three
+ * bits or more, two for two (the number is on the wire's bus mark).
  */
 function reduceFan(n: LNode, q: LNode['ports'][number], edgeX: (y: number) => number, theme: Theme): JSX.Element {
   const spread = q.width === 2 ? [-4, 4] : [-6, 0, 6];
-  const split = q.x - REDUCE_FAN / 2;
+  const split = q.x + REDUCE_LEAD / 2;
   return (
     <g key="fan" fill="none" stroke={theme.wire} strokeWidth={STROKE} strokeLinejoin="round">
       {spread.map((dy) => (
-        <polyline key={dy} points={`${q.x - REDUCE_FAN},${q.y} ${split},${q.y + dy} ${n.x + edgeX(q.y + dy - n.y)},${q.y + dy}`} />
+        <polyline key={dy} points={`${q.x},${q.y} ${split},${q.y + dy} ${n.x + edgeX(q.y + dy - n.y)},${q.y + dy}`} />
       ))}
     </g>
   );
@@ -343,33 +342,37 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   const gate = gateShape(t);
   if (gate) {
     // The body is at most four inputs tall (gateBodyHeight), centred; with more inputs the back edge runs
-    // on, straight, to the outer ones. A bubble on the output (NAND, NOR, XNOR) shortens the body.
+    // on, straight, to the outer ones. A bubble on the output (NAND, NOR, XNOR) shortens the body. A reduction
+    // (|a) has a lead before its body (REDUCE_LEAD), where its bus input fans out into bits (see reduceFan).
+    const lead = isReduceType(t) ? REDUCE_LEAD : 0;
+    const gx = x + lead;
+    const gw = w - lead;
     const bubble = invertsOutput(t);
-    const bw = bubble ? w - 8 : w;
+    const bw = bubble ? gw - 8 : gw;
     const hb = gateBodyHeight(h);
     const top = y + (h - hb) / 2;
     const bottom = top + hb;
     const inputs = n.ports.filter((q) => q.side === 'WEST');
-    // A reduction (|a) of a bus: its one input fans out into bits just before the gate (see reduceFan).
     const fanned = fannedInput(n);
     const first = Math.min(...inputs.map((q) => q.y));
     const last = Math.max(...inputs.map((q) => q.y));
     const back = [
       // In the editor the whole symbol is picked by a click, not only its body (what is under the pointer is what is hit).
-      p.interactive && hb < h && <rect key="hit" x={x} y={y} width={w} height={h} fill="transparent" />,
-      first < top && <line key="up" x1={x} y1={first} x2={x} y2={top} stroke={s.stroke} strokeWidth={s.width} />,
-      last > bottom && <line key="down" x1={x} y1={bottom} x2={x} y2={last} stroke={s.stroke} strokeWidth={s.width} />,
+      p.interactive && (hb < h || lead > 0) && <rect key="hit" x={x} y={y} width={w} height={h} fill="transparent" />,
+      first < top && <line key="up" x1={gx} y1={first} x2={gx} y2={top} stroke={s.stroke} strokeWidth={s.width} />,
+      last > bottom && <line key="down" x1={gx} y1={bottom} x2={gx} y2={last} stroke={s.stroke} strokeWidth={s.width} />,
     ];
     const outBubble = bubble && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />;
     if (gate === 'and') {
       // Flat back, then a half ellipse (a half circle when the gate is as wide as it is tall).
       const rx = Math.min(hb / 2, bw / 2);
-      const d = `M${x},${top} H${x + bw - rx} A${rx},${hb / 2} 0 0 1 ${x + bw - rx},${bottom} H${x} Z`;
+      const d = `M${gx},${top} H${gx + bw - rx} A${rx},${hb / 2} 0 0 1 ${gx + bw - rx},${bottom} H${gx} Z`;
       const inverted = n.attrs?.invertB ? n.ports.find((q) => q.name === 'B') : undefined;
+      const edgeX = () => lead;
       return (
         <g>
           {back}
-          {fanned && reduceFan(n, fanned, () => 0, theme)}
+          {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
           <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
           {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
           {outBubble}
@@ -377,13 +380,13 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       );
     }
     // OR and XOR: a curved back, and two curves meeting in a point at the output.
-    const depth = Math.min(hb, w) * 0.25;
-    const curve = (dx: number) => `M${x + dx},${top} Q${x + dx + depth},${top + hb / 2} ${x + dx},${bottom}`;
-    const body = `M${x},${top} Q${x + bw * 0.6},${top} ${x + bw},${top + hb / 2} Q${x + bw * 0.6},${bottom} ${x},${bottom} Q${x + depth},${top + hb / 2} ${x},${top} Z`;
+    const depth = Math.min(hb, gw) * 0.25;
+    const curve = (dx: number) => `M${gx + dx},${top} Q${gx + dx + depth},${top + hb / 2} ${gx + dx},${bottom}`;
+    const body = `M${gx},${top} Q${gx + bw * 0.6},${top} ${gx + bw},${top + hb / 2} Q${gx + bw * 0.6},${bottom} ${gx},${bottom} Q${gx + depth},${top + hb / 2} ${gx},${top} Z`;
     // Inputs reach the curved back (those beyond the body end on its straight continuation).
     const edgeX = (py: number) => {
       const tt = (py - (top - y)) / hb;
-      return tt <= 0 || tt >= 1 ? 0 : 2 * (1 - tt) * tt * depth;
+      return lead + (tt <= 0 || tt >= 1 ? 0 : 2 * (1 - tt) * tt * depth);
     };
     return (
       <g>
@@ -612,7 +615,6 @@ function Edges({
   interactive,
   texts,
   solids,
-  fanned,
 }: {
   edges: LEdge[];
   theme: Theme;
@@ -623,8 +625,6 @@ function Edges({
   texts: Box[];
   /** Symbols and wire segments the numbers of width marks must not cover. */
   solids: readonly Box[];
-  /** Inputs of reduction gates, whose wires fan out just before them (see reduceFan): their marks keep off the fan. */
-  fanned: ReadonlySet<string>;
 }) {
   const marks: JSX.Element[] = [];
   const doneSources = new Set<string>();
@@ -632,7 +632,7 @@ function Edges({
   const junctions: Point[] = [];
   const mark = (e: LEdge, fromEnd: boolean) => {
     const text = String(e.width);
-    const spot = placeBusMark(e.points, fromEnd, text, texts, solids, fromEnd && fanned.has(e.target.port) ? REDUCE_FAN : 0);
+    const spot = placeBusMark(e.points, fromEnd, text, texts, solids);
     texts.push(textBox(spot.text, text, MARK_FONT));
     marks.push(<BusMark key={`m${e.id}`} spot={spot} width={e.width} theme={theme} />);
   };
@@ -731,16 +731,7 @@ export function DiagramGraphic(props: GraphicProps) {
   ];
   return (
     <g>
-      <Edges
-        edges={edges}
-        theme={p.theme}
-        selection={p.selection}
-        flagged={p.flagged}
-        interactive={p.interactive}
-        texts={texts}
-        solids={solids}
-        fanned={new Set(nodes.flatMap((n) => fannedInput(n)?.id ?? []))}
-      />
+      <Edges edges={edges} theme={p.theme} selection={p.selection} flagged={p.flagged} interactive={p.interactive} texts={texts} solids={solids} />
       {nodes.map((n) => (
         <NodeShape key={n.id} n={n} p={p} names={names} />
       ))}

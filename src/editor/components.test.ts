@@ -6,6 +6,7 @@ import {
   componentsJson,
   editComponent,
   followsPreset,
+  componentStem,
   freeComponentName,
   loadComponents,
   parseComponents,
@@ -208,7 +209,10 @@ describe('components in JSON', () => {
   });
 
   it('says what the JSON of a symbol sets', () => {
-    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits, "mode" "bitwise" (a | b) or "reduce" (|a: one input, a 1-bit output)');
+    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits, "mode" "bitwise" (a & b) or "reduce" (&a: one input, a 1-bit output)');
+    // Each gate as it is written.
+    expect(settingsHint('nor')).toContain('"mode" "bitwise" (~(a | b)) or "reduce" (~|a: one input, a 1-bit output)');
+    expect(settingsHint('xnor')).toContain('"bitwise" (~(a ^ b)) or "reduce" (~^a:');
     expect(settingsHint('decoder')).toBe('"width" 1–8 select bits');
     expect(settingsHint('const')).toBe('"value" a Verilog number such as "4\'d2"');
     expect(settingsHint('shl')).toBe('"width" 1–256 bits, "shift" 1–16 bits of the shift amount');
@@ -220,5 +224,16 @@ describe('components in JSON', () => {
     expect(freeComponentName(defs, 'and5')).toBe('and5_2');
     expect(freeComponentName(defs, 'x', (n) => (n === 'x' ? 'taken' : undefined))).toBe('x_2');
     expect(freeComponentName(defs, 'not')).toBe('not_2');
+  });
+
+  it('names a component by its settings, a reduction apart from a gate with as many inputs', () => {
+    expect(componentStem('and', { inputs: 3, width: 1, mode: 'bitwise' })).toBe('and3');
+    expect(componentStem('mux', { inputs: 4, width: 8 })).toBe('mux4x8');
+    expect(componentStem('add', { width: 8 })).toBe('add8');
+    expect(componentStem('or', { inputs: 8, width: 1, mode: 'bitwise' })).toBe('or8');
+    expect(componentStem('or', { inputs: 2, width: 8, mode: 'reduce' })).toBe('reduce_or8');
+    // One bit: no number, and no Verilog keyword (and) to number either.
+    expect(componentStem('and', { width: 1, mode: 'reduce' })).toBe('reduce_and');
+    expect(freeComponentName([], componentStem('and', { width: 1, mode: 'reduce' }))).toBe('reduce_and');
   });
 });

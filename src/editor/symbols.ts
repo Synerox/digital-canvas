@@ -66,6 +66,13 @@ export type GateMode = 'bitwise' | 'reduce';
 /** The gates that have a reduce mode (see GateMode). */
 export const GATE_SYMS: readonly SymKey[] = ['and', 'or', 'xor', 'nand', 'nor', 'xnor'];
 
+/** How Verilog writes what a gate does, in each mode: `a & b` and `&a` for an AND, `~(a | b)` and `~|a` for a NOR. */
+export function gateNotation(sym: SymKey): Record<GateMode, string> {
+  const op = sym === 'and' || sym === 'nand' ? '&' : sym === 'xor' || sym === 'xnor' ? '^' : '|';
+  const not = sym === 'nand' || sym === 'nor' || sym === 'xnor';
+  return { bitwise: not ? `~(a ${op} b)` : `a ${op} b`, reduce: `${not ? '~' : ''}${op}a` };
+}
+
 /** Whether a symbol is a logic gate that has a mode (see GateMode). */
 export function isGateSym(sym: SymKey): boolean {
   return GATE_SYMS.includes(sym);

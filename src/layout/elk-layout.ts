@@ -146,7 +146,7 @@ export function invertsOutput(t: string | undefined): boolean {
 /**
  * Reduction gates (`&a`, `|a`, `^a`, `~&a`, `~|a`, `~^a`; `$reduce_bool` is the `|a` of a condition): all the bits of
  * their one input into one bit. Drawn as the gate with that input in the middle of its back, fanned out into
- * bits just before it (see the renderer).
+ * bits in a lead before it (REDUCE_LEAD).
  */
 export function isReduceType(t: string | undefined): boolean {
   return (
@@ -161,12 +161,13 @@ export function isReduceType(t: string | undefined): boolean {
 }
 
 /**
- * How far before a reduction gate its bus input fans out into bits: one grid step, on the straight stub every wire
- * ends with at a pin. The bus mark of its wire and the open-pin hint keep clear of it.
+ * The lead of a reduction gate: the first grid step of its symbol, between its input pin on the left edge and the
+ * gate's back, where its bus input fans out into bits (see the renderer). Inside the symbol, so its wire ends at the
+ * pin as any wire does: its bus mark, its label and what is drawn over a selected wire stay clear of the fan.
  */
-export const REDUCE_FAN = GRID;
+export const REDUCE_LEAD = GRID;
 
-/** The bus input of a reduction gate, which is drawn fanned out into bits (see REDUCE_FAN); undefined for any other symbol. */
+/** The bus input of a reduction gate, which is drawn fanned out into bits (see REDUCE_LEAD); undefined for any other symbol. */
 export function fannedInput<P extends DPort>(n: { kind: DNode['kind']; cellType?: string; ports: P[] }): P | undefined {
   if (n.kind !== 'cell' || !isReduceType(n.cellType)) return undefined;
   const ins = n.ports.filter((p) => p.side === 'WEST');
@@ -279,7 +280,7 @@ export function sizeNode(n: DNode, measure: MeasureText): Sized {
     isMux || isAlu
       ? edgeWidth(40, south.length)
       : gate
-        ? edgeWidth(gateWidth(height), south.length)
+        ? edgeWidth(gateWidth(height) + (isReduceType(n.cellType) ? REDUCE_LEAD : 0), south.length)
         : edgeWidth(Math.max(40, measure(n.label, FONT.op) + 16), south.length);
   const place = (list: typeof west, x: number) => {
     const start = height / 2 - ((list.length - 1) * ROW) / 2;
@@ -300,13 +301,18 @@ export function sizeNode(n: DNode, measure: MeasureText): Sized {
 }
 
 /**
- * The size sizeNode gave a cell before the symbol outlines of version 2 (see OUTLINES in editor/doc), for the
- * cells whose size changed then: an adder was 40x40, a MUX 60 wide, a gate 40 wide whatever its inputs.
- * Undefined for other symbols, whose size did not change.
+ * The size sizeNode gave a cell with the symbol outlines of version `outlines` (see OUTLINES in editor/doc), for the
+ * cells whose size changed since; undefined for the others. Before version 2 an adder was 40x40, a MUX 60 wide, a
+ * gate 40 wide whatever its inputs; before version 3 a reduction gate had no lead (REDUCE_LEAD).
  */
-export function legacyCellSize(n: DNode, measure: MeasureText): { width: number; height: number } | undefined {
+export function legacyCellSize(n: DNode, measure: MeasureText, outlines: number): { width: number; height: number } | undefined {
   const isMux = isMuxType(n.cellType);
   if (n.kind !== 'cell' || !(isMux || isAluType(n.cellType) || gateShape(n.cellType))) return undefined;
+  if (outlines >= 2) {
+    if (!isReduceType(n.cellType)) return undefined;
+    const s = sizeNode(n, measure);
+    return { width: s.width - REDUCE_LEAD, height: s.height };
+  }
   const count = (side: Side) => n.ports.filter((p) => p.side === side).length;
   const rows = Math.max(count('WEST'), count('EAST'), isMux ? 2 : 1);
   return {

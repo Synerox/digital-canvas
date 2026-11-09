@@ -6,7 +6,7 @@
  * button for it too. Apply is one undo step.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { type ComponentDef, MAX_COMPONENTS, editComponent, freeComponentName, isPart, parseSymbolJson, settingsHint } from '../editor/components';
+import { type ComponentDef, MAX_COMPONENTS, componentStem, editComponent, freeComponentName, isPart, parseSymbolJson, settingsHint } from '../editor/components';
 import { SYMBOL_BY_KEY, type SymKey, type SymParams } from '../editor/symbols';
 import { MOD, useEscape } from './Dialogs';
 import { sheetsPlacing, sheetsUsing, useStore } from './store';
@@ -95,10 +95,7 @@ export function SettingsWindow({ subject, x, y, from, onClose }: { subject: Subj
       return;
     }
     const p = result.params;
-    // and3, add8, mux4x8: the count of inputs (or slices), and the width when it is a bus.
-    const count = p.inputs ?? p.parts;
-    const bits = p.width && p.width > 1 ? `${count !== undefined ? 'x' : ''}${p.width}` : '';
-    const name = freeComponentName(doc.components, `${subject.sym}${count ?? ''}${bits}`, nameTaken);
+    const name = freeComponentName(doc.components, componentStem(subject.sym, p), nameTaken);
     setComponents([...(doc.components ?? []), { name, base: subject.sym, params: p }]);
     setSaid(`Added ${name} to Components.${text !== subject.text ? ' Apply changes this symbol too.' : ''}`);
   };

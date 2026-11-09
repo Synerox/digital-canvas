@@ -122,7 +122,7 @@ function readCounts(m: IRModule): Map<number, number> {
  *
  * - `~&a`, `~|a` (and `~(|a)`, `!(^a)`…): Yosys makes a reduction and a NOT of its one bit. They are one reduction
  *   gate with a bubble, when nothing else reads that bit and no signal of the code is that bit (a named wire is drawn
- *   between the two, as written). The gate keeps the reduction's ID.
+ *   between the two, as written). The gate takes the NOT's ID: an ID never names a different output.
  * - `!a` of a bus: the bus is all zeros, a NOR of all its bits (an inverter would read as `~a`, every bit inverted).
  *
  * Applied after applyRules, apart from it: what selects a case of a case table is named by the cells before these
@@ -144,11 +144,17 @@ export function combineReductions(m: IRModule): IRModule {
     if (c.isInstance || (c.type !== '$logic_not' && c.type !== '$not')) continue;
     const a = c.connections.A;
     const y = c.connections.Y;
-    if (a?.length !== 1 || y?.length !== 1 || typeof a[0] !== 'number') continue;
+    // A `!` is as wide as what reads it (`c + !a`: zero padded), a `~` of one bit is one bit.
+    if (a?.length !== 1 || !y?.length || (c.type === '$not' && y.length !== 1) || typeof a[0] !== 'number') continue;
     const r = driver.get(a[0]);
     if (!r || merged.has(r) || reads.get(a[0]) !== 1 || named.has(a[0])) continue;
+    // The NOT's ID, name and hidden flag: its output is what the gate drives now. The reduction's ID would change
+    // what its output pin means (`&a` became `~&a`) under wires and edits saved for it.
     merged.set(r, {
       ...r,
+      id: c.id,
+      name: c.name,
+      hidden: c.hidden,
       type: NEGATED_REDUCTION[r.type],
       rule: 'reduce-not',
       directions: { A: 'input', Y: 'output' },
@@ -163,7 +169,7 @@ export function combineReductions(m: IRModule): IRModule {
       const r = merged.get(c);
       if (r) return r;
       // `!a` of a bus (a 1-bit `!` stays an inverter).
-      if (!c.isInstance && c.type === '$logic_not' && (c.connections.A?.length ?? 0) > 1 && c.connections.Y?.length === 1) {
+      if (!c.isInstance && c.type === '$logic_not' && (c.connections.A?.length ?? 0) > 1 && c.connections.Y?.length) {
         return { ...c, type: 'dc:reduce_nor', rule: 'logic-not' };
       }
       return c;

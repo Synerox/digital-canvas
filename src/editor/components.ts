@@ -15,7 +15,7 @@
  * The text the user writes is read by parseComponents, which explains what is wrong; the
  * file loader reads the saved definitions with loadComponents, which drops what is wrong.
  */
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, gateMode, literalWidth } from './symbols';
+import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, gateMode, gateNotation, isGateSym, literalWidth } from './symbols';
 import { verilogIdent } from './verilog-ident';
 
 export interface ComponentDef {
@@ -51,7 +51,11 @@ export const COMPONENTS_EXAMPLE = `[
 `;
 
 /** What "mode" takes, as the errors and hints say it. */
-const MODE_TEXT = '"bitwise" (a | b) or "reduce" (|a: one input, a 1-bit output)';
+/** What "mode" takes, as the gate `sym` writes it: `"bitwise" (a & b) or "reduce" (&a: …)` for an AND. */
+const modeText = (sym: SymKey) => {
+  const w = gateNotation(sym);
+  return `"bitwise" (${w.bitwise}) or "reduce" (${w.reduce}: one input, a 1-bit output)`;
+};
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const NAME = /^[A-Za-z_][A-Za-z0-9_$]*$/;
@@ -171,7 +175,7 @@ function componentOf(v: unknown, k: number, taken: (name: string) => string | un
         continue;
       }
       if (key === 'mode') {
-        if (val !== 'bitwise' && val !== 'reduce') throw new Bad(`${where}: "mode" is ${MODE_TEXT}.`);
+        if (val !== 'bitwise' && val !== 'reduce') throw new Bad(`${where}: "mode" is ${modeText(base)}.`);
         params.mode = val;
         continue;
       }
@@ -449,7 +453,7 @@ export function settingsHint(sym: SymKey): string {
     .map((f) => {
       if (f === 'value') return `"value" a Verilog number such as "4'd2"`;
       if (f === 'style') return `"style" "label" (the name in a label outline) or "text" (the name only)`;
-      if (f === 'mode') return `"mode" ${MODE_TEXT}`;
+      if (f === 'mode') return `"mode" ${modeText(sym)}`;
       const [lo, hi] = PARAM_LIMITS[f as keyof typeof PARAM_LIMITS];
       // "width" is bits, not the size of the drawing: say so (the symbol shows them on its pins).
       const unit = f === 'width' ? (sym === 'decoder' ? ' select bits' : ' bits') : f === 'shift' ? ' bits of the shift amount' : '';
@@ -482,6 +486,17 @@ export function parseSymbolJson(text: string, sym: SymKey): { params: SymParams;
     if (e instanceof Bad) return { error: e.message.replace(/^symbol: /, '') };
     throw e;
   }
+}
+
+/**
+ * The name a component of these settings of `sym` would have (see freeComponentName): and3, add8, mux4x8 (the count
+ * of inputs or slices, and the width when it is a bus); reduce_or8 for a reduction of 8 bits, which is no 8-input OR.
+ */
+export function componentStem(sym: SymKey, p: SymParams): string {
+  const wide = p.width !== undefined && p.width > 1 ? p.width : undefined;
+  if (isGateSym(sym) && gateMode(p) === 'reduce') return `reduce_${sym}${wide ?? ''}`;
+  const count = p.inputs ?? p.parts;
+  return `${sym}${count ?? ''}${wide !== undefined ? `${count !== undefined ? 'x' : ''}${wide}` : ''}`;
 }
 
 /** A name for a new component: `stem`, or stem_2, stem_3… when one has it. */
