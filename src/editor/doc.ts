@@ -66,7 +66,7 @@ export interface SheetEdits {
 /**
  * Version of the symbol outlines, written in saved files. 2 (2026-11): adders 40x60 (were 40x40), MUX 40 wide
  * (were 60), gates with three or more inputs 50 or 60 wide (were 40). 3 (2026-11): reduction gates (`|a`) 10 px
- * wider, for the lead their bus fans out in (were as wide as other gates). The pinned sheets of a file without it,
+ * wider, for a lead before the gate (were as wide as other gates). The pinned sheets of a file without it,
  * or with an older one, are marked oldOutlines with that version (1 for none) when it is read.
  */
 export const OUTLINES = 3;

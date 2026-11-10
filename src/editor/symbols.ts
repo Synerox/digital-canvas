@@ -62,8 +62,8 @@ export type ParamName = 'width' | 'inputs' | 'value' | 'module' | 'shift' | 'par
  *   1. Drawn as one gate with the buses going straight into it. AND, OR, NAND, NOR and NOT have it (Verilog has no
  *   logical XOR).
  * - `reduce`: `|a`, Verilog's reduction operators (`&a`, `|a`, `^a`, `~&a`, `~|a`, `~^a`). One input of `width`
- *   bits, one 1-bit output: the gate of all the bits of its input, drawn as one gate with its bus fanned out into
- *   bits just before it. Its `inputs` setting is kept for when it has inputs again. A NOT has no reduce mode.
+ *   bits, one 1-bit output: the gate of all the bits of its input, drawn as one gate with its one input, the whole
+ *   bus, going straight into it. Its `inputs` setting is kept for when it has inputs again. A NOT has no reduce mode.
  */
 export type GateMode = 'bitwise' | 'logical' | 'reduce';
 

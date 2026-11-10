@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { type DNode, type Diagram, buildDiagram } from '../core/diagram';
 import { design } from '../core/test-utils';
 import { openBusHints } from '../app/pin-hints';
-import { type LayoutResult, REDUCE_LEAD, approxMeasure, fannedInput, sizeNode } from '../layout/elk-layout';
+import { type LayoutResult, REDUCE_LEAD, approxMeasure, isReduceType, sizeNode } from '../layout/elk-layout';
 import { exportSvg } from '../render/export';
 import { THEME } from '../render/theme';
 import { checkSheet } from './check';
@@ -55,13 +55,13 @@ describe('logic gates: bitwise (a | b) or reduce (|a)', () => {
       const reduce = symbolNode({ ...u, params: { inputs: 3, width: 4, mode: 'reduce' } }, noModules);
       expect(reduce.cellType).toBe(cells[sym]);
       expect(ports(reduce)).toEqual(['A:in:4', 'Y:out:1']);
-      // As tall as a 2-input gate and a lead (where its bus fans out) wider, its input in the middle (on the grid).
+      // As tall as a 2-input gate and a lead (its bus runs straight through it) wider, its input in the middle (on the grid).
       const s = sizeNode(reduce, approxMeasure);
       expect(s).toMatchObject({ width: 40 + REDUCE_LEAD, height: 40 });
       expect(REDUCE_LEAD % 10).toBe(0);
       expect(s.ports['u:1.A']).toEqual({ x: 0, y: 20 });
-      expect(fannedInput(reduce)?.name).toBe('A');
-      expect(fannedInput(bitwise)).toBeUndefined();
+      expect(isReduceType(reduce.cellType)).toBe(true);
+      expect(isReduceType(bitwise.cellType)).toBe(false);
     }
     // A NOT has a mode (bitwise or logical), a Buffer none.
     expect(newUserNode('u:1', 'not').params).toEqual({ width: 1, mode: 'bitwise' });
@@ -139,25 +139,28 @@ describe('logic gates: bitwise (a | b) or reduce (|a)', () => {
     expect(e.nodes.map((n) => n.params.mode)).toEqual(['reduce', undefined, undefined, undefined]);
   });
 
-  it('draws the bus into a reduction fanned out into its bits in its lead, so its wire is drawn as any other', () => {
+  it('draws the bus into a reduction straight into one gate (Timmy: a bus with its width mark, one gate, one bit out)', () => {
     const gate = (id: string, sym: SymKey, width: number, mode: 'bitwise' | 'reduce'): UserNode => newUserNode(id, sym, { params: { inputs: 2, width, mode } });
-    const fan = (u: UserNode) => {
+    const drawn = (u: UserNode) => {
       const layout = laidOut(effectiveDiagram('d', undefined, { ...emptyEdits(), nodes: [u], next: 9 }, noModules), { [u.id]: { x: 100, y: 0 } });
       const svg = exportSvg(layout, THEME);
-      return [...svg.matchAll(/<polyline points="([^"]+)"/g)].map((m) => m[1].split(' ').map((p) => p.split(',').map(Number)));
+      const lines = [...svg.matchAll(/<line x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)" y2="([\d.]+)"/g)].map((m) => m.slice(1).map(Number));
+      return { polylines: [...svg.matchAll(/<polyline /g)].length, lines };
     };
-    for (const [sym, width, count] of [['or', 8, 3], ['and', 3, 3], ['xnor', 2, 2], ['nand', 1, 0]] as const) {
-      const lines = fan(gate('u:1', sym, width, 'reduce'));
-      expect(lines).toHaveLength(count);
-      // From the pin, on the symbol's left edge, into the gate's back past the lead: inside the symbol.
-      for (const l of lines) {
-        expect(l[0]).toEqual([100, 20]);
-        expect(l.at(-1)![0]).toBeGreaterThanOrEqual(100 + REDUCE_LEAD);
-        expect(l.at(-1)![0]).toBeLessThan(100 + REDUCE_LEAD + 10);
-      }
+    for (const [sym, width] of [['or', 8], ['and', 3], ['xnor', 2], ['nand', 1], ['xor', 16]] as const) {
+      const { polylines, lines } = drawn(gate('u:1', sym, width, 'reduce'));
+      // No fan (it read as the bus split into one-bit inputs): one straight line from the pin, on the symbol's left
+      // edge, through the lead into the gate's back (the curved back of an OR or XOR is a little further in).
+      expect(polylines).toBe(0);
+      const into = lines.filter(([x1, y1, , y2]) => x1 === 100 && y1 === 20 && y2 === 20);
+      expect(into).toHaveLength(1);
+      expect(into[0][2]).toBeGreaterThanOrEqual(100 + REDUCE_LEAD);
+      expect(into[0][2]).toBeLessThan(100 + REDUCE_LEAD + 10);
+      // Nothing else is drawn in the lead, beside that line.
+      expect(lines.filter(([x1, y1, , y2]) => x1 < 100 + REDUCE_LEAD && (y1 !== 20 || y2 !== 20))).toEqual([]);
     }
-    // A bitwise gate has its inputs.
-    expect(fan(gate('u:1', 'or', 8, 'bitwise'))).toHaveLength(0);
+    // A bitwise gate has its two inputs.
+    expect(drawn(gate('u:1', 'or', 8, 'bitwise')).lines.filter(([x1]) => x1 === 100)).toHaveLength(2);
 
     // A wire carrying 4 of the 8 bits of a: its mark where a wire's mark goes, 12 px before its end (the pin).
     const nodes = [newUserNode('u:1', 'input', { name: 'a', params: { width: 8, style: 'label' } }), gate('u:2', 'or', 4, 'reduce'), gate('u:3', 'or', 4, 'reduce')];
@@ -234,7 +237,7 @@ describe('reductions imported from Verilog', () => {
 
     // Each is a gate of the library in reduce mode, drawn the same, when copied to a drawing; one with a wider
     // output is a copy as it is (a gate's output is one bit).
-    const reductions = cells.filter((c) => fannedInput(c) || /reduce/.test(c.cellType ?? ''));
+    const reductions = cells.filter((c) => isReduceType(c.cellType));
     const wide = reductions.filter((c) => c.ports.find((p) => p.name === 'Y')!.width > 1);
     expect(wide).toHaveLength(1);
     for (const n of wide) expect(toUserNode(n, 'u:1', noModules).sym).toBe('raw');

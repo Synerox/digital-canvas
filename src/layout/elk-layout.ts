@@ -195,8 +195,8 @@ export function stackedGates(n: { kind: DNode['kind']; cellType?: string; ports:
 
 /**
  * Reduction gates (`&a`, `|a`, `^a`, `~&a`, `~|a`, `~^a`; `$reduce_bool` is the `|a` of a condition): all the bits of
- * their one input into one bit. Drawn as the gate with that input in the middle of its back, fanned out into
- * bits in a lead before it (REDUCE_LEAD).
+ * their one input into one bit. Drawn as one gate with that input, the whole bus, going straight into the middle of
+ * its back through a lead before it (REDUCE_LEAD): one input is what tells it from a bitwise or logical gate.
  */
 export function isReduceType(t: string | undefined): boolean {
   return (
@@ -212,17 +212,10 @@ export function isReduceType(t: string | undefined): boolean {
 
 /**
  * The lead of a reduction gate: the first grid step of its symbol, between its input pin on the left edge and the
- * gate's back, where its bus input fans out into bits (see the renderer). Inside the symbol, so its wire ends at the
- * pin as any wire does: its bus mark, its label and what is drawn over a selected wire stay clear of the fan.
+ * gate's back, where its bus runs straight on into the gate. (Until 2026-11-10 the bus fanned out into bits there,
+ * which read as the bus split into one-bit inputs; the lead stayed so that no symbol or wire moves.)
  */
 export const REDUCE_LEAD = GRID;
-
-/** The bus input of a reduction gate, which is drawn fanned out into bits (see REDUCE_LEAD); undefined for any other symbol. */
-export function fannedInput<P extends DPort>(n: { kind: DNode['kind']; cellType?: string; ports: P[] }): P | undefined {
-  if (n.kind !== 'cell' || !isReduceType(n.cellType)) return undefined;
-  const ins = n.ports.filter((p) => p.side === 'WEST');
-  return ins.length === 1 && ins[0].width > 1 ? ins[0] : undefined;
-}
 
 /**
  * Height of a gate's body: as tall as the symbol up to four inputs. A gate with more inputs keeps that

@@ -5,7 +5,7 @@
 import type { JSX } from 'react';
 import { pinStyleOf } from '../core/diagram';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT, REDUCE_LEAD, approxMeasure, fannedInput, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, isReduceType, muxInset, stackedGates } from '../layout/elk-layout';
+import { FONT, REDUCE_LEAD, approxMeasure, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, isReduceType, muxInset, stackedGates } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -224,24 +224,6 @@ function nodeStroke(n: LNode, p: GraphicProps): { stroke: string; fill: string; 
   };
 }
 
-/**
- * The fan of a reduction gate (`|a`): its bus input `q` splits, in the lead the symbol has for it (REDUCE_LEAD), into
- * lines that run on side by side into the gate's back (`edgeX`, from the symbol's left edge, by height in it), as a
- * bus split into its bits into one gate is drawn: all its bits go into this gate. Three lines for a bus of three
- * bits or more, two for two (the number is on the wire's bus mark).
- */
-function reduceFan(n: LNode, q: LNode['ports'][number], edgeX: (y: number) => number, theme: Theme): JSX.Element {
-  const spread = q.width === 2 ? [-4, 4] : [-6, 0, 6];
-  const split = q.x + REDUCE_LEAD / 2;
-  return (
-    <g key="fan" fill="none" stroke={theme.wire} strokeWidth={STROKE} strokeLinejoin="round">
-      {spread.map((dy) => (
-        <polyline key={dy} points={`${q.x},${q.y} ${split},${q.y + dy} ${n.x + edgeX(q.y + dy - n.y)},${q.y + dy}`} />
-      ))}
-    </g>
-  );
-}
-
 /** Short stub lines from a port to the outline of a non-rectangular symbol. */
 function stubs(n: LNode, edgeX: (y: number) => number, theme: Theme): JSX.Element[] {
   return n.ports
@@ -376,7 +358,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   if (gate) {
     // The body is at most four inputs tall (gateBodyHeight), centred; with more inputs the back edge runs
     // on, straight, to the outer ones. A bubble on the output (NAND, NOR, XNOR) shortens the body. A reduction
-    // (|a) has a lead before its body (REDUCE_LEAD), where its bus input fans out into bits (see reduceFan).
+    // (|a) has a lead before its body (REDUCE_LEAD): its one input, the whole bus, runs straight through it.
     const lead = isReduceType(t) ? REDUCE_LEAD : 0;
     const gx = x + lead;
     const gw = w - lead - sx;
@@ -386,7 +368,6 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     const top = y + (h - hb - sy) / 2;
     const bottom = top + hb;
     const inputs = n.ports.filter((q) => q.side === 'WEST');
-    const fanned = fannedInput(n);
     const first = Math.min(...inputs.map((q) => q.y));
     const last = Math.max(...inputs.map((q) => q.y));
     const back = [
@@ -412,7 +393,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       return (
         <g>
           {back}
-          {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
+          {stubs(n, edgeX, theme)}
           {joins(tips)}
           {stacked(gx, top, gateOf(d))}
           {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
@@ -431,7 +412,7 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
     };
     return (
       <g>
-        {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
+        {stubs(n, edgeX, theme)}
         {back}
         {joins(tips)}
         {stacked(gx, top, gateOf(body))}

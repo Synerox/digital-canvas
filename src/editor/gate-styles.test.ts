@@ -4,7 +4,7 @@
  *
  * - bitwise of a bus (`a | b`, `~a`): a stack of gates, one per bit (at most three drawn);
  * - logical (`a || b`, `a && b`, `!a`): one gate, the buses going straight into it, a 1-bit output;
- * - reduce (`|a`): one gate, its bus fanned out into bits just before it (see gate-mode.test).
+ * - reduce (`|a`): one gate, its one input (the whole bus) straight into it (see gate-mode.test).
  */
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
