@@ -85,8 +85,12 @@ describe('Inspector', () => {
       // Saved before modes existed: bitwise.
       newUserNode('u:3', 'nand', { params: { inputs: 2, width: 1 } }),
       newUserNode('u:4', 'not'),
+      newUserNode('u:5', 'xor'),
+      newUserNode('u:6', 'or', { params: { inputs: 3, width: 4, mode: 'logical' } }),
+      newUserNode('u:7', 'not', { params: { width: 4, mode: 'logical' } }),
+      newUserNode('u:8', 'buf'),
     ];
-    const edits = { ...emptyEdits(), nodes, next: 5 };
+    const edits = { ...emptyEdits(), nodes, next: 9 };
     const netlist = effectiveDiagram('d', undefined, edits, () => undefined);
     const layout: LayoutResult = {
       module: 'd',
@@ -97,18 +101,26 @@ describe('Inspector', () => {
     };
     const show = (id: string) =>
       render({ files: {}, layout, netlist, sheet: 'd:d', path: [{ instance: 'd', module: 'd', drawn: true }], doc: { drawn: ['d'], sheets: { 'd:d': edits } }, selection: new Set([id]) });
-    const marked = (html: string) => [...html.matchAll(/aria-pressed="(true|false)" title="[^"]*">(Bitwise|Reduce)<\/button>/g)].map((m) => `${m[2]}:${m[1]}`);
+    const marked = (html: string) => [...html.matchAll(/aria-pressed="(true|false)" title="[^"]*">(Bitwise|Logical|Reduce)<\/button>/g)].map((m) => `${m[2]}:${m[1]}`);
     const fields = (html: string) => [...html.matchAll(/<span>([^<]+)<\/span>/g)].map((m) => m[1]);
-    expect(marked(show('u:1'))).toEqual(['Bitwise:true', 'Reduce:false']);
+    expect(marked(show('u:1'))).toEqual(['Bitwise:true', 'Logical:false', 'Reduce:false']);
     expect(fields(show('u:1'))).toEqual(['Mode', 'Inputs', 'Width (bits)']);
-    expect(marked(show('u:2'))).toEqual(['Bitwise:false', 'Reduce:true']);
+    expect(marked(show('u:2'))).toEqual(['Bitwise:false', 'Logical:false', 'Reduce:true']);
     expect(fields(show('u:2'))).toEqual(['Mode', 'Input width (bits)']);
-    expect(marked(show('u:3'))).toEqual(['Bitwise:true', 'Reduce:false']);
-    // Each gate says what its modes do as it is written.
-    const titles = (html: string) => [...html.matchAll(/title="([^"]*)">(?:Bitwise|Reduce)<\/button>/g)].map((m) => m[1].split(':')[0]);
-    expect(titles(show('u:1'))).toEqual(['a | b', '|a']);
-    expect(titles(show('u:3'))).toEqual(['~(a &amp; b)', '~&amp;a']);
-    expect(show('u:4')).not.toContain('Mode');
+    expect(marked(show('u:3'))).toEqual(['Bitwise:true', 'Logical:false', 'Reduce:false']);
+    // Each gate says what its modes do as it is written; a XOR has no logical mode (Verilog has no ^^).
+    const titles = (html: string) => [...html.matchAll(/title="([^"]*)">(?:Bitwise|Logical|Reduce)<\/button>/g)].map((m) => m[1].split(':')[0]);
+    expect(titles(show('u:1'))).toEqual(['a | b', 'a || b', '|a']);
+    expect(titles(show('u:3'))).toEqual(['~(a &amp; b)', '!(a &amp;&amp; b)', '~&amp;a']);
+    expect(titles(show('u:5'))).toEqual(['a ^ b', '^a']);
+    // A NOT: ~a or !a; a logical gate has its inputs, each Width bits, and a 1-bit output.
+    expect(marked(show('u:4'))).toEqual(['Bitwise:true', 'Logical:false']);
+    expect(titles(show('u:4'))).toEqual(['~a', '!a']);
+    expect(marked(show('u:6'))).toEqual(['Bitwise:false', 'Logical:true', 'Reduce:false']);
+    expect(fields(show('u:6'))).toEqual(['Mode', 'Inputs', 'Input width (bits)']);
+    expect(marked(show('u:7'))).toEqual(['Bitwise:false', 'Logical:true']);
+    expect(fields(show('u:7'))).toEqual(['Mode', 'Input width (bits)']);
+    expect(show('u:8')).not.toContain('Mode');
   });
 
   it('says why a wire is flagged: its width, or a second wire into the same input', () => {

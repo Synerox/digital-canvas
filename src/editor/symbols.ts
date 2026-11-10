@@ -52,35 +52,62 @@ export type SymKey =
 export type ParamName = 'width' | 'inputs' | 'value' | 'module' | 'shift' | 'parts' | 'style' | 'mode';
 
 /**
- * What a logic gate (AND, OR, XOR, NAND, NOR, XNOR) does with its bits:
+ * What a logic gate (AND, OR, XOR, NAND, NOR, XNOR) or a NOT does with its bits:
  *
- * - `bitwise` (the default): `a | b`. Its inputs and its output are `width` bits each; bit k of the output is
- *   the gate of bit k of every input. One gate with a `/3` bus mark is three gates side by side, as textbooks
- *   draw it.
- * - `reduce`: `|a`, Verilog's reduction operators (`&a`, `|a`, `^a`, `~&a`, `~|a`, `~^a`). One input of
- *   `width` bits, one 1-bit output: the gate of all the bits of its input. Its `inputs` setting is kept for when
- *   it is a bitwise gate again.
+ * - `bitwise` (the default): `a | b`, `~a`. Its inputs and its output are `width` bits each; bit k of the output is
+ *   the gate of bit k of every input. A bitwise gate of a bus is that many gates side by side: it is drawn as a
+ *   stack of gates (see stackedGates in layout/elk-layout), as HDLBits and textbooks draw a vector gate.
+ * - `logical`: `a || b`, `a && b`, `!a`, Verilog's logical operators (and `!(a && b)`, `!(a || b)` for a NAND and a
+ *   NOR). Its inputs are `width` bits each, its output is 1 bit: each input counts as true when any of its bits is
+ *   1. Drawn as one gate with the buses going straight into it. AND, OR, NAND, NOR and NOT have it (Verilog has no
+ *   logical XOR).
+ * - `reduce`: `|a`, Verilog's reduction operators (`&a`, `|a`, `^a`, `~&a`, `~|a`, `~^a`). One input of `width`
+ *   bits, one 1-bit output: the gate of all the bits of its input, drawn as one gate with its bus fanned out into
+ *   bits just before it. Its `inputs` setting is kept for when it has inputs again. A NOT has no reduce mode.
  */
-export type GateMode = 'bitwise' | 'reduce';
+export type GateMode = 'bitwise' | 'logical' | 'reduce';
 
-/** The gates that have a reduce mode (see GateMode). */
+/** The two-input gates (see GateMode); with the NOT, the symbols that have a mode (see gateModesOf). */
 export const GATE_SYMS: readonly SymKey[] = ['and', 'or', 'xor', 'nand', 'nor', 'xnor'];
 
-/** How Verilog writes what a gate does, in each mode: `a & b` and `&a` for an AND, `~(a | b)` and `~|a` for a NOR. */
-export function gateNotation(sym: SymKey): Record<GateMode, string> {
-  const op = sym === 'and' || sym === 'nand' ? '&' : sym === 'xor' || sym === 'xnor' ? '^' : '|';
-  const not = sym === 'nand' || sym === 'nor' || sym === 'xnor';
-  return { bitwise: not ? `~(a ${op} b)` : `a ${op} b`, reduce: `${not ? '~' : ''}${op}a` };
+/** The modes the symbol `sym` has, the default first; none for a symbol without a mode. */
+export function gateModesOf(sym: SymKey): readonly GateMode[] {
+  if (sym === 'xor' || sym === 'xnor') return ['bitwise', 'reduce'];
+  if (sym === 'not') return ['bitwise', 'logical'];
+  return GATE_SYMS.includes(sym) ? ['bitwise', 'logical', 'reduce'] : [];
 }
 
-/** Whether a symbol is a logic gate that has a mode (see GateMode). */
+/** Whether the symbol `sym` has a mode (see GateMode): a logic gate or a NOT. */
+export function hasMode(sym: SymKey): boolean {
+  return gateModesOf(sym).length > 0;
+}
+
+/**
+ * How Verilog writes what the symbol `sym` does, in each of its modes: `a & b`, `a && b` and `&a` for an AND,
+ * `~(a | b)`, `!(a || b)` and `~|a` for a NOR, `~a` and `!a` for a NOT.
+ */
+export function gateNotation(sym: SymKey): Partial<Record<GateMode, string>> {
+  if (sym === 'not') return { bitwise: '~a', logical: '!a' };
+  const op = sym === 'and' || sym === 'nand' ? '&' : sym === 'xor' || sym === 'xnor' ? '^' : '|';
+  const not = sym === 'nand' || sym === 'nor' || sym === 'xnor';
+  const out: Partial<Record<GateMode, string>> = { bitwise: not ? `~(a ${op} b)` : `a ${op} b`, reduce: `${not ? '~' : ''}${op}a` };
+  if (gateModesOf(sym).includes('logical')) out.logical = not ? `!(a ${op}${op} b)` : `a ${op}${op} b`;
+  return out;
+}
+
+/** Whether a symbol is a two-input logic gate (AND, OR, XOR, NAND, NOR, XNOR; see GateMode). */
 export function isGateSym(sym: SymKey): boolean {
   return GATE_SYMS.includes(sym);
 }
 
-/** The mode a gate is drawn in: `reduce` only when its settings say so. */
-export function gateMode(params: Pick<SymParams, 'mode'>): GateMode {
-  return params.mode === 'reduce' ? 'reduce' : 'bitwise';
+/**
+ * The mode a gate is drawn in: the one its settings say, when it is a mode of `sym` (a XOR has no logical mode);
+ * otherwise bitwise.
+ */
+export function gateMode(params: Pick<SymParams, 'mode'>, sym?: SymKey): GateMode {
+  const m = params.mode;
+  if (m !== 'logical' && m !== 'reduce') return 'bitwise';
+  return !sym || gateModesOf(sym).includes(m) ? m : 'bitwise';
 }
 
 export interface SymParams {
@@ -98,7 +125,7 @@ export interface SymParams {
   shift?: number;
   /** How a pin is drawn: its name in a label outline (the default) or as text only (see PinStyle). */
   style?: PinStyle;
-  /** What a logic gate does with its bits: `a | b` (bitwise, the default) or `|a` (reduce). See GateMode. */
+  /** What a logic gate or a NOT does with its bits: `a | b` (bitwise, the default), `a || b` (logical) or `|a` (reduce). See GateMode. */
   mode?: GateMode;
 }
 
@@ -170,13 +197,14 @@ export const SYMBOLS: SymbolDef[] = [
   { key: 'inout', title: 'Inout', group: 'Ports & labels', hint: 'Bidirectional module pin', defaults: { width: 1, style: 'label' }, params: ['width', 'style'], named: true },
   { key: 'const', title: 'Constant', group: 'Ports & labels', hint: "Constant value such as 4'd2", defaults: { value: "1'b0" }, params: ['value'] },
   { key: 'text', title: 'Note', group: 'Ports & labels', hint: 'Free text (not connected)', defaults: {}, params: [], named: true },
-  { key: 'and', title: 'AND', group: 'Logic gates', hint: 'AND gate: a & b, or &a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
-  { key: 'or', title: 'OR', group: 'Logic gates', hint: 'OR gate: a | b, or |a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'and', title: 'AND', group: 'Logic gates', hint: 'AND gate: a & b, a && b (Mode: Logical) or &a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'or', title: 'OR', group: 'Logic gates', hint: 'OR gate: a | b, a || b (Mode: Logical) or |a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
   { key: 'xor', title: 'XOR', group: 'Logic gates', hint: 'XOR gate: a ^ b, or ^a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
-  { key: 'nand', title: 'NAND', group: 'Logic gates', hint: 'NAND gate: ~(a & b), or ~&a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
-  { key: 'nor', title: 'NOR', group: 'Logic gates', hint: 'NOR gate: ~(a | b), or ~|a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'nand', title: 'NAND', group: 'Logic gates', hint: 'NAND gate: ~(a & b), !(a && b) (Mode: Logical) or ~&a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
+  { key: 'nor', title: 'NOR', group: 'Logic gates', hint: 'NOR gate: ~(a | b), !(a || b) (Mode: Logical) or ~|a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
   { key: 'xnor', title: 'XNOR', group: 'Logic gates', hint: 'XNOR gate: ~(a ^ b), or ~^a (Mode: Reduce)', defaults: GATE_DEFAULTS, params: GATE_PARAMS },
-  { key: 'not', title: 'NOT', group: 'Logic gates', hint: 'Inverter', defaults: { width: 1 }, params: ['width'] },
+  // A NOT got its mode after the gates: "mode" comes after "width" in its JSON.
+  { key: 'not', title: 'NOT', group: 'Logic gates', hint: 'Inverter: ~a, or !a (Mode: Logical)', defaults: { width: 1, mode: 'bitwise' }, params: ['width', 'mode'] },
   { key: 'buf', title: 'Buffer', group: 'Logic gates', hint: 'Buffer', defaults: { width: 1 }, params: ['width'] },
   { key: 'add', title: 'Adder', group: 'Arithmetic', hint: 'A + B', defaults: { width: 4 }, params: ['width'] },
   { key: 'sub', title: 'Subtractor', group: 'Arithmetic', hint: 'A − B', defaults: { width: 4 }, params: ['width'] },
@@ -261,6 +289,18 @@ export const REDUCE_CELL: Partial<Record<SymKey, string>> = {
   nor: 'dc:reduce_nor',
 };
 
+/**
+ * The cell a gate or a NOT in logical mode is: Yosys' logical cell where Yosys has one (`!(a && b)` is a `&&` and a
+ * `!` in Yosys; the rules draw that pair as one dc:logic_nand, see rules.ts).
+ */
+export const LOGIC_CELL: Partial<Record<SymKey, string>> = {
+  and: '$logic_and',
+  or: '$logic_or',
+  nand: 'dc:logic_nand',
+  nor: 'dc:logic_nor',
+  not: '$logic_not',
+};
+
 const OP_LABEL: Record<string, string> = {
   $and: '&',
   $or: '|',
@@ -274,6 +314,11 @@ const OP_LABEL: Record<string, string> = {
   $reduce_xnor: '~^',
   'dc:reduce_nand': '~&',
   'dc:reduce_nor': '~|',
+  $logic_and: '&&',
+  $logic_or: '||',
+  'dc:logic_nand': '!&&',
+  'dc:logic_nor': '!||',
+  $logic_not: '!',
   $not: '~',
   'dc:buf': '',
   $add: '+',
@@ -449,16 +494,28 @@ function symbolShape(u: UserNode, iface: InterfaceOf): DNode {
         case 'nand':
         case 'nor':
         case 'xnor': {
-          if (gateMode(p) === 'reduce') {
+          const mode = gateMode(p, u.sym);
+          if (mode === 'reduce') {
             // |a: all the bits of one input into one bit (see GateMode), drawn as Yosys' reduction cell.
             const t = REDUCE_CELL[u.sym]!;
             return { id, kind: 'cell', label: OP_LABEL[t], cellType: t, ports: [port(id, 'A', 'in', 'WEST', w), port(id, 'Y', 'out', 'EAST', 1)] };
           }
           const n = clampParam('inputs', p.inputs, drawnWithout(u.sym, 'inputs'));
           const ins = Array.from({ length: n }, (_, k) => port(id, gateInputName(k), 'in', 'WEST', w));
+          if (mode === 'logical') {
+            // a || b: every input a bus of Width bits, true when any of its bits is 1; a 1-bit output (see GateMode).
+            const t = LOGIC_CELL[u.sym]!;
+            return { id, kind: 'cell', label: OP_LABEL[t], cellType: t, ports: [...ins, port(id, 'Y', 'out', 'EAST', 1)] };
+          }
           return cell([...ins, port(id, 'Y', 'out', 'EAST', w)]);
         }
         case 'not':
+          if (gateMode(p, u.sym) === 'logical') {
+            // !a: 1 when every bit of a is 0 (see GateMode).
+            const t = LOGIC_CELL.not!;
+            return { id, kind: 'cell', label: OP_LABEL[t], cellType: t, ports: [port(id, 'A', 'in', 'WEST', w), port(id, 'Y', 'out', 'EAST', 1)] };
+          }
+          return cell([port(id, 'A', 'in', 'WEST', w), port(id, 'Y', 'out', 'EAST', w)]);
         case 'buf':
           return cell([port(id, 'A', 'in', 'WEST', w), port(id, 'Y', 'out', 'EAST', w)]);
         case 'eq':

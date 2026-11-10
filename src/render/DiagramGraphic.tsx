@@ -5,7 +5,7 @@
 import type { JSX } from 'react';
 import { pinStyleOf } from '../core/diagram';
 import type { LEdge, LNode, LayoutResult, Point } from '../layout/elk-layout';
-import { FONT, REDUCE_LEAD, approxMeasure, fannedInput, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, isReduceType, muxInset } from '../layout/elk-layout';
+import { FONT, REDUCE_LEAD, approxMeasure, fannedInput, gateBodyHeight, gateShape, invertsOutput, isAluType, isMuxType, isReduceType, muxInset, stackedGates } from '../layout/elk-layout';
 import type { Theme } from './theme';
 
 export interface GraphicProps {
@@ -22,6 +22,10 @@ export interface GraphicProps {
 }
 
 const STROKE = 1.4;
+
+/** The step from one gate of a stack (a bitwise gate of a bus, see stackedGates) to the next one behind it. */
+const STACK_DX = 3;
+const STACK_DY = 3;
 
 /** Space between the name of a pin drawn as text and its connection point (clear of the point's 6px hit circle). */
 const TEXT_PIN_GAP = 6;
@@ -340,17 +344,46 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
   }
 
   const gate = gateShape(t);
+  // A bitwise gate of a bus is that many gates: a stack of them, the first in front, each next one a step right and
+  // down (stackedGates). The stack fills the symbol: each gate is smaller by the steps of the others. The inputs go
+  // into the front gate, and every gate's output joins the output pin.
+  const copies = stackedGates(n);
+  const sx = (copies - 1) * STACK_DX;
+  const sy = (copies - 1) * STACK_DY;
+  /** Lines from the output of each gate of a stack (at `tips`) to the output pin; none for one gate. */
+  const joins = (tips: Point[]) =>
+    copies > 1 &&
+    tips.map((q, k) => <line key={`join${k}`} x1={q.x} y1={q.y} x2={x + w} y2={y + h / 2} stroke={theme.wire} strokeWidth={STROKE} strokeLinecap="round" />);
+  // A selected symbol's fill shows what is under it: under each gate of a stack goes a plain one, or the gates behind
+  // it would show through.
+  const underlay = copies > 1 && s.fill !== theme.fill;
+  /**
+   * The gates of a stack (one without a stack), back to front, the front one's corner at (x0, y0): `shape` draws one
+   * with its corner at (cx, cy), in the paint it is given.
+   */
+  const stacked = (x0: number, y0: number, shape: (cx: number, cy: number, fill: string, stroke: string) => JSX.Element) =>
+    Array.from({ length: copies }, (_, i) => copies - 1 - i).map((k) => {
+      const [cx, cy] = [x0 + k * STACK_DX, y0 + k * STACK_DY];
+      return (
+        <g key={`gate${k}`}>
+          {underlay && shape(cx, cy, theme.fill, 'none')}
+          {shape(cx, cy, s.fill, s.stroke)}
+        </g>
+      );
+    });
+  /** Where the output of each gate of a stack is, its gates `gw` wide and `gh` tall, the front one's corner at (x0, y0). */
+  const tipsOf = (x0: number, y0: number, gw: number, gh: number) => Array.from({ length: copies }, (_, k) => ({ x: x0 + k * STACK_DX + gw, y: y0 + k * STACK_DY + gh / 2 }));
   if (gate) {
     // The body is at most four inputs tall (gateBodyHeight), centred; with more inputs the back edge runs
     // on, straight, to the outer ones. A bubble on the output (NAND, NOR, XNOR) shortens the body. A reduction
     // (|a) has a lead before its body (REDUCE_LEAD), where its bus input fans out into bits (see reduceFan).
     const lead = isReduceType(t) ? REDUCE_LEAD : 0;
     const gx = x + lead;
-    const gw = w - lead;
+    const gw = w - lead - sx;
     const bubble = invertsOutput(t);
     const bw = bubble ? gw - 8 : gw;
-    const hb = gateBodyHeight(h);
-    const top = y + (h - hb) / 2;
+    const hb = gateBodyHeight(h) - sy;
+    const top = y + (h - hb - sy) / 2;
     const bottom = top + hb;
     const inputs = n.ports.filter((q) => q.side === 'WEST');
     const fanned = fannedInput(n);
@@ -362,28 +395,36 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       first < top && <line key="up" x1={gx} y1={first} x2={gx} y2={top} stroke={s.stroke} strokeWidth={s.width} />,
       last > bottom && <line key="down" x1={gx} y1={bottom} x2={gx} y2={last} stroke={s.stroke} strokeWidth={s.width} />,
     ];
-    const outBubble = bubble && <circle cx={x + w - 4} cy={y + h / 2} r={4} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />;
+    /** A gate of the body `d` (at its corner), with its bubble. */
+    const gateOf = (d: (cx: number, cy: number) => string) => (cx: number, cy: number, fill: string, stroke: string) => (
+      <>
+        <path d={d(cx, cy)} fill={fill} stroke={stroke} strokeWidth={s.width} strokeLinejoin="round" />
+        {bubble && <circle cx={cx + gw - 4} cy={cy + hb / 2} r={4} fill={fill} stroke={stroke} strokeWidth={s.width} />}
+      </>
+    );
+    const tips = tipsOf(gx, top, gw, hb);
     if (gate === 'and') {
       // Flat back, then a half ellipse (a half circle when the gate is as wide as it is tall).
       const rx = Math.min(hb / 2, bw / 2);
-      const d = `M${gx},${top} H${gx + bw - rx} A${rx},${hb / 2} 0 0 1 ${gx + bw - rx},${bottom} H${gx} Z`;
+      const d = (cx: number, ctop: number) => `M${cx},${ctop} H${cx + bw - rx} A${rx},${hb / 2} 0 0 1 ${cx + bw - rx},${ctop + hb} H${cx} Z`;
       const inverted = n.attrs?.invertB ? n.ports.find((q) => q.name === 'B') : undefined;
       const edgeX = () => lead;
       return (
         <g>
           {back}
           {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
-          <path d={d} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
+          {joins(tips)}
+          {stacked(gx, top, gateOf(d))}
           {inverted && <circle cx={x - 3.5} cy={inverted.y} r={3.5} fill={s.fill} stroke={s.stroke} strokeWidth={STROKE} />}
-          {outBubble}
         </g>
       );
     }
     // OR and XOR: a curved back, and two curves meeting in a point at the output.
-    const depth = Math.min(hb, gw) * 0.25;
-    const curve = (dx: number) => `M${gx + dx},${top} Q${gx + dx + depth},${top + hb / 2} ${gx + dx},${bottom}`;
-    const body = `M${gx},${top} Q${gx + bw * 0.6},${top} ${gx + bw},${top + hb / 2} Q${gx + bw * 0.6},${bottom} ${gx},${bottom} Q${gx + depth},${top + hb / 2} ${gx},${top} Z`;
-    // Inputs reach the curved back (those beyond the body end on its straight continuation).
+    const depth = Math.min(hb + sy, gw + sx) * 0.25;
+    const curve = (cx: number, ctop: number) => `M${cx},${ctop} Q${cx + depth},${ctop + hb / 2} ${cx},${ctop + hb}`;
+    const body = (cx: number, ctop: number) =>
+      `M${cx},${ctop} Q${cx + bw * 0.6},${ctop} ${cx + bw},${ctop + hb / 2} Q${cx + bw * 0.6},${ctop + hb} ${cx},${ctop + hb} Q${cx + depth},${ctop + hb / 2} ${cx},${ctop} Z`;
+    // Inputs reach the curved back of the gate in front (those beyond the body end on its straight continuation).
     const edgeX = (py: number) => {
       const tt = (py - (top - y)) / hb;
       return lead + (tt <= 0 || tt >= 1 ? 0 : 2 * (1 - tt) * tt * depth);
@@ -392,24 +433,34 @@ function CellShape({ n, p }: { n: LNode; p: GraphicProps }) {
       <g>
         {fanned ? reduceFan(n, fanned, edgeX, theme) : stubs(n, edgeX, theme)}
         {back}
-        <path d={body} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} strokeLinejoin="round" />
-        {gate === 'xor' && <path d={curve(-6)} fill="none" stroke={s.stroke} strokeWidth={s.width} />}
-        {outBubble}
+        {joins(tips)}
+        {stacked(gx, top, gateOf(body))}
+        {/* A XOR's second back curve: of the gate in front only (those behind would cross its inputs once more each). */}
+        {gate === 'xor' && <path d={curve(gx - 6, top)} fill="none" stroke={s.stroke} strokeWidth={s.width} />}
       </g>
     );
   }
   if (t === '$not' || t === '$logic_not' || t === 'dc:buf') {
+    // A triangle, with a bubble for a NOT; a bitwise NOT of a bus is a stack of them (see above).
     const br = t === 'dc:buf' ? 0 : 4;
+    const tw = w - sx;
+    const th = h - sy;
     return (
       <g>
-        <polygon
-          points={`${x},${y + 4} ${x + w - 2 * br},${y + h / 2} ${x},${y + h - 4}`}
-          fill={s.fill}
-          stroke={s.stroke}
-          strokeWidth={s.width}
-          strokeLinejoin="round"
-        />
-        {br > 0 && <circle cx={x + w - br} cy={y + h / 2} r={br} fill={s.fill} stroke={s.stroke} strokeWidth={s.width} />}
+        {p.interactive && copies > 1 && <rect x={x} y={y} width={w} height={h} fill="transparent" />}
+        {joins(tipsOf(x, y, tw, th))}
+        {stacked(x, y, (cx, cy, fill, stroke) => (
+          <>
+            <polygon
+              points={`${cx},${cy + 4} ${cx + tw - 2 * br},${cy + th / 2} ${cx},${cy + th - 4}`}
+              fill={fill}
+              stroke={stroke}
+              strokeWidth={s.width}
+              strokeLinejoin="round"
+            />
+            {br > 0 && <circle cx={cx + tw - br} cy={cy + th / 2} r={br} fill={fill} stroke={stroke} strokeWidth={s.width} />}
+          </>
+        ))}
       </g>
     );
   }

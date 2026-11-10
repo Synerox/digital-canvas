@@ -12,7 +12,7 @@ import { effectiveDiagram, setParams, toUserNode } from './sheet';
 import { GATE_SYMS, type InterfaceOf, type SymKey, type UserEdge, type UserNode, newUserNode, symbolNode } from './symbols';
 
 const noModules: InterfaceOf = () => undefined;
-const ports = (n: DNode) => n.ports.map((p) => `${p.name}:${p.dir}:${p.width}`);
+const ports = (n: Pick<DNode, 'ports'>) => n.ports.map((p) => `${p.name}:${p.dir}:${p.width}`);
 const wire = (id: string, from: string, fromPort: string, to: string, toPort: string): UserEdge => ({
   id,
   source: { node: from, port: `${from}.${fromPort}` },
@@ -63,8 +63,9 @@ describe('logic gates: bitwise (a | b) or reduce (|a)', () => {
       expect(fannedInput(reduce)?.name).toBe('A');
       expect(fannedInput(bitwise)).toBeUndefined();
     }
-    // NOT and Buffer have no mode.
-    expect(newUserNode('u:1', 'not').params).toEqual({ width: 1 });
+    // A NOT has a mode (bitwise or logical), a Buffer none.
+    expect(newUserNode('u:1', 'not').params).toEqual({ width: 1, mode: 'bitwise' });
+    expect(newUserNode('u:1', 'buf').params).toEqual({ width: 1 });
   });
 
   it('switching the mode keeps the wire on A and hides the others until the gate is bitwise again', () => {
@@ -106,9 +107,13 @@ describe('logic gates: bitwise (a | b) or reduce (|a)', () => {
   it('reads and writes "mode" in the JSON of symbols and components, and in saved files', () => {
     const r = parseComponents('[{ "name": "any8", "title": "OR of 8 bits", "base": "or", "width": 8, "mode": "reduce" }]');
     expect(r.defs?.[0].params).toEqual({ width: 8, mode: 'reduce' });
-    expect(parseComponents('[{ "name": "g", "base": "or", "mode": "unary" }]').error).toBe('g: "mode" is "bitwise" (a | b) or "reduce" (|a: one input, a 1-bit output).');
+    expect(parseComponents('[{ "name": "g", "base": "or", "mode": "unary" }]').error).toBe(
+      'g: "mode" is "bitwise" (a | b), "logical" (a || b: a 1-bit output) or "reduce" (|a: one input, a 1-bit output).',
+    );
     expect(parseComponents('[{ "name": "g", "base": "add", "mode": "reduce" }]').error).toMatch(/Adder has "width", not "mode"/);
-    expect(parseComponents('[{ "name": "g", "base": "not", "mode": "reduce" }]').error).toMatch(/NOT has "width", not "mode"/);
+    expect(parseComponents('[{ "name": "g", "base": "buf", "mode": "reduce" }]').error).toMatch(/Buffer has "width", not "mode"/);
+    expect(parseComponents('[{ "name": "g", "base": "not", "mode": "reduce" }]').error).toBe('g: "mode" is "bitwise" (~a) or "logical" (!a: a 1-bit output).');
+    expect(parseComponents('[{ "name": "g", "base": "xor", "mode": "logical" }]').error).toBe('g: "mode" is "bitwise" (a ^ b) or "reduce" (^a: one input, a 1-bit output).');
     // A reduce gate's JSON has no "inputs" (it has one); one written there anyway is kept for bitwise mode.
     expect(symbolJson('or', { inputs: 3, width: 8, mode: 'reduce' })).toBe('{\n  "sym": "or",\n  "width": 8,\n  "mode": "reduce"\n}');
     expect(symbolJson('or', { inputs: 3, width: 8, mode: 'bitwise' })).toBe('{\n  "sym": "or",\n  "inputs": 3,\n  "width": 8,\n  "mode": "bitwise"\n}');
@@ -192,7 +197,7 @@ endmodule
 `;
 
 describe('reductions imported from Verilog', () => {
-  it('are drawn as one gate each, ~&a and ~|a too, and !a of a bus as a NOR of its bits', async () => {
+  it('are drawn as one gate each, ~&a and ~|a too; !a of a bus is a logical NOT', async () => {
     const d = buildDiagram(await design({ 'r.v': V }), 'r');
     const cells = d.nodes.filter((n) => n.kind === 'cell');
     const typeOf = (out: string) => {
@@ -205,21 +210,22 @@ describe('reductions imported from Verilog', () => {
     expect(typeOf('even')).toBe('$reduce_xnor');
     expect(typeOf('nand_all')).toBe('dc:reduce_nand');
     expect(typeOf('none')).toBe('dc:reduce_nor');
-    expect(typeOf('zero')).toBe('dc:reduce_nor');
+    // !b of a bus is what it is written as: a logical NOT (one inverter, the bus into it, a 1-bit output).
+    expect(typeOf('zero')).toBe('$logic_not');
     expect(typeOf('u_bar')).toBe('$reduce_xnor');
     // A ! is as wide as what reads it (its other bits are 0): still one gate, of that output width.
     expect(typeOf('n4')).toBe('dc:reduce_nand');
     const add = d.nodes.find((n) => n.cellType === '$add')!;
     const notB = d.nodes.find((n) => n.id === d.edges.find((x) => x.target.port === `${add.id}.B`)!.source.node)!;
-    expect([notB.cellType, ...ports(notB)]).toEqual(['dc:reduce_nor', 'A:in:4', 'Y:out:4']);
+    expect([notB.cellType, ...ports(notB)]).toEqual(['$logic_not', 'A:in:4', 'Y:out:4']);
     // A 1-bit ! stays an inverter; a NOT of a named wire stays a NOT after its own gate.
     expect(typeOf('not_c')).toBe('$logic_not');
     expect(typeOf('t_bar')).toBe('$not');
     expect(cells.some((n) => n.cellType === '$reduce_or' && d.edges.some((x) => x.source.node === n.id && x.target.node === `out:t_bar`))).toBe(false);
-    // The NOT of ~(|b) & c is part of the NOR gate: nothing is left of it.
-    expect(cells.filter((n) => n.cellType === '$not' || n.cellType === '$logic_not').map((n) => n.id).sort()).toEqual(
-      cells.filter((n) => (n.cellType === '$not' || n.cellType === '$logic_not') && ['out:t_bar', 'out:not_c'].includes(d.edges.find((x) => x.source.node === n.id)?.target.node ?? '')).map((n) => n.id).sort(),
-    );
+    // The NOT of ~(|b) & c is part of the NOR gate: nothing is left of it. The NOTs left are those of t_bar, not_c,
+    // zero, and the !b added to b.
+    const readers = (n: DNode) => d.edges.filter((x) => x.source.node === n.id).map((x) => x.target.node);
+    expect(cells.filter((n) => n.cellType === '$not' || n.cellType === '$logic_not').flatMap(readers).sort()).toEqual([add.id, 'out:not_c', 'out:t_bar', 'out:zero'].sort());
     // Merged gates take the NOT's ID (the reduction's would now name ~&a where it named &a), and say what made them.
     const nand = cells.find((n) => n.cellType === 'dc:reduce_nand' && n.ports.find((p) => p.name === 'Y')!.width === 1)!;
     expect(nand.id).toMatch(/^cell:\$logic_not\{~&a\}/);
@@ -230,7 +236,7 @@ describe('reductions imported from Verilog', () => {
     // output is a copy as it is (a gate's output is one bit).
     const reductions = cells.filter((c) => fannedInput(c) || /reduce/.test(c.cellType ?? ''));
     const wide = reductions.filter((c) => c.ports.find((p) => p.name === 'Y')!.width > 1);
-    expect(wide).toHaveLength(2);
+    expect(wide).toHaveLength(1);
     for (const n of wide) expect(toUserNode(n, 'u:1', noModules).sym).toBe('raw');
     for (const n of reductions.filter((c) => !wide.includes(c))) {
       const u = toUserNode(n, 'u:1', noModules);
@@ -240,8 +246,11 @@ describe('reductions imported from Verilog', () => {
       expect(ports(drawn)).toEqual(ports(n));
       expect(sizeNode(drawn, approxMeasure)).toEqual(sizeNode({ ...n, id: 'u:1', ports: n.ports.map((p) => ({ ...p, id: `u:1.${p.name}` })) }, approxMeasure));
     }
-    // A bitwise gate copies as a bitwise one.
+    // A bitwise gate copies as a bitwise one; !b of a bus as a NOT in logical mode, the padded one into b + !b as it is.
     const and = cells.find((n) => n.cellType === '$and')!;
     expect(toUserNode(and, 'u:1', noModules).params).toEqual({ width: 1, inputs: 2, mode: 'bitwise' });
+    const zero = d.nodes.find((n) => n.id === d.edges.find((x) => x.target.node === 'out:zero')!.source.node)!;
+    expect(toUserNode(zero, 'u:1', noModules)).toMatchObject({ sym: 'not', params: { width: 4, mode: 'logical' } });
+    expect(toUserNode(notB, 'u:1', noModules).sym).toBe('raw');
   });
 });

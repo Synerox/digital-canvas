@@ -3,8 +3,9 @@
  * designers draw by hand. They always apply (there is no switch to draw the
  * structure as Yosys gives it): a left shift of the constant 1 is a decoder, a
  * MUX that selects a constant 0 is an AND gate, a reduction and a NOT of its
- * bit (`~|a`) is one NOR gate of all the bits (combineReductions), and (while building edges, see
- * buildDiagram) high-order zero padding into arithmetic is a plain wire and
+ * bit (`~|a`) is one NOR gate of all the bits and `!(a && b)` one logical NAND
+ * gate (combineReductions), and (while building edges, see buildDiagram)
+ * high-order zero padding into arithmetic is a plain wire and
  * low-order zero padding is labelled ×2ⁿ. A rewritten cell becomes a `dc:*`
  * cell that keeps the original stable ID, so saved positions still apply.
  *
@@ -99,13 +100,18 @@ export function applyRules(m: IRModule): IRModule {
   return { ...m, cells };
 }
 
-/** A reduction followed by a NOT of its bit: one reduction gate with a bubble on its output. */
-const NEGATED_REDUCTION: Record<string, string> = {
+/**
+ * A reduction followed by a NOT of its bit: one reduction gate with a bubble on its output. A logical AND or OR
+ * followed by a NOT of its bit (`!(a && b)`): one logical NAND or NOR gate.
+ */
+const NEGATED: Record<string, string> = {
   $reduce_and: 'dc:reduce_nand',
   $reduce_or: 'dc:reduce_nor',
   $reduce_bool: 'dc:reduce_nor',
   $reduce_xor: '$reduce_xnor',
   $reduce_xnor: '$reduce_xor',
+  $logic_and: 'dc:logic_nand',
+  $logic_or: 'dc:logic_nor',
 };
 
 /** How many times each bit is read: by cell inputs, and by module outputs (and inouts). */
@@ -118,12 +124,18 @@ function readCounts(m: IRModule): Map<number, number> {
 }
 
 /**
- * Reductions drawn as they are written (`~&a` is one NAND gate of all the bits of `a`, see GateMode in editor/symbols):
+ * Gates and their NOT drawn as they are written (`~&a` is one NAND gate of all the bits of `a`, `!(a && b)` one
+ * logical NAND gate; see GateMode in editor/symbols):
  *
  * - `~&a`, `~|a` (and `~(|a)`, `!(^a)`…): Yosys makes a reduction and a NOT of its one bit. They are one reduction
  *   gate with a bubble, when nothing else reads that bit and no signal of the code is that bit (a named wire is drawn
  *   between the two, as written). The gate takes the NOT's ID: an ID never names a different output.
- * - `!a` of a bus: the bus is all zeros, a NOR of all its bits (an inverter would read as `~a`, every bit inverted).
+ * - `!(a && b)`, `!(a || b)` (and `~(a && b)`…): a logical AND or OR and a NOT of its bit, the same way: one logical
+ *   NAND or NOR gate.
+ *
+ * A `!a` of a bus stays what it is, a logical NOT (true when every bit of `a` is 0), drawn as one inverter with the
+ * bus going into it: a NOT of a bus that inverts every bit (`~a`) is drawn as a stack of inverters (see
+ * stackedGates in layout/elk-layout).
  *
  * Applied after applyRules, apart from it: what selects a case of a case table is named by the cells before these
  * (see buildDiagram), so those names, and the IDs of the table's constants, stay what they were.
@@ -134,7 +146,7 @@ export function combineReductions(m: IRModule): IRModule {
   for (const n of m.nets) if (!n.hidden) for (const b of n.bits) if (typeof b === 'number') named.add(b);
   const driver = new Map<number, IRCell>();
   for (const c of m.cells) {
-    if (c.isInstance || !NEGATED_REDUCTION[c.type]) continue;
+    if (c.isInstance || !NEGATED[c.type]) continue;
     const y = c.connections.Y;
     if (y?.length === 1 && typeof y[0] === 'number') driver.set(y[0], c);
   }
@@ -148,33 +160,24 @@ export function combineReductions(m: IRModule): IRModule {
     if (a?.length !== 1 || !y?.length || (c.type === '$not' && y.length !== 1) || typeof a[0] !== 'number') continue;
     const r = driver.get(a[0]);
     if (!r || merged.has(r) || reads.get(a[0]) !== 1 || named.has(a[0])) continue;
-    // The NOT's ID, name and hidden flag: its output is what the gate drives now. The reduction's ID would change
-    // what its output pin means (`&a` became `~&a`) under wires and edits saved for it.
+    // The NOT's ID, name and hidden flag: its output is what the gate drives now. The gate's ID would change what its
+    // output pin means (`&a` became `~&a`) under wires and edits saved for it.
+    const logical = r.type === '$logic_and' || r.type === '$logic_or';
     merged.set(r, {
       ...r,
       id: c.id,
       name: c.name,
       hidden: c.hidden,
-      type: NEGATED_REDUCTION[r.type],
-      rule: 'reduce-not',
-      directions: { A: 'input', Y: 'output' },
-      connections: { A: r.connections.A, Y: y },
+      type: NEGATED[r.type],
+      rule: logical ? 'logic-not' : 'reduce-not',
+      directions: logical ? { A: 'input', B: 'input', Y: 'output' } : { A: 'input', Y: 'output' },
+      connections: logical ? { A: r.connections.A, B: r.connections.B, Y: y } : { A: r.connections.A, Y: y },
       src: [...r.src, ...c.src],
     });
     gone.add(c);
   }
-  const cells = m.cells
-    .filter((c) => !gone.has(c))
-    .map((c) => {
-      const r = merged.get(c);
-      if (r) return r;
-      // `!a` of a bus (a 1-bit `!` stays an inverter).
-      if (!c.isInstance && c.type === '$logic_not' && (c.connections.A?.length ?? 0) > 1 && c.connections.Y?.length) {
-        return { ...c, type: 'dc:reduce_nor', rule: 'logic-not' };
-      }
-      return c;
-    });
-  return merged.size || cells.some((c, k) => c !== m.cells[k]) ? { ...m, cells } : m;
+  if (!merged.size) return m;
+  return { ...m, cells: m.cells.filter((c) => !gone.has(c)).map((c) => merged.get(c) ?? c) };
 }
 
 /** Cell types whose operands are numbers, where zero padding means extension or scaling. */
