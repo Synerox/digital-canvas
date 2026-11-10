@@ -182,8 +182,10 @@ export const MAX_STACK = 3;
 
 /**
  * How many gates a symbol is drawn as: a bitwise gate (or NOT, or buffer) of a bus is as many gates as its output has
- * bits, drawn as a stack of gates, one behind the other (three for a bus of three bits or more, two for two; its bus
- * mark tells how many). 1 for any other symbol: a logical or a reduction gate is one gate, whatever its inputs.
+ * bits, drawn as a stack of gates, one behind the other (three for a bus of three bits or more, two for two; the bus
+ * mark of a wire of the whole output tells how many). 1 for any other symbol: a logical or a reduction gate is one
+ * gate, whatever its inputs. An imported gate whose output is read only in part (a 1-bit y = a & b of 4-bit buses)
+ * is still the gate Yosys made, of all its bits: its stack tells it from a logical gate (y = a && b).
  */
 export function stackedGates(n: { kind: DNode['kind']; cellType?: string; ports: readonly DPort[] }): number {
   if (n.kind !== 'cell' || !isBitwiseType(n.cellType)) return 1;

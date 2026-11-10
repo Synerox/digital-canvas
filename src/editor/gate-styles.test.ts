@@ -182,6 +182,11 @@ describe('logical mode in the editor', () => {
     expect(issues.flagged.size).toBe(0);
     expect(issues.messages).toEqual([]);
     expect(logical.nodes[2].params).toEqual({ inputs: 2, width: 3, mode: 'logical' });
+    // Reduce hides the wire on B (one input); logical has every input again, and that wire comes back.
+    const reduced = setParams(logical, 'u:3', { mode: 'reduce' }, noModules);
+    expect(effectiveDiagram('d', undefined, reduced, noModules).edges.map((x) => `${x.id}:${x.width}`)).toEqual(['w:1:3', 'w:3:1']);
+    const again = setParams(reduced, 'u:3', { mode: 'logical' }, noModules);
+    expect(effectiveDiagram('d', undefined, again, noModules).edges.map((x) => `${x.id}:${x.width}`)).toEqual(['w:1:3', 'w:2:3', 'w:3:1']);
     const back = setParams(logical, 'u:3', { mode: 'bitwise' }, noModules);
     expect(effectiveDiagram('d', undefined, back, noModules).edges.map((x) => `${x.id}:${x.width}`)).toEqual(['w:1:3', 'w:2:3', 'w:3:3']);
     // A NOT of a bus: ~a (as many bits out as in) or !a (one).
