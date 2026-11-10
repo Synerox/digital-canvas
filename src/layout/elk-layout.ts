@@ -120,6 +120,7 @@ export function gateShape(t: string | undefined): GateShape | undefined {
     case 'dc:and':
     case 'dc:nand':
     case 'dc:reduce_nand':
+    case 'dc:logic_nand':
       return 'and';
     case '$or':
     case '$logic_or':
@@ -127,6 +128,7 @@ export function gateShape(t: string | undefined): GateShape | undefined {
     case '$reduce_bool':
     case 'dc:nor':
     case 'dc:reduce_nor':
+    case 'dc:logic_nor':
       return 'or';
     case '$xor':
     case '$xnor':
@@ -140,7 +142,55 @@ export function gateShape(t: string | undefined): GateShape | undefined {
 
 /** Gates with a bubble on their output. */
 export function invertsOutput(t: string | undefined): boolean {
-  return t === 'dc:nand' || t === 'dc:nor' || t === '$xnor' || t === '$reduce_xnor' || t === 'dc:reduce_nand' || t === 'dc:reduce_nor';
+  return (
+    t === 'dc:nand' ||
+    t === 'dc:nor' ||
+    t === '$xnor' ||
+    t === '$reduce_xnor' ||
+    t === 'dc:reduce_nand' ||
+    t === 'dc:reduce_nor' ||
+    t === 'dc:logic_nand' ||
+    t === 'dc:logic_nor'
+  );
+}
+
+/**
+ * Logical gates (`a && b`, `a || b`, `!(a && b)`, `!(a || b)`, `!a`): each input is true when any of its bits is 1,
+ * the output is one bit. Drawn as one gate (or inverter), the buses going straight into it.
+ */
+export function isLogicType(t: string | undefined): boolean {
+  return t === '$logic_and' || t === '$logic_or' || t === '$logic_not' || t === 'dc:logic_nand' || t === 'dc:logic_nor';
+}
+
+/** Bitwise gates (`a & b`, `~a`…): bit k of the output is the gate of bit k of the inputs, so a bus of them is that many gates. */
+function isBitwiseType(t: string | undefined): boolean {
+  return (
+    t === '$and' ||
+    t === '$or' ||
+    t === '$xor' ||
+    t === '$xnor' ||
+    t === '$not' ||
+    t === 'dc:and' ||
+    t === 'dc:nand' ||
+    t === 'dc:nor' ||
+    t === 'dc:buf'
+  );
+}
+
+/** Most gates a stack is drawn with (see stackedGates): the bus mark on the output says how many there are. */
+export const MAX_STACK = 3;
+
+/**
+ * How many gates a symbol is drawn as: a bitwise gate (or NOT, or buffer) of a bus is as many gates as its output has
+ * bits, drawn as a stack of gates, one behind the other (three for a bus of three bits or more, two for two; the bus
+ * mark of a wire of the whole output tells how many). 1 for any other symbol: a logical or a reduction gate is one
+ * gate, whatever its inputs. An imported gate whose output is read only in part (a 1-bit y = a & b of 4-bit buses)
+ * is still the gate Yosys made, of all its bits: its stack tells it from a logical gate (y = a && b).
+ */
+export function stackedGates(n: { kind: DNode['kind']; cellType?: string; ports: readonly DPort[] }): number {
+  if (n.kind !== 'cell' || !isBitwiseType(n.cellType)) return 1;
+  const y = n.ports.find((p) => p.side === 'EAST');
+  return Math.max(1, Math.min(MAX_STACK, y?.width ?? 1));
 }
 
 /**

@@ -6,11 +6,11 @@
  * undo/redo can keep old versions as they are.
  */
 import { type DEdge, type DNode, type DPort, type Diagram, type PinStyle, isPinKind, pinStyleOf, withPinStyle } from '../core/diagram';
-import { GRID, type LayoutResult, type MeasureText, type Point, isReduceType, legacyCellSize, sizeNode } from '../layout/elk-layout';
+import { GRID, type LayoutResult, type MeasureText, type Point, isLogicType, isReduceType, legacyCellSize, sizeNode } from '../layout/elk-layout';
 import { scaleNote, wireShift } from './check';
 import { type Box, OUTLINES, type RouteRec, type SheetEdits, freeIdFloor } from './doc';
 import { polylineHitsRect } from './router';
-import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, isGateSym, symbolNode } from './symbols';
+import { type InterfaceOf, type ModulePort, PARAM_LIMITS, type SymKey, type SymParams, type UserEdge, type UserNode, clampParam, hasMode, symbolNode } from './symbols';
 import { verilogIdent } from './verilog-ident';
 import { type ComponentDef, componentSymbol, followsPreset, fullSettings, isPart, sameSettings } from './components';
 
@@ -654,6 +654,12 @@ const CELL_TO_SYM: Record<string, SymKey> = {
   $reduce_xnor: 'xnor',
   'dc:reduce_nand': 'nand',
   'dc:reduce_nor': 'nor',
+  // Logical gates are gates in logical mode (see GateMode).
+  $logic_and: 'and',
+  $logic_or: 'or',
+  'dc:logic_nand': 'nand',
+  'dc:logic_nor': 'nor',
+  $logic_not: 'not',
 };
 
 function signature(n: DNode): string {
@@ -716,6 +722,13 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
         if (signature(symbolNode(u, iface)) === signature(n)) return u;
         break;
       }
+      if (isLogicType(n.cellType)) {
+        // a && b, !a: its inputs as wide as the first one (a gate's inputs are all one width), a 1-bit output. One
+        // with inputs of other widths (a 4-bit a && a 1-bit b), or an output padded wider (c + !a), is a copy as it is.
+        const u: UserNode = { id, sym, params: { ...(sym === 'not' ? {} : { inputs: ins.length }), width: width('A'), mode: 'logical' } };
+        if (signature(symbolNode(u, iface)) === signature(n)) return u;
+        break;
+      }
       if (sym === 'decoder') params.width = width('A');
       else if (sym === 'dff' || sym === 'dffe' || sym === 'adff') params.width = width('D');
       else if (sym === 'shl' || sym === 'shr') {
@@ -724,7 +737,7 @@ export function toUserNode(n: DNode, id: string, iface: InterfaceOf): UserNode {
       } else if (['eq', 'ne', 'lt', 'le', 'gt', 'ge'].includes(sym)) params.width = width('A');
       else params.width = width('Y');
       if (['and', 'or', 'xor', 'nand', 'nor', 'xnor', 'mux'].includes(sym)) params.inputs = ins.length;
-      if (isGateSym(sym)) params.mode = 'bitwise';
+      if (hasMode(sym)) params.mode = 'bitwise';
       const u: UserNode = { id, sym, params };
       if (signature(symbolNode(u, iface)) === signature(n)) return u;
       break;

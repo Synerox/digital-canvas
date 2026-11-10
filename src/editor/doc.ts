@@ -14,7 +14,7 @@
 import { type DNode, type DPort, type NodeKind, type PinStyle, type Side, isPinKind } from '../core/diagram';
 import { GRID, type Point } from '../layout/elk-layout';
 import { type ComponentDef, followsPreset, loadComponents } from './components';
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam, drawnWithout, isGateSym } from './symbols';
+import { type GateMode, PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, type UserEdge, type UserNode, clampParam, drawnWithout, gateModesOf } from './symbols';
 
 export interface Box {
   x: number;
@@ -201,8 +201,9 @@ function userNode(v: unknown): UserNode | undefined {
   // Only a pin has a style (a frozen copy of a pin too: see symbolNode).
   const pin = sym === 'raw' ? isObj(v.raw) && isKind(v.raw.kind) && isPinKind(v.raw.kind) : !!SYMBOL_BY_KEY[sym]?.params.includes('style');
   if (pin && (p.style === 'label' || p.style === 'text')) params.style = p.style;
-  // Only a logic gate has a mode; a file from before modes has none: the gate is bitwise (see GateMode).
-  if (isGateSym(sym) && (p.mode === 'bitwise' || p.mode === 'reduce')) params.mode = p.mode;
+  // Only a logic gate or a NOT has a mode, one of its own; a file from before modes has none: the gate is bitwise
+  // (see GateMode).
+  if (typeof p.mode === 'string' && (gateModesOf(sym) as readonly string[]).includes(p.mode)) params.mode = p.mode as GateMode;
   const out: UserNode = { id: v.id, sym, params };
   if (isStr(v.name)) out.name = v.name;
   if (isStr(v.component) && sym !== 'raw' && sym !== 'block') out.component = v.component;

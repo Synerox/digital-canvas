@@ -191,6 +191,8 @@ const CELL_SYMBOL: Record<string, string> = {
   'dc:nor': '|',
   'dc:reduce_nand': '~&',
   'dc:reduce_nor': '~|',
+  'dc:logic_nand': '!&&',
+  'dc:logic_nor': '!||',
   'dc:buf': '',
   'dc:mux': 'MUX',
 };

@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { type Diagram, type PinStyle, isPinKind, pinStyleOf } from '../core/diagram';
 import { checkSheet, openInputsMessage, scaleNote, wireShift } from '../editor/check';
-import { type GateMode, PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, gateMode, gateNotation, literalWidth, type ParamName } from '../editor/symbols';
+import { type GateMode, PARAM_LIMITS, SYMBOL_BY_KEY, type SymKey, gateMode, gateModesOf, gateNotation, literalWidth, type ParamName } from '../editor/symbols';
 import { isDrawnKey } from '../editor/doc';
 import { verilogIdent } from '../editor/verilog-ident';
 import { deleteQuestion } from './drawing-list';
@@ -103,16 +103,19 @@ const PARAM_TITLE: Record<ParamName, string> = {
   mode: 'Mode',
 };
 
-/** The modes of a gate, with what each does, as the gate `sym` writes it (an AND: a & b, &a). */
+/** The modes of a gate or a NOT, with what each does, as the symbol `sym` writes it (an AND: a & b, a && b, &a). */
 const gateModes = (sym: SymKey): { mode: GateMode; text: string; title: string }[] => {
   const w = gateNotation(sym);
-  return [
-    { mode: 'bitwise', text: 'Bitwise', title: `${w.bitwise}: every input and the output are Width bits; one gate with /N is N gates side by side` },
-    { mode: 'reduce', text: 'Reduce', title: `${w.reduce}: one input of Width bits, a 1-bit output (all its bits into one)` },
-  ];
+  const ins = sym === 'not' ? 'the input' : 'every input';
+  const says: Record<GateMode, { text: string; title: string }> = {
+    bitwise: { text: 'Bitwise', title: `${w.bitwise}: ${ins} and the output are Width bits; a bus of them is drawn as a stack of gates, one per bit` },
+    logical: { text: 'Logical', title: `${w.logical}: ${ins} is Width bits, true when any of its bits is 1; a 1-bit output` },
+    reduce: { text: 'Reduce', title: `${w.reduce}: one input of Width bits, a 1-bit output (all its bits into one)` },
+  };
+  return gateModesOf(sym).map((mode) => ({ mode, ...says[mode] }));
 };
 
-/** What a gate does with its bits (see GateMode): Bitwise (a | b) or Reduce (|a). The mode it has is marked. */
+/** What a gate or a NOT does with its bits (see GateMode): Bitwise (a | b), Logical (a || b) or Reduce (|a). The mode it has is marked. */
 function GateModeField({ id, sym, mode }: { id: string; sym: SymKey; mode: GateMode }) {
   const setNodeParams = useStore((s) => s.setNodeParams);
   return (
@@ -380,9 +383,9 @@ export function Inspector() {
           [...def.params].sort((a, b) => Number(b === 'mode') - Number(a === 'mode')).map((p) => {
             // Below, for every pin (an imported one too).
             if (p === 'style') return null;
-            if (p === 'mode') return <GateModeField key={p} id={id} sym={user.sym} mode={gateMode(user.params)} />;
-            // A gate in reduce mode has one input (its count waits for bitwise mode).
-            if (p === 'inputs' && gateMode(user.params) === 'reduce') return null;
+            if (p === 'mode') return <GateModeField key={p} id={id} sym={user.sym} mode={gateMode(user.params, user.sym)} />;
+            // A gate in reduce mode has one input (its count waits for bitwise or logical mode).
+            if (p === 'inputs' && gateMode(user.params, user.sym) === 'reduce') return null;
             if (p === 'module') {
               const options = s.blockModules();
               return (
@@ -416,7 +419,14 @@ export function Inspector() {
             const cur = user.params[p] ?? def.defaults[p] ?? lo;
             return (
               <label key={p} className="prop">
-                <span>{p === 'width' && user.sym === 'decoder' ? 'Select bits' : p === 'width' && gateMode(user.params) === 'reduce' ? 'Input width (bits)' : PARAM_TITLE[p]}</span>
+                <span>
+                  {p === 'width' && user.sym === 'decoder'
+                    ? 'Select bits'
+                    : // Its output is 1 bit: Width is its inputs'.
+                      p === 'width' && gateMode(user.params, user.sym) !== 'bitwise'
+                      ? 'Input width (bits)'
+                      : PARAM_TITLE[p]}
+                </span>
                 <Field
                   value={String(cur)}
                   onCommit={(v) => s.setNodeParams(id, { [p]: Number(v) })}

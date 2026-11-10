@@ -209,10 +209,12 @@ describe('components in JSON', () => {
   });
 
   it('says what the JSON of a symbol sets', () => {
-    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits, "mode" "bitwise" (a & b) or "reduce" (&a: one input, a 1-bit output)');
-    // Each gate as it is written.
-    expect(settingsHint('nor')).toContain('"mode" "bitwise" (~(a | b)) or "reduce" (~|a: one input, a 1-bit output)');
+    expect(settingsHint('and')).toBe('"inputs" 2–32, "width" 1–256 bits, "mode" "bitwise" (a & b), "logical" (a && b: a 1-bit output) or "reduce" (&a: one input, a 1-bit output)');
+    // Each gate as it is written; a XOR has no logical mode, a NOT no reduce mode.
+    expect(settingsHint('nor')).toContain('"mode" "bitwise" (~(a | b)), "logical" (!(a || b): a 1-bit output) or "reduce" (~|a: one input, a 1-bit output)');
     expect(settingsHint('xnor')).toContain('"bitwise" (~(a ^ b)) or "reduce" (~^a:');
+    expect(settingsHint('not')).toBe('"width" 1–256 bits, "mode" "bitwise" (~a) or "logical" (!a: a 1-bit output)');
+    expect(settingsHint('buf')).toBe('"width" 1–256 bits');
     expect(settingsHint('decoder')).toBe('"width" 1–8 select bits');
     expect(settingsHint('const')).toBe('"value" a Verilog number such as "4\'d2"');
     expect(settingsHint('shl')).toBe('"width" 1–256 bits, "shift" 1–16 bits of the shift amount');
@@ -234,6 +236,12 @@ describe('components in JSON', () => {
     expect(componentStem('or', { inputs: 2, width: 8, mode: 'reduce' })).toBe('reduce_or8');
     // One bit: no number, and no Verilog keyword (and) to number either.
     expect(componentStem('and', { width: 1, mode: 'reduce' })).toBe('reduce_and');
+    // a || b of buses is no a | b: logic_or2x8, not or2x8.
+    expect(componentStem('or', { inputs: 2, width: 8, mode: 'logical' })).toBe('logic_or2x8');
+    expect(componentStem('not', { width: 8, mode: 'logical' })).toBe('logic_not8');
+    expect(componentStem('not', { width: 8 })).toBe('not8');
+    // A mode the symbol does not have is not its mode.
+    expect(componentStem('xor', { inputs: 2, width: 8, mode: 'logical' })).toBe('xor2x8');
     expect(freeComponentName([], componentStem('and', { width: 1, mode: 'reduce' }))).toBe('reduce_and');
   });
 });

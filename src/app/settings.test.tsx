@@ -79,7 +79,7 @@ describe('the JSON window', () => {
     expect(html).toContain('<b>AND</b>');
     expect(html).toContain('rows="6"');
     expect(html).toContain('{\n  &quot;sym&quot;: &quot;and&quot;,\n  &quot;inputs&quot;: 2,\n  &quot;width&quot;: 1,\n  &quot;mode&quot;: &quot;bitwise&quot;\n}</textarea>');
-    expect(html).toContain('Sets &quot;inputs&quot; 2–32, &quot;width&quot; 1–256 bits, &quot;mode&quot; &quot;bitwise&quot; (a &amp; b) or &quot;reduce&quot; (&amp;a: one input, a 1-bit output).');
+    expect(html).toContain('Sets &quot;inputs&quot; 2–32, &quot;width&quot; 1–256 bits, &quot;mode&quot; &quot;bitwise&quot; (a &amp; b), &quot;logical&quot; (a &amp;&amp; b: a 1-bit output) or &quot;reduce&quot; (&amp;a: one input, a 1-bit output).');
     expect(html).toContain('Save as a component');
   });
 

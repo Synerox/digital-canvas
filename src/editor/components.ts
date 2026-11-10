@@ -15,7 +15,7 @@
  * The text the user writes is read by parseComponents, which explains what is wrong; the
  * file loader reads the saved definitions with loadComponents, which drops what is wrong.
  */
-import { PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, gateMode, gateNotation, isGateSym, literalWidth } from './symbols';
+import { type GateMode, PARAM_LIMITS, SYMBOL_BY_KEY, type ModuleInterface, type ModulePort, type SymKey, type SymParams, type UserNode, gateMode, gateModesOf, gateNotation, hasMode, literalWidth } from './symbols';
 import { verilogIdent } from './verilog-ident';
 
 export interface ComponentDef {
@@ -50,11 +50,21 @@ export const COMPONENTS_EXAMPLE = `[
 ]
 `;
 
-/** What "mode" takes, as the errors and hints say it. */
-/** What "mode" takes, as the gate `sym` writes it: `"bitwise" (a & b) or "reduce" (&a: …)` for an AND. */
+/** What each mode does, as the errors and hints say it after the mode's notation. */
+const MODE_SAYS: Record<GateMode, (sym: SymKey) => string> = {
+  bitwise: () => '',
+  logical: () => ': a 1-bit output',
+  reduce: () => ': one input, a 1-bit output',
+};
+
+/**
+ * What "mode" takes, as the symbol `sym` writes it: `"bitwise" (a & b), "logical" (a && b: …) or "reduce" (&a: …)`
+ * for an AND, `"bitwise" (~a) or "logical" (!a: …)` for a NOT.
+ */
 const modeText = (sym: SymKey) => {
   const w = gateNotation(sym);
-  return `"bitwise" (${w.bitwise}) or "reduce" (${w.reduce}: one input, a 1-bit output)`;
+  const each = gateModesOf(sym).map((m) => `"${m}" (${w[m]}${MODE_SAYS[m](sym)})`);
+  return each.length > 1 ? `${each.slice(0, -1).join(', ')} or ${each[each.length - 1]}` : each.join('');
 };
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -73,7 +83,7 @@ function presetFields(base: SymKey): string[] {
  */
 function settingFields(sym: SymKey, params: SymParams): string[] {
   const fields = presetFields(sym);
-  return gateMode({ mode: params.mode ?? SYMBOL_BY_KEY[sym]?.defaults.mode }) === 'reduce' ? fields.filter((f) => f !== 'inputs') : fields;
+  return gateMode({ mode: params.mode ?? SYMBOL_BY_KEY[sym]?.defaults.mode }, sym) === 'reduce' ? fields.filter((f) => f !== 'inputs') : fields;
 }
 
 /** Whether a component is a part of its own (a module with pins), not a preset. */
@@ -175,8 +185,8 @@ function componentOf(v: unknown, k: number, taken: (name: string) => string | un
         continue;
       }
       if (key === 'mode') {
-        if (val !== 'bitwise' && val !== 'reduce') throw new Bad(`${where}: "mode" is ${modeText(base)}.`);
-        params.mode = val;
+        if (typeof val !== 'string' || !(gateModesOf(base) as readonly string[]).includes(val)) throw new Bad(`${where}: "mode" is ${modeText(base)}.`);
+        params.mode = val as GateMode;
         continue;
       }
       const lim = PARAM_LIMITS[key as keyof typeof PARAM_LIMITS];
@@ -490,11 +500,15 @@ export function parseSymbolJson(text: string, sym: SymKey): { params: SymParams;
 
 /**
  * The name a component of these settings of `sym` would have (see freeComponentName): and3, add8, mux4x8 (the count
- * of inputs or slices, and the width when it is a bus); reduce_or8 for a reduction of 8 bits, which is no 8-input OR.
+ * of inputs or slices, and the width when it is a bus); reduce_or8 for a reduction of 8 bits, which is no 8-input OR,
+ * and logic_or2x8 for an `a || b` of 8-bit buses, which is no or2x8 (`a | b`).
  */
 export function componentStem(sym: SymKey, p: SymParams): string {
   const wide = p.width !== undefined && p.width > 1 ? p.width : undefined;
-  if (isGateSym(sym) && gateMode(p) === 'reduce') return `reduce_${sym}${wide ?? ''}`;
+  const mode = hasMode(sym) ? gateMode(p, sym) : 'bitwise';
+  if (mode === 'reduce') return `reduce_${sym}${wide ?? ''}`;
+  // a && b of 8-bit buses: logic_and2x8, not the and2x8 of a & b.
+  if (mode === 'logical') return `logic_${componentStem(sym, { ...p, mode: 'bitwise' })}`;
   const count = p.inputs ?? p.parts;
   return `${sym}${count ?? ''}${wide !== undefined ? `${count !== undefined ? 'x' : ''}${wide}` : ''}`;
 }
